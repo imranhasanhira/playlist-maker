@@ -1,0 +1,73 @@
+targetDir: "Playlists"
+playlists:
+
+#Hindi Playlists
+  - name: Hindi-All
+    sources:
+      - ./Music/Hindi
+    exclusions: 
+      - ./Music/Hindi/youtube
+
+  - name: Youtube-Hindi
+    sources:
+      - ./Music/Hindi/youtube
+    exclusions:
+
+#Bangla Playlists
+
+  - name: Bangla-All
+    sources:
+      - ./Music/Bangla
+    exclusions:
+      - "./Music/Bangla/Deshattobodhok Gaan"
+      - "./Music/Bangla/Jagoroner Gaan"
+
+  - name: Bangla-Deshattobodhok
+    sources:
+      - "./Music/Bangla/Deshattobodhok Gaan"
+      - "./Music/Bangla/Jagoroner Gaan"
+    exclusions:
+
+  - name: Bangla-Country
+    sources:
+      - "./Music/Bangla/Polli Geeti"
+    exclusions:
+
+  - name: Bangla-Robindranath Tagore
+    sources:
+      - "./Music/Bangla/Sahana Bajpaie"
+      - "./Music/Bangla/RC Bonna"
+      - "./Music/Bangla/Sathinath"
+    exclusions:
+
+
+  - name: Bangla-Band
+    sources:
+      - "./Music/Bangla/Ark"
+      - "./Music/Bangla/James"
+      - "./Music/Bangla/Mila"
+      - "./Music/Bangla/Miles"
+      - "./Music/Bangla/Miles"
+      - "./Music/Bangla/Moheener Ghoraghuli"
+      - "./Music/Bangla/Nachiketa"
+      - "./Music/Bangla/Shironamhin"
+      - "./Music/Bangla/Souls"
+    exclusions:
+  
+#English Playlists
+
+  - name: English-All
+    sources:
+      - ./Music/English
+    exclusions:
+      - ./Music/English/youtube
+  
+  - name: Youtube-Hindi
+    sources:
+      - ./Music/Hindi/youtube
+    exclusions:
+  
+  - name: Youtube-Hindi
+    sources:
+      - ./Music/Hindi/youtube
+    exclusions:
