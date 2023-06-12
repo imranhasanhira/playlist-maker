@@ -6,6 +6,7 @@ import sys
 import yaml
 import pdb
 import argparse
+from pprint import pprint
 from pathlib import Path
 from mutagen.mp3 import MP3
 
@@ -22,12 +23,25 @@ parser = argparse.ArgumentParser(
     description='Makes Playlist from directories based on configuration',
     epilog='Text at the bottom of help')
 
+parser.add_argument("--sourceDir", help="The directory containing the music files")
 parser.add_argument("--targetDir", help="The directory where playlist files will be created. Dir will be created if not exists")
-parser.add_argument("--relativeToConfig", help="If true, the playlists files will be created in relative to the config file location")
+parser.add_argument("--relativeToConfig", action="store_true", help="If true, the playlists files will be created in relative to the config file location")
 parser.add_argument('configPath', help="The location of the playlist config file path")
 
 
 allErrors = []
+
+
+def findRightDir(dir1, dir2, relativeToConfig, configPath):
+    if dir1:
+        return dir1
+    elif dir2:
+        if os.path.isabs(dir2) or not relativeToConfig:
+            return dir2
+        else:
+            return os.path.join(os.path.dirname( os.path.abspath(configPath) ), dir2)
+    else:
+        self.targetDir = os.getcwd()
 
 class PlaylistConfig:
     name: str
@@ -36,27 +50,20 @@ class PlaylistConfig:
 
     def __init__(self, config):
         self.name = config['name']
-        self.sources = config['sources'] if config['sources'] else []
-        self.exclusions = config['exclusions'] if config['exclusions'] else []
+        self.sources = config['sources']
+        self.exclusions = config.get('exclusions', []) if ('exclusions' in config and config['exclusions'] is not None) else []
+        #print("{}: {} : {}".format(self.name, self.exclusions, 'exclusions' in config ))
 
 class MainConfig:
+    sourceDir: str
     targetDir: str
     playlists: [PlaylistConfig]
 
     def __init__(self, config, cliArgs):
 
-        if cliArgs.targetDir:
-            self.targetDir = cliArgs.targetDir
-        elif config['targetDir']:
-            configTargetDir = config['targetDir']
-            if os.path.isabs(configTargetDir):
-                self.targetDir = configTargetDir
-            elif cliArgs.relativeToConfig:
-                self.targetDir = os.path.join(os.path.dirname( os.path.abspath(cliArgs.configPath) ), configTargetDir)
-            else:
-                self.targetDir = configTargetDir
-        else:
-            self.targetDir = os.getcwd()
+        
+        self.targetDir = findRightDir(cliArgs.targetDir, config['targetDir'], cliArgs.relativeToConfig, cliArgs.configPath)
+        self.sourceDir = findRightDir(cliArgs.sourceDir, config['sourceDir'], cliArgs.relativeToConfig, cliArgs.configPath)
 
         self.playlists = []
         for pc in config['playlists']:
@@ -130,7 +137,8 @@ def main(args):
         mp3Files = set()
         totalAdded = 0
         for source in playlistConfig.sources:
-            for file in list_mp3_files(source):
+            xx = source if os.path.isabs(source) else os.path.join(mainConfig.sourceDir, source)
+            for file in list_mp3_files(xx):
                 #print("Adding {}".format(len(file)))
                 mp3Files.add(file)
                 totalAdded = totalAdded + 1
@@ -138,6 +146,7 @@ def main(args):
 
         totalExcluded = 0
         for exclusion in playlistConfig.exclusions:
+            xx = exclusion if os.path.isabs(exclusion) else os.path.join(mainConfig.sourceDir, exclusion)
             for file in list_mp3_files(exclusion):
                 #print("Removed {}".format(len(file)))
                 mp3Files.remove(file)
@@ -158,7 +167,7 @@ def main(args):
             ))
 
     if len(allErrors) > 0:
-        print("Found {} errors".format(len(allErrors)), file=sys.stderr)
+        print("\nFound {} errors".format(len(allErrors)), file=sys.stderr)
         for error in allErrors:
             print(error, file=sys.stderr)
 
