@@ -10,7 +10,6 @@ from pprint import pprint
 from pathlib import Path
 from mutagen.mp3 import MP3
 
-
 def validateTargetDir(targetDir):
     
     if os.path.isabs(configTargetDir):
@@ -26,6 +25,7 @@ parser = argparse.ArgumentParser(
 parser.add_argument("--sourceDir", help="The directory containing the music files")
 parser.add_argument("--targetDir", help="The directory where playlist files will be created. Dir will be created if not exists")
 parser.add_argument("--relativeToConfig", action="store_true", help="If true, the playlists files will be created in relative to the config file location")
+parser.add_argument("--formats", default="mp3,aac,ogg,wma,alac,m4a,wav,flac", help="Comma separated list of file formats to be included in the playlist files.")
 parser.add_argument('configPath', help="The location of the playlist config file path")
 
 
@@ -57,6 +57,7 @@ class PlaylistConfig:
 class MainConfig:
     sourceDir: str
     targetDir: str
+    formats: []
     playlists: [PlaylistConfig]
 
     def __init__(self, config, cliArgs):
@@ -64,7 +65,7 @@ class MainConfig:
         
         self.targetDir = findRightDir(cliArgs.targetDir, config['targetDir'], cliArgs.relativeToConfig, cliArgs.configPath)
         self.sourceDir = findRightDir(cliArgs.sourceDir, config['sourceDir'], cliArgs.relativeToConfig, cliArgs.configPath)
-
+        self.formats = cliArgs.formats.lower().split(',')
         self.playlists = []
         for pc in config['playlists']:
             self.playlists.append(PlaylistConfig(pc))
@@ -73,7 +74,7 @@ def readConfig(configFilePath):
     with open(configFilePath, "r") as stream:
         return yaml.safe_load(stream)
 
-def list_mp3_files(folder):
+def listMusicFiles(mainConfig, folder):
 
     if not os.path.exists(folder):
         allErrors.append(f"ERROR: Folder not found: {folder}")
@@ -83,7 +84,8 @@ def list_mp3_files(folder):
     mp3_files = []
     for root, dirs, files in os.walk(folder):
         for file in files:
-            if file.lower().endswith('.mp3'):
+            name, extension = os.path.splitext(file)
+            if len(extension)>1 and extension[1:].lower() in mainConfig.formats:
                 path = os.path.join(root, file)
                 mp3_files.append(path)
 
@@ -138,7 +140,7 @@ def main(args):
         totalAdded = 0
         for source in playlistConfig.sources:
             xx = source if os.path.isabs(source) else os.path.join(mainConfig.sourceDir, source)
-            for file in list_mp3_files(xx):
+            for file in listMusicFiles(mainConfig, xx):
                 #print("Adding {}".format(len(file)))
                 mp3Files.add(file)
                 totalAdded = totalAdded + 1
@@ -147,7 +149,7 @@ def main(args):
         totalExcluded = 0
         for exclusion in playlistConfig.exclusions:
             xx = exclusion if os.path.isabs(exclusion) else os.path.join(mainConfig.sourceDir, exclusion)
-            for file in list_mp3_files(exclusion):
+            for file in listMusicFiles(mainConfig, exclusion):
                 #print("Removed {}".format(len(file)))
                 mp3Files.remove(file)
                 totalExcluded = totalExcluded + 1
