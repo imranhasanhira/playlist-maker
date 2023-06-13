@@ -2,6 +2,27 @@
 
 I needed a program to create m3u playlist files based on a configuration. This helps to regenerate the playlist in case of new music added/removed or sub directories updates. All you need is to update playlist config.
 
+## Command line parameters
+
+```
+python3 playlist_generator.py -h
+usage: PlaylistMaker [-h] [--sourceDir SOURCEDIR] [--targetDir TARGETDIR] [--relativeToConfig] [--formats FORMATS] configPath
+
+Makes Playlist from directories based on configuration
+
+positional arguments:
+  configPath            The location of the playlist config file path
+
+options:
+  -h, --help            show this help message and exit
+  --sourceDir SOURCEDIR
+                        The directory containing the music files
+  --targetDir TARGETDIR
+                        The directory where playlist files will be created. Dir will be created if not exists
+  --relativeToConfig    If true, the playlists files will be created in relative to the config file location
+  --formats FORMATS     Comma separated list of file formats to be included in the playlist files.
+```
+
 ## Install & Run
 
 1. Activate virtual env (Skip if already available)
