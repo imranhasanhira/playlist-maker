@@ -1,5 +1,5 @@
-sourceDir: "./Music"
-targetDir: "./Playlists"
+#sourceDir: "./Music"
+#targetDir: "./Playlists"
 
 
 playlists:
