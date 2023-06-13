@@ -1,0 +1,36 @@
+sourceDir: "./Music"
+targetDir: "./Playlists"
+
+
+playlists:
+
+#Bangla Playlists
+  - name: Bangla - Rabindrashangeet
+    sources:
+      - ./Music/Bangla/Bonna
+      - ./Music/Bangla/Indrani
+      - ./Music/Bangla/Shahana
+    exclusions: 
+      - ./Music/Bangla/Nazrul # :p
+
+  - name: Bangla - Bands
+    sources:
+      - ./Music/Bangla/Souls
+      - ./Music/Bangla/Shironamhin
+      - ./Music/Bangla/Warfaze
+      - ./Music/Bangla/James
+    exclusions:
+  
+#English Playlists
+
+  - name: English - Beetles
+    sources:
+      - ./Music/English/Beetles
+    exclusions:
+  
+  - name: English - All
+    sources:
+      - ./Music/English
+    exclusions:
+      - ./Music/English/youtube
+  
