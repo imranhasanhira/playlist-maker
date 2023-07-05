@@ -2,7 +2,33 @@
 
 I needed a program to create m3u playlist files based on a configuration. This helps to regenerate the playlist in case of new music added/removed or sub directories updates. All you need is to update playlist config.
 
-## Command line parameters
+## Install
+
+1. Activate virtual env (Skip if already available)
+```
+python3 -m venv venv
+source venv/bin/activate
+```
+
+2. Install requirements
+```
+pip3 install -r requirements.txt
+```
+
+
+
+## Run & Command line parameters
+
+
+### Playlist Maker
+
+Run the program via this command
+
+```
+python3 playlist_generator.py  <config file path>
+```
+
+Full Parameter list 
 
 ```
 python3 playlist_generator.py -h
@@ -23,26 +49,30 @@ options:
   --formats FORMATS     Comma separated list of file formats to be included in the playlist files.
 ```
 
-## Install & Run
 
-1. Activate virtual env (Skip if already available)
-```
-python3 -m venv venv
-source venv/bin/activate
-```
-
-2. Install requirements
-```
-pip3 install -r requirements.txt
-```
-
-3. Run the program
-```
-python3 playlist_generator.py  <config file path>
-```
+### File name sanitizer
 
 
-## Sample yaml config
+```
+python3 sanitizer.py --help
+usage: Music file sanitizer [-h] [--formats FORMATS] [--wet] [--fullpath] [--sanitize] [--clean-hidden] dir
+
+Cleanup unwanted texts from file names, audio data
+
+positional arguments:
+  dir                The directory where files are located
+
+options:
+  -h, --help         show this help message and exit
+  --formats FORMATS  Comma separated list of file formats to be included in the playlist files.
+  --wet              The flag to actually do the change. If not passed, it will only show what will be changed
+  --fullpath         If true, dry run will print full file path
+  --sanitize         If true, it will sanitize the files names
+  --clean-hidden     If true, it will delete all hidden files (filename startswith dot(.) )
+```
+
+
+## Sample yaml config for playlist maker
 
 ```
 sourceDir: "./Music"                      # The directory path where music files are located

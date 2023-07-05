@@ -10,12 +10,6 @@ from pprint import pprint
 from pathlib import Path
 from mutagen.mp3 import MP3
 
-def validateTargetDir(targetDir):
-    
-    if os.path.isabs(configTargetDir):
-        raise ValueError  # or TypeError, or `argparse.ArgumentTypeError
-    return astring
-
 
 parser = argparse.ArgumentParser(
     prog='PlaylistMaker',
