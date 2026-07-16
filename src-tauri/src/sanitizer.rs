@@ -20,30 +20,12 @@ pub struct HiddenFileItem {
     pub size_bytes: u64,
 }
 
-// Replicate Python's sanitizeText
-pub fn sanitize_text(original_text: &str) -> String {
+// Replicate Python's sanitizeText with customizable strip_phrases
+pub fn sanitize_text(original_text: &str, strip_phrases: &[String]) -> String {
     let mut new_text = original_text.to_string();
 
-    let parts = vec![
-        "music.com.bd", "SVF", "Tseries",
-        "Full Video", "Full audio", "Full HD", "Full Song",
-        "New Video", "New Song", "New audio",
-        "High Quality", "best song", "best Quality", "Best Audio", "best video", "best movie",
-        "With Lyrics", "Lyrical",
-        "The Movie",
-        "Hindi Film", "Super Hindi Album", "Hindi Album",
-        "ENGlish subtitle", "bangla subtitle", "Eng subtitle", "Eng Sub",
-        "Bengali Film", "Bengla Film" , "Bangla Movie", "Eskay Movies",
-        "Bangla New Song", "new Bangla song", "new song", "bangla song",
-        "Film","Movie", "Songs", "Song", "Music", "Audio",
-        "SUBTITLE", "sub title", "Title", "Lyrics", "Lyric", "Video",
-        "Quality", "Original", "Official",
-        "DVD", "Blue Ray",
-        "＂"
-    ];
-
     // Remove keywords case-insensitively
-    for part in parts {
+    for part in strip_phrases {
         if let Ok(re) = RegexBuilder::new(&regex::escape(part))
             .case_insensitive(true)
             .build()
@@ -115,6 +97,7 @@ pub fn sanitize_text(original_text: &str) -> String {
 pub fn scan_sanitize_files(
     folder: &Path,
     formats: &[String],
+    strip_phrases: &[String],
 ) -> Result<Vec<SanitizeItem>, String> {
     if !folder.exists() {
         return Err(format!("Folder does not exist: {}", folder.display()));
@@ -134,7 +117,7 @@ pub fn scan_sanitize_files(
                 // Check extension
                 if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                     if formats_set.contains(&ext.to_lowercase()) {
-                        let sanitized = sanitize_text(file_name);
+                        let sanitized = sanitize_text(file_name, strip_phrases);
                         if sanitized != file_name && !sanitized.is_empty() {
                             let original_path = path.to_string_lossy().to_string();
                             let relative_path = pathdiff::diff_paths(path, folder)
