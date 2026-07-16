@@ -9,6 +9,7 @@ type PlaylistViewProps = {
   setConfig: (config: MainConfig | null) => void;
   formats: string;
   onPlayTrack: (track: AudioTrack) => void;
+  relativeToConfig: boolean;
 };
 
 type TrackPreview = {
@@ -26,6 +27,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   setConfig,
   formats,
   onPlayTrack,
+  relativeToConfig,
 }) => {
   const [selectedPlaylistIndex, setSelectedPlaylistIndex] = useState<number>(0);
   const [previews, setPreviews] = useState<TrackPreview[]>([]);
@@ -33,6 +35,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   const [isLoadingPreview, setIsLoadingPreview] = useState<boolean>(false);
   const [generationLogs, setGenerationLogs] = useState<string[]>([]);
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
+  const [showLogsModal, setShowLogsModal] = useState<boolean>(false);
 
   const activePlaylist = config && config.playlists[selectedPlaylistIndex] ? config.playlists[selectedPlaylistIndex] : null;
 
@@ -169,13 +172,14 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   const handleGeneratePlaylists = async () => {
     if (!configPath) return;
     setIsGenerating(true);
-    setGenerationLogs(["Starting playlist generation..."]);
+    setShowLogsModal(true);
+    setGenerationLogs(["Starting playlist compilation..."]);
     try {
       const logs = await invoke<string[]>("generate_all_playlists", {
         configPath,
         sourceDirOverride: null,
         targetDirOverride: null,
-        relativeToConfig: true,
+        relativeToConfig,
         formats,
       });
       setGenerationLogs(logs);
@@ -211,14 +215,24 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
 
   return (
     <div className="view-container" style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
-      <div>
-        <h1>Playlist Builder & Generator</h1>
-        <p className="subtitle">Visually build your playlists, preview files, and compile them to M3Us.</p>
+      <div className="flex justify-between align-center">
+        <div>
+          <h1>Playlist Builder</h1>
+          <p className="subtitle" style={{ margin: 0 }}>Visually build, customize, and preview your playlist directories.</p>
+        </div>
+        <button
+          className="btn btn-primary"
+          onClick={handleGeneratePlaylists}
+          disabled={isGenerating}
+          style={{ padding: "12px 24px" }}
+        >
+          {isGenerating ? "Compiling..." : "⚡ Generate Playlists (.m3u)"}
+        </button>
       </div>
 
       <div style={{ display: "flex", gap: "24px", flex: 1, minHeight: 0 }}>
         {/* Playlist selection sidebar */}
-        <div className="card" style={{ width: "240px", flexShrink: 0, overflowY: "auto", display: "flex", flexDirection: "column" }}>
+        <div className="card" style={{ width: "240px", flexShrink: 0, overflowY: "auto", display: "flex", flexDirection: "column", margin: 0 }}>
           <div className="card-title" style={{ fontSize: "1rem", borderBottom: "1px solid var(--border-color)", paddingBottom: "12px" }}>
             Playlists
           </div>
@@ -250,7 +264,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
           {activePlaylist ? (
             <>
               {/* Properties card */}
-              <div className="card">
+              <div className="card" style={{ margin: 0 }}>
                 <div className="card-title">
                   <span>Playlist Configuration</span>
                   <button className="btn btn-danger" onClick={handleDeletePlaylist} style={{ padding: "6px 12px", fontSize: "0.85rem" }}>
@@ -268,7 +282,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                 </div>
 
                 <div style={{ display: "flex", gap: "16px" }}>
-                  <div className="form-group" style={{ flex: 1 }}>
+                  <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
                     <label className="form-label" style={{ display: "flex", justifyContent: "space-between" }}>
                       <span>Sources</span>
                       <span className="text-success" style={{ cursor: "pointer" }} onClick={selectAndAddSource}>
@@ -290,7 +304,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                     </div>
                   </div>
 
-                  <div className="form-group" style={{ flex: 1 }}>
+                  <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
                     <label className="form-label" style={{ display: "flex", justifyContent: "space-between" }}>
                       <span>Exclusions</span>
                       <span className="text-warning" style={{ cursor: "pointer" }} onClick={selectAndAddExclusion}>
@@ -315,7 +329,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
               </div>
 
               {/* Preview card */}
-              <div className="card" style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: "300px" }}>
+              <div className="card" style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: "200px", margin: 0 }}>
                 <div className="card-title">
                   <span>Resolved Music Tracks ({previews.length})</span>
                   <button className="btn btn-secondary" onClick={loadPreview} disabled={isLoadingPreview} style={{ padding: "6px 12px", fontSize: "0.85rem" }}>
@@ -385,21 +399,39 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
         </div>
       </div>
 
-      {/* Generator logs and trigger card */}
-      <div className="card">
-        <div className="card-title">
-          <span>M3U Playlist Compiler</span>
-          <button className="btn btn-primary" onClick={handleGeneratePlaylists} disabled={isGenerating}>
-            {isGenerating ? "Compiling..." : "⚡ Generate Playlists (.m3u)"}
-          </button>
-        </div>
-        
-        {generationLogs.length > 0 && (
-          <div className="console-log mt-24">
-            {generationLogs.join("\n")}
+      {/* Compilation logs modal */}
+      {showLogsModal && (
+        <div style={{
+          position: "fixed",
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: "rgba(0, 0, 0, 0.75)",
+          backdropFilter: "blur(4px)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          zIndex: 1000
+        }}>
+          <div className="card" style={{ width: "650px", maxHeight: "80%", display: "flex", flexDirection: "column", margin: 0, padding: "24px" }}>
+            <div className="card-title" style={{ borderBottom: "1px solid var(--border-color)", paddingBottom: "12px" }}>
+              <span>Playlist Compiler Logs</span>
+              <button
+                className="btn btn-secondary"
+                onClick={() => setShowLogsModal(false)}
+                disabled={isGenerating}
+                style={{ padding: "6px 12px", fontSize: "0.85rem" }}
+              >
+                Close Logs
+              </button>
+            </div>
+            <div className="console-log" style={{ flex: 1, minHeight: "300px", maxHeight: "400px", overflowY: "auto", marginTop: "16px" }}>
+              {generationLogs.join("\n")}
+            </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 };

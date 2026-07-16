@@ -118,8 +118,8 @@ fn generate_all_playlists(
 }
 
 #[tauri::command]
-fn scan_sanitizer(folder: String, formats: Vec<String>) -> Result<Vec<sanitizer::SanitizeItem>, String> {
-    sanitizer::scan_sanitize_files(Path::new(&folder), &formats)
+fn scan_sanitizer(folder: String, formats: Vec<String>, strip_phrases: Vec<String>) -> Result<Vec<sanitizer::SanitizeItem>, String> {
+    sanitizer::scan_sanitize_files(Path::new(&folder), &formats, &strip_phrases)
 }
 
 #[tauri::command]
@@ -151,6 +151,17 @@ fn select_file(title: String, filter_name: String, filter_ext: String) -> Result
         dialog = dialog.add_filter(&filter_name, &extensions);
     }
     let path = dialog.pick_file();
+    Ok(path.map(|p| p.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+fn save_file_dialog(title: String, filter_name: String, filter_ext: String) -> Result<Option<String>, String> {
+    let mut dialog = rfd::FileDialog::new().set_title(&title);
+    if !filter_ext.is_empty() {
+        let extensions: Vec<&str> = filter_ext.split(',').map(|s| s.trim()).collect();
+        dialog = dialog.add_filter(&filter_name, &extensions);
+    }
+    let path = dialog.save_file();
     Ok(path.map(|p| p.to_string_lossy().to_string()))
 }
 
@@ -199,7 +210,8 @@ pub fn run() {
             start_transcoding_queue,
             select_file,
             select_directory,
-            scan_flac_files
+            scan_flac_files,
+            save_file_dialog
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 
 type SanitizerViewProps = {
   formats: string;
+  stripPhrases: string[];
+  setStripPhrases: (phrases: string[]) => void;
 };
 
 type SanitizeItem = {
@@ -19,13 +21,21 @@ type HiddenFileItem = {
   size_bytes: number;
 };
 
-export const SanitizerView: React.FC<SanitizerViewProps> = ({ formats }) => {
+export const SanitizerView: React.FC<SanitizerViewProps> = ({
+  formats,
+  stripPhrases,
+  setStripPhrases,
+}) => {
   const [scanFolder, setScanFolder] = useState<string>("");
   const [sanitizeItems, setSanitizeItems] = useState<SanitizeItem[]>([]);
   const [selectedRenamePaths, setSelectedRenamePaths] = useState<Set<string>>(new Set());
   const [hiddenItems, setHiddenItems] = useState<HiddenFileItem[]>([]);
   const [selectedDeletePaths, setSelectedDeletePaths] = useState<Set<string>>(new Set());
   
+  // Custom phrase state
+  const [newPhrase, setNewPhrase] = useState<string>("");
+  const [uncheckedPhrases, setUncheckedPhrases] = useState<Set<string>>(new Set());
+
   const [isScanning, setIsScanning] = useState<boolean>(false);
   const [isRenaming, setIsRenaming] = useState<boolean>(false);
   const [isDeleting, setIsDeleting] = useState<boolean>(false);
@@ -49,9 +59,13 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({ formats }) => {
     setIsScanning(true);
     try {
       const formatsList = formats.split(",").map((f) => f.trim());
+      // Filter out unchecked phrases
+      const activePhrases = stripPhrases.filter((p) => !uncheckedPhrases.has(p));
+
       const renameResult = await invoke<SanitizeItem[]>("scan_sanitizer", {
         folder,
         formats: formatsList,
+        stripPhrases: activePhrases,
       });
       setSanitizeItems(renameResult);
       // Select all renames by default
@@ -110,11 +124,16 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({ formats }) => {
     if (selectedRenamePaths.size === 0) return;
     const itemsToRename = sanitizeItems.filter((i) => selectedRenamePaths.has(i.original_path));
     
+    // Explicit confirmation
+    const confirmed = confirm(
+      `Are you absolutely sure you want to sanitize/rename these ${itemsToRename.length} files?\nThis will rename files on your local disk.`
+    );
+    if (!confirmed) return;
+
     setIsRenaming(true);
     try {
       await invoke("execute_sanitizer", { items: itemsToRename });
       alert(`Successfully sanitized ${itemsToRename.length} files!`);
-      // Re-scan
       handleScan(scanFolder);
     } catch (e) {
       alert("Error executing sanitization: " + e);
@@ -125,19 +144,51 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({ formats }) => {
 
   const executeDelete = async () => {
     if (selectedDeletePaths.size === 0) return;
-    if (!confirm(`Are you sure you want to delete ${selectedDeletePaths.size} hidden files? This action is permanent.`)) return;
+    
+    // Explicit confirmation
+    const confirmed = confirm(
+      `WARNING: You are about to permanently delete ${selectedDeletePaths.size} hidden files!\nThis operation is irreversible. Do you want to proceed?`
+    );
+    if (!confirmed) return;
 
     setIsDeleting(true);
     try {
       await invoke("delete_hidden", { filePaths: Array.from(selectedDeletePaths) });
       alert(`Successfully deleted ${selectedDeletePaths.size} hidden files!`);
-      // Re-scan
       handleScan(scanFolder);
     } catch (e) {
       alert("Error deleting hidden files: " + e);
     } finally {
       setIsDeleting(false);
     }
+  };
+
+  const togglePhrase = (phrase: string) => {
+    const next = new Set(uncheckedPhrases);
+    if (next.has(phrase)) {
+      next.delete(phrase);
+    } else {
+      next.add(phrase);
+    }
+    setUncheckedPhrases(next);
+  };
+
+  const addCustomPhrase = () => {
+    const phrase = newPhrase.trim();
+    if (!phrase) return;
+    if (stripPhrases.includes(phrase)) {
+      alert("Phrase is already in the list!");
+      return;
+    }
+    setStripPhrases([...stripPhrases, phrase]);
+    setNewPhrase("");
+  };
+
+  const removeCustomPhrase = (phrase: string) => {
+    setStripPhrases(stripPhrases.filter((p) => p !== phrase));
+    const next = new Set(uncheckedPhrases);
+    next.delete(phrase);
+    setUncheckedPhrases(next);
   };
 
   const formatSize = (bytes: number) => {
@@ -150,7 +201,7 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({ formats }) => {
 
   return (
     <div className="view-container">
-      <h1>File Name Sanitizer & Cleaner</h1>
+      <h1>Sanitizer & Cleaner</h1>
       <p className="subtitle">Scan directories to strip web names, unwanted text, and clean up hidden files.</p>
 
       {/* Target directory selector */}
@@ -178,6 +229,83 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({ formats }) => {
         </div>
       </div>
 
+      {/* Customizable Strip rules checklist */}
+      <div className="card">
+        <div className="card-title">Editable Sanitization Rules</div>
+        <p className="text-secondary" style={{ fontSize: "0.85rem", marginBottom: "12px" }}>
+          Check or uncheck which words/phrases should be stripped from filenames, or add your own custom words to strip.
+        </p>
+
+        {/* Custom Input */}
+        <div className="form-row" style={{ marginBottom: "16px", maxWidth: "450px" }}>
+          <input
+            type="text"
+            value={newPhrase}
+            onChange={(e) => setNewPhrase(e.target.value)}
+            placeholder="Add new word or phrase to strip..."
+          />
+          <button className="btn btn-secondary" onClick={addCustomPhrase}>
+            + Add Word
+          </button>
+        </div>
+
+        {/* Phrases wrap container */}
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: "8px",
+            maxHeight: "150px",
+            overflowY: "auto",
+            border: "1px solid var(--border-color)",
+            borderRadius: "8px",
+            padding: "12px",
+            backgroundColor: "var(--bg-tertiary)",
+          }}
+        >
+          {stripPhrases.map((phrase) => {
+            const isChecked = !uncheckedPhrases.has(phrase);
+            return (
+              <div
+                key={phrase}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "6px",
+                  padding: "4px 8px",
+                  borderRadius: "6px",
+                  backgroundColor: "var(--bg-surface)",
+                  border: "1px solid var(--border-color)",
+                  fontSize: "0.8rem",
+                  cursor: "pointer",
+                }}
+                onClick={() => togglePhrase(phrase)}
+              >
+                <input
+                  type="checkbox"
+                  checked={isChecked}
+                  onChange={() => {}} // handled by click on parent div
+                  style={{ cursor: "pointer", width: "auto" }}
+                />
+                <span style={{ color: isChecked ? "var(--text-primary)" : "var(--text-muted)" }}>
+                  {phrase}
+                </span>
+                <span
+                  style={{ marginLeft: "4px", color: "var(--danger)", fontWeight: 700 }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    removeCustomPhrase(phrase);
+                  }}
+                  title="Remove from rules"
+                >
+                  ×
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
       {scanFolder && !isScanning && (
         <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
           {/* Side-by-side rename comparison checklist */}
@@ -190,7 +318,7 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({ formats }) => {
                   onClick={executeRename}
                   disabled={selectedRenamePaths.size === 0 || isRenaming}
                 >
-                  {isRenaming ? "Renaming..." : `Rename Selected (${selectedRenamePaths.size})`}
+                  {isRenaming ? "Renaming..." : `Sanitize Selected (${selectedRenamePaths.size})`}
                 </button>
               )}
             </div>

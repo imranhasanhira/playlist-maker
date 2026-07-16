@@ -8,11 +8,9 @@ type SidebarProps = {
 
 export const Sidebar: React.FC<SidebarProps> = ({ currentView, onViewChange, hasConfig }) => {
   const menuItems = [
-    { id: "workspaces", label: "📁 Workspaces", enabled: true },
-    { id: "playlists", label: "🎶 Playlist Builder", enabled: hasConfig },
-    { id: "sanitizer", label: "🧼 Sanitizer & Cleaner", enabled: true },
-    { id: "transcoder", label: "🔄 FLAC Transcoder", enabled: true },
-    { id: "settings", label: "⚙️ Settings", enabled: true },
+    { id: "workspaces", label: "📂 Workspace", enabled: true },
+    { id: "playlists", label: "🎶 Playlists", enabled: hasConfig },
+    { id: "tools", label: "🛠 Tools", enabled: true },
   ];
 
   return (
@@ -39,7 +37,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentView, onViewChange, has
           return (
             <li
               key={item.id}
-              className={`sidebar-item ${currentView === item.id ? "active" : ""}`}
+              className={`sidebar-item ${currentView === item.id || (item.id === "tools" && currentView.startsWith("tools_")) ? "active" : ""}`}
               onClick={() => onViewChange(item.id)}
             >
               {item.label}

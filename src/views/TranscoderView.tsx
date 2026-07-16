@@ -153,6 +153,11 @@ export const TranscoderView: React.FC<TranscoderViewProps> = () => {
       return;
     }
 
+    const confirmed = confirm(
+      `Are you sure you want to transcode ${pendingJobs.length} FLAC files to MP3 at ${bitrate} kbps?\nOutput will be written to: ${outputDir}`
+    );
+    if (!confirmed) return;
+
     // Set converting status in state
     setQueue((prev) =>
       prev.map((i) =>
