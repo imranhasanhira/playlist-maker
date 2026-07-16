@@ -9,6 +9,7 @@ type SidebarProps = {
 export const Sidebar: React.FC<SidebarProps> = ({ currentView, onViewChange, hasConfig }) => {
   const menuItems = [
     { id: "workspaces", label: "📂 Workspace", enabled: true },
+    { id: "library", label: "📁 Library", enabled: hasConfig },
     { id: "playlists", label: "🎶 Playlists", enabled: hasConfig },
     { id: "tools", label: "🛠 Tools", enabled: true },
   ];

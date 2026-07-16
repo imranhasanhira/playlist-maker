@@ -2,22 +2,23 @@
 mod playlist;
 mod sanitizer;
 mod transcoder;
+mod library;
 
 use std::collections::HashSet;
 use std::path::Path;
 
 #[tauri::command]
-fn load_workspace(config_path: String) -> Result<playlist::MainConfig, String> {
+async fn load_workspace(config_path: String) -> Result<playlist::MainConfig, String> {
     playlist::read_config_file(Path::new(&config_path))
 }
 
 #[tauri::command]
-fn save_workspace(config_path: String, config: playlist::MainConfig) -> Result<(), String> {
+async fn save_workspace(config_path: String, config: playlist::MainConfig) -> Result<(), String> {
     playlist::write_config_file(Path::new(&config_path), &config)
 }
 
 #[tauri::command]
-fn preview_playlist_tracks(
+async fn preview_playlist_tracks(
     config_path: String,
     source_dir_override: Option<String>,
     playlist_index: usize,
@@ -59,7 +60,7 @@ fn preview_playlist_tracks(
 }
 
 #[tauri::command]
-fn generate_all_playlists(
+async fn generate_all_playlists(
     config_path: String,
     source_dir_override: Option<String>,
     target_dir_override: Option<String>,
@@ -118,33 +119,33 @@ fn generate_all_playlists(
 }
 
 #[tauri::command]
-fn scan_sanitizer(folder: String, formats: Vec<String>, strip_phrases: Vec<String>) -> Result<Vec<sanitizer::SanitizeItem>, String> {
+async fn scan_sanitizer(folder: String, formats: Vec<String>, strip_phrases: Vec<String>) -> Result<Vec<sanitizer::SanitizeItem>, String> {
     sanitizer::scan_sanitize_files(Path::new(&folder), &formats, &strip_phrases)
 }
 
 #[tauri::command]
-fn execute_sanitizer(items: Vec<sanitizer::SanitizeItem>) -> Result<(), String> {
+async fn execute_sanitizer(items: Vec<sanitizer::SanitizeItem>) -> Result<(), String> {
     sanitizer::execute_rename_files(items)
 }
 
 #[tauri::command]
-fn scan_hidden(folder: String) -> Result<Vec<sanitizer::HiddenFileItem>, String> {
+async fn scan_hidden(folder: String) -> Result<Vec<sanitizer::HiddenFileItem>, String> {
     sanitizer::scan_hidden_files(Path::new(&folder))
 }
 
 #[tauri::command]
-fn delete_hidden(file_paths: Vec<String>) -> Result<(), String> {
+async fn delete_hidden(file_paths: Vec<String>) -> Result<(), String> {
     sanitizer::execute_delete_files(file_paths)
 }
 
 #[tauri::command]
-fn start_transcoding_queue(app: tauri::AppHandle, jobs: Vec<transcoder::TranscodeJob>) -> Result<(), String> {
+async fn start_transcoding_queue(app: tauri::AppHandle, jobs: Vec<transcoder::TranscodeJob>) -> Result<(), String> {
     transcoder::run_transcode_queue(app, jobs);
     Ok(())
 }
 
 #[tauri::command]
-fn select_file(title: String, filter_name: String, filter_ext: String) -> Result<Option<String>, String> {
+async fn select_file(title: String, filter_name: String, filter_ext: String) -> Result<Option<String>, String> {
     let mut dialog = rfd::FileDialog::new().set_title(&title);
     if !filter_ext.is_empty() {
         let extensions: Vec<&str> = filter_ext.split(',').map(|s| s.trim()).collect();
@@ -155,7 +156,7 @@ fn select_file(title: String, filter_name: String, filter_ext: String) -> Result
 }
 
 #[tauri::command]
-fn save_file_dialog(title: String, filter_name: String, filter_ext: String) -> Result<Option<String>, String> {
+async fn save_file_dialog(title: String, filter_name: String, filter_ext: String) -> Result<Option<String>, String> {
     let mut dialog = rfd::FileDialog::new().set_title(&title);
     if !filter_ext.is_empty() {
         let extensions: Vec<&str> = filter_ext.split(',').map(|s| s.trim()).collect();
@@ -166,7 +167,7 @@ fn save_file_dialog(title: String, filter_name: String, filter_ext: String) -> R
 }
 
 #[tauri::command]
-fn select_directory(title: String) -> Result<Option<String>, String> {
+async fn select_directory(title: String) -> Result<Option<String>, String> {
     let path = rfd::FileDialog::new()
         .set_title(&title)
         .pick_folder();
@@ -174,7 +175,7 @@ fn select_directory(title: String) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-fn scan_flac_files(folder: String) -> Result<Vec<String>, String> {
+async fn scan_flac_files(folder: String) -> Result<Vec<String>, String> {
     let path = Path::new(&folder);
     if !path.exists() {
         return Err("Folder does not exist".to_string());
@@ -194,6 +195,51 @@ fn scan_flac_files(folder: String) -> Result<Vec<String>, String> {
     Ok(flac_files)
 }
 
+// Library Management Commands
+#[tauri::command]
+async fn read_dir_tree(folder: String, formats: Vec<String>) -> Result<library::DirTreeNode, String> {
+    let formats_set: HashSet<String> = formats.iter().map(|f| f.to_lowercase()).collect();
+    library::read_tree_recursive(Path::new(&folder), &formats_set)
+}
+
+#[tauri::command]
+async fn read_track_tags(file_path: String) -> Result<library::TrackTags, String> {
+    library::read_track_tags_impl(Path::new(&file_path))
+}
+
+#[tauri::command]
+async fn write_track_tags(file_path: String, tags: library::TrackTags) -> Result<(), String> {
+    library::write_track_tags_impl(Path::new(&file_path), tags)
+}
+
+#[tauri::command]
+async fn batch_update_folder_tags(
+    folder_path: String,
+    formats: Vec<String>,
+    artist: Option<String>,
+    album: Option<String>,
+    genre: Option<String>,
+    year: Option<u32>,
+) -> Result<(), String> {
+    let formats_set: HashSet<String> = formats.iter().map(|f| f.to_lowercase()).collect();
+    library::batch_update_folder_tags_impl(
+        Path::new(&folder_path),
+        &formats_set,
+        artist,
+        album,
+        genre,
+        year,
+    )
+}
+
+#[tauri::command]
+async fn read_image_base64(file_path: String) -> Result<String, String> {
+    let data = std::fs::read(Path::new(&file_path))
+        .map_err(|e| format!("Failed to read file: {}", e))?;
+    use base64::prelude::*;
+    Ok(BASE64_STANDARD.encode(&data))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -211,7 +257,12 @@ pub fn run() {
             select_file,
             select_directory,
             scan_flac_files,
-            save_file_dialog
+            save_file_dialog,
+            read_dir_tree,
+            read_track_tags,
+            write_track_tags,
+            batch_update_folder_tags,
+            read_image_base64
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

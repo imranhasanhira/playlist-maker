@@ -1,9 +1,10 @@
-import React from "react";
+import React, { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 export type MainConfig = {
   sourceDir: string | null;
   targetDir: string | null;
+  relativeToConfig?: boolean | null;
   playlists: Array<{
     name: string;
     sources: string[];
@@ -19,8 +20,6 @@ type WorkspaceViewProps = {
   onLoadConfig: (path: string) => void;
   formats: string;
   setFormats: (formats: string) => void;
-  relativeToConfig: boolean;
-  setRelativeToConfig: (rel: boolean) => void;
 };
 
 export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
@@ -31,9 +30,9 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
   onLoadConfig,
   formats,
   setFormats,
-  relativeToConfig,
-  setRelativeToConfig,
 }) => {
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
+
   const selectConfigFile = async () => {
     try {
       const selected = await invoke<string | null>("select_file", {
@@ -88,11 +87,14 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
       return;
     }
     
+    setSaveStatus("saving");
+
     // Clean up empty strings to null for clean serialization
     const cleanedConfig = {
       ...config,
       sourceDir: config.sourceDir?.trim() === "" ? null : config.sourceDir,
       targetDir: config.targetDir?.trim() === "" ? null : config.targetDir,
+      relativeToConfig: config.relativeToConfig ?? true,
       playlists: config.playlists.map(pl => ({
         ...pl,
         exclusions: pl.exclusions && pl.exclusions.length === 0 ? null : pl.exclusions
@@ -101,13 +103,14 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
 
     try {
       await invoke("save_workspace", {
-        configPath,
+        configPath: configPath,
         config: cleanedConfig,
       });
-      alert("Configuration saved successfully!");
-      // Reload config to sync backend/frontend models
+      setSaveStatus("saved");
+      setTimeout(() => setSaveStatus("idle"), 2000);
       onLoadConfig(configPath);
     } catch (e) {
+      setSaveStatus("idle");
       alert("Error saving configuration: " + e);
     }
   };
@@ -123,6 +126,7 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
         const newConfig: MainConfig = {
           sourceDir: "./Music",
           targetDir: "./Playlists",
+          relativeToConfig: true,
           playlists: [],
         };
         await invoke("save_workspace", {
@@ -138,6 +142,8 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
     }
   };
 
+  console.log("WorkspaceView render config:", config, "configPath:", configPath);
+
   return (
     <div className="view-container">
       <h1>Workspace & Settings</h1>
@@ -146,7 +152,7 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
       {/* Configuration Loading Card */}
       <div className="card">
         <div className="card-title">
-          <span>Workspace Configuration</span>
+          <span>Workspace Configuration File</span>
           <button className="btn btn-secondary" onClick={handleCreateNewConfig}>
             + Create New Config File
           </button>
@@ -168,9 +174,83 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
         </div>
       </div>
 
+      {/* Directory Settings & relativeToConfig */}
+      <div className="card">
+        <div className="card-title">Workspace Directory Mappings & Path Preferences</div>
+
+        {!config ? (
+          <p className="no-data" style={{ padding: "8px 0" }}>
+            ⚠️ Please load or create a workspace configuration file above to select directory paths and configure relative path preferences.
+          </p>
+        ) : (
+          <>
+            <div className="form-group" style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "20px", backgroundColor: "var(--bg-tertiary)", padding: "12px", borderRadius: "8px", border: "1px solid var(--border-color)" }}>
+              <input
+                type="checkbox"
+                id="relative-path-toggle"
+                checked={config.relativeToConfig ?? true}
+                onChange={(e) => setConfig({ ...config, relativeToConfig: e.target.checked })}
+                style={{ width: "auto", cursor: "pointer" }}
+              />
+              <label htmlFor="relative-path-toggle" style={{ fontWeight: 600, cursor: "pointer", fontSize: "0.95rem", color: "var(--text-primary)" }}>
+                Resolve directories and write playlist entries relative to the configuration file location (relativeToConfig)
+              </label>
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Music Source Directory (sourceDir)</label>
+              <div className="form-row">
+                <input
+                  type="text"
+                  value={config.sourceDir || ""}
+                  onChange={(e) => setConfig({ ...config, sourceDir: e.target.value })}
+                  placeholder="Folder where your music tracks reside"
+                />
+                <button className="btn btn-secondary" onClick={selectSourceDir}>
+                  Choose Folder
+                </button>
+              </div>
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Playlists Output Directory (targetDir)</label>
+              <div className="form-row">
+                <input
+                  type="text"
+                  value={config.targetDir || ""}
+                  onChange={(e) => setConfig({ ...config, targetDir: e.target.value })}
+                  placeholder="Folder where playlist .m3u files will be created"
+                />
+                <button className="btn btn-secondary" onClick={selectTargetDir}>
+                  Choose Folder
+                </button>
+              </div>
+            </div>
+
+            <div className="form-group" style={{ marginTop: "28px", borderTop: "1px solid var(--border-color)", paddingTop: "20px" }}>
+              <div className="flex justify-between align-center">
+                <div>
+                  <span style={{ fontWeight: 600 }}>Playlists Configured:</span> {config.playlists.length}
+                </div>
+                <button
+                  className={`btn ${saveStatus === "saved" ? "btn-success" : "btn-primary"}`}
+                  onClick={handleSaveConfig}
+                  disabled={saveStatus === "saving"}
+                  style={{ minWidth: "220px", display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }}
+                >
+                  {saveStatus === "idle" && <>💾 Save Configuration Changes</>}
+                  {saveStatus === "saving" && <>⏳ Saving Changes...</>}
+                  {saveStatus === "saved" && <>✓ Configuration Saved!</>}
+                </button>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+
       {/* Settings / Preferences Card */}
       <div className="card">
-        <div className="card-title">Application Settings</div>
+        <div className="card-title">Application File Format Settings</div>
         
         <div className="form-group">
           <label className="form-label">Allowed Audio Extensions (comma-separated)</label>
@@ -181,71 +261,10 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
             placeholder="e.g. mp3,aac,ogg,wma,alac,m4a,wav,flac"
           />
           <p className="text-secondary" style={{ fontSize: "0.8rem", marginTop: "4px" }}>
-            The playlist maker and sanitizer will only process files matching these extensions.
+            The playlist maker, library tree, and sanitizer will only process files matching these extensions.
           </p>
         </div>
-
-        <div className="form-group" style={{ display: "flex", alignItems: "center", gap: "10px", marginTop: "20px" }}>
-          <input
-            type="checkbox"
-            id="relative-path-toggle"
-            checked={relativeToConfig}
-            onChange={(e) => setRelativeToConfig(e.target.checked)}
-            style={{ width: "auto", cursor: "pointer" }}
-          />
-          <label htmlFor="relative-path-toggle" style={{ fontWeight: 500, cursor: "pointer", fontSize: "0.95rem" }}>
-            Resolve directories and write playlist entries relative to the configuration file location (relativeToConfig)
-          </label>
-        </div>
       </div>
-
-      {/* Directory Settings (only when config is loaded) */}
-      {config && (
-        <div className="card">
-          <div className="card-title">Workspace Directory Mappings</div>
-
-          <div className="form-group">
-            <label className="form-label">Music Source Directory (sourceDir)</label>
-            <div className="form-row">
-              <input
-                type="text"
-                value={config.sourceDir || ""}
-                onChange={(e) => setConfig({ ...config, sourceDir: e.target.value })}
-                placeholder="Folder where your music tracks reside"
-              />
-              <button className="btn btn-secondary" onClick={selectSourceDir}>
-                Choose Folder
-              </button>
-            </div>
-          </div>
-
-          <div className="form-group">
-            <label className="form-label">Playlists Output Directory (targetDir)</label>
-            <div className="form-row">
-              <input
-                type="text"
-                value={config.targetDir || ""}
-                onChange={(e) => setConfig({ ...config, targetDir: e.target.value })}
-                placeholder="Folder where playlist .m3u files will be created"
-              />
-              <button className="btn btn-secondary" onClick={selectTargetDir}>
-                Choose Folder
-              </button>
-            </div>
-          </div>
-
-          <div className="form-group" style={{ marginTop: "28px", borderTop: "1px solid var(--border-color)", paddingTop: "20px" }}>
-            <div className="flex justify-between align-center">
-              <div>
-                <span style={{ fontWeight: 600 }}>Playlists Configured:</span> {config.playlists.length}
-              </div>
-              <button className="btn btn-primary" onClick={handleSaveConfig}>
-                💾 Save Configuration Changes
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };
