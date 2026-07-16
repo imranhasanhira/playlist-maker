@@ -1,0 +1,405 @@
+import React, { useState, useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { MainConfig } from "./WorkspaceView";
+import { AudioTrack } from "../components/AudioPlayer";
+
+type PlaylistViewProps = {
+  configPath: string;
+  config: MainConfig | null;
+  setConfig: (config: MainConfig | null) => void;
+  formats: string;
+  onPlayTrack: (track: AudioTrack) => void;
+};
+
+type TrackPreview = {
+  file_path: string;
+  relative_path: string;
+  title: string;
+  artist: string;
+  duration: number;
+  size_bytes: number;
+};
+
+export const PlaylistView: React.FC<PlaylistViewProps> = ({
+  configPath,
+  config,
+  setConfig,
+  formats,
+  onPlayTrack,
+}) => {
+  const [selectedPlaylistIndex, setSelectedPlaylistIndex] = useState<number>(0);
+  const [previews, setPreviews] = useState<TrackPreview[]>([]);
+  const [previewError, setPreviewError] = useState<string>("");
+  const [isLoadingPreview, setIsLoadingPreview] = useState<boolean>(false);
+  const [generationLogs, setGenerationLogs] = useState<string[]>([]);
+  const [isGenerating, setIsGenerating] = useState<boolean>(false);
+
+  const activePlaylist = config && config.playlists[selectedPlaylistIndex] ? config.playlists[selectedPlaylistIndex] : null;
+
+  useEffect(() => {
+    if (activePlaylist) {
+      loadPreview();
+    } else {
+      setPreviews([]);
+    }
+  }, [selectedPlaylistIndex, config]);
+
+  const loadPreview = async () => {
+    if (!configPath || activePlaylist === null) return;
+    setIsLoadingPreview(true);
+    setPreviewError("");
+    try {
+      const result = await invoke<TrackPreview[]>("preview_playlist_tracks", {
+        configPath,
+        sourceDirOverride: null,
+        playlistIndex: selectedPlaylistIndex,
+        formats,
+      });
+      setPreviews(result);
+    } catch (e) {
+      setPreviews([]);
+      setPreviewError(String(e));
+    } finally {
+      setIsLoadingPreview(false);
+    }
+  };
+
+  const handleAddPlaylist = () => {
+    if (!config) return;
+    const newPlaylists = [...config.playlists];
+    newPlaylists.push({
+      name: "New Playlist",
+      sources: ["."],
+      exclusions: [],
+    });
+    setConfig({
+      ...config,
+      playlists: newPlaylists,
+    });
+    setSelectedPlaylistIndex(newPlaylists.length - 1);
+  };
+
+  const handleDeletePlaylist = () => {
+    if (!config || activePlaylist === null) return;
+    if (!confirm(`Are you sure you want to delete the playlist: "${activePlaylist.name}"?`)) return;
+
+    const newPlaylists = config.playlists.filter((_, idx) => idx !== selectedPlaylistIndex);
+    setConfig({
+      ...config,
+      playlists: newPlaylists,
+    });
+    setSelectedPlaylistIndex(Math.max(0, selectedPlaylistIndex - 1));
+  };
+
+  const handleUpdateName = (name: string) => {
+    if (!config || activePlaylist === null) return;
+    const newPlaylists = [...config.playlists];
+    newPlaylists[selectedPlaylistIndex].name = name;
+    setConfig({
+      ...config,
+      playlists: newPlaylists,
+    });
+  };
+
+  const selectAndAddSource = async () => {
+    if (!config || activePlaylist === null) return;
+    try {
+      const selected = await invoke<string | null>("select_directory", {
+        title: "Add Source Folder",
+      });
+      if (selected) {
+        const newPlaylists = [...config.playlists];
+        const newSources = [...newPlaylists[selectedPlaylistIndex].sources];
+        newSources.push(selected);
+        newPlaylists[selectedPlaylistIndex].sources = newSources;
+        setConfig({
+          ...config,
+          playlists: newPlaylists,
+        });
+      }
+    } catch (e) {
+      alert("Error picking folder: " + e);
+    }
+  };
+
+  const removeSource = (srcIdx: number) => {
+    if (!config || activePlaylist === null) return;
+    const newPlaylists = [...config.playlists];
+    const newSources = newPlaylists[selectedPlaylistIndex].sources.filter((_, idx) => idx !== srcIdx);
+    newPlaylists[selectedPlaylistIndex].sources = newSources;
+    setConfig({
+      ...config,
+      playlists: newPlaylists,
+    });
+  };
+
+  const selectAndAddExclusion = async () => {
+    if (!config || activePlaylist === null) return;
+    try {
+      const selected = await invoke<string | null>("select_directory", {
+        title: "Add Exclusion Folder",
+      });
+      if (selected) {
+        const newPlaylists = [...config.playlists];
+        const currentExclusions = newPlaylists[selectedPlaylistIndex].exclusions || [];
+        const newExclusions = [...currentExclusions, selected];
+        newPlaylists[selectedPlaylistIndex].exclusions = newExclusions;
+        setConfig({
+          ...config,
+          playlists: newPlaylists,
+        });
+      }
+    } catch (e) {
+      alert("Error picking folder: " + e);
+    }
+  };
+
+  const removeExclusion = (exIdx: number) => {
+    if (!config || activePlaylist === null) return;
+    const newPlaylists = [...config.playlists];
+    const currentExclusions = newPlaylists[selectedPlaylistIndex].exclusions || [];
+    const newExclusions = currentExclusions.filter((_, idx) => idx !== exIdx);
+    newPlaylists[selectedPlaylistIndex].exclusions = newExclusions;
+    setConfig({
+      ...config,
+      playlists: newPlaylists,
+    });
+  };
+
+  const handleGeneratePlaylists = async () => {
+    if (!configPath) return;
+    setIsGenerating(true);
+    setGenerationLogs(["Starting playlist generation..."]);
+    try {
+      const logs = await invoke<string[]>("generate_all_playlists", {
+        configPath,
+        sourceDirOverride: null,
+        targetDirOverride: null,
+        relativeToConfig: true,
+        formats,
+      });
+      setGenerationLogs(logs);
+    } catch (e) {
+      setGenerationLogs((prev) => [...prev, `ERROR: ${e}`]);
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const formatSize = (bytes: number) => {
+    if (bytes === 0) return "0 Bytes";
+    const k = 1024;
+    const sizes = ["Bytes", "KB", "MB", "GB"];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+  };
+
+  const formatDuration = (secs: number) => {
+    const minutes = Math.floor(secs / 60);
+    const seconds = secs % 60;
+    return `${minutes}:${seconds < 10 ? "0" : ""}${seconds}`;
+  };
+
+  if (!config) {
+    return (
+      <div className="view-container">
+        <h1>Playlist Builder</h1>
+        <p className="no-data">Please load a workspace configuration file in the Workspaces tab.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="view-container" style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+      <div>
+        <h1>Playlist Builder & Generator</h1>
+        <p className="subtitle">Visually build your playlists, preview files, and compile them to M3Us.</p>
+      </div>
+
+      <div style={{ display: "flex", gap: "24px", flex: 1, minHeight: 0 }}>
+        {/* Playlist selection sidebar */}
+        <div className="card" style={{ width: "240px", flexShrink: 0, overflowY: "auto", display: "flex", flexDirection: "column" }}>
+          <div className="card-title" style={{ fontSize: "1rem", borderBottom: "1px solid var(--border-color)", paddingBottom: "12px" }}>
+            Playlists
+          </div>
+          <ul style={{ listStyle: "none", flex: 1, display: "flex", flexDirection: "column", gap: "4px", margin: "12px 0" }}>
+            {config.playlists.map((pl, idx) => (
+              <li
+                key={idx}
+                onClick={() => setSelectedPlaylistIndex(idx)}
+                style={{
+                  padding: "8px 12px",
+                  borderRadius: "6px",
+                  cursor: "pointer",
+                  backgroundColor: selectedPlaylistIndex === idx ? "var(--bg-tertiary)" : "transparent",
+                  borderLeft: selectedPlaylistIndex === idx ? "3px solid var(--accent-purple)" : "none",
+                  fontWeight: selectedPlaylistIndex === idx ? 600 : 400,
+                }}
+              >
+                {pl.name}
+              </li>
+            ))}
+          </ul>
+          <button className="btn btn-secondary" onClick={handleAddPlaylist} style={{ width: "100%" }}>
+            + Add Playlist
+          </button>
+        </div>
+
+        {/* Playlist properties and preview */}
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "24px", minWidth: 0 }}>
+          {activePlaylist ? (
+            <>
+              {/* Properties card */}
+              <div className="card">
+                <div className="card-title">
+                  <span>Playlist Configuration</span>
+                  <button className="btn btn-danger" onClick={handleDeletePlaylist} style={{ padding: "6px 12px", fontSize: "0.85rem" }}>
+                    Delete Playlist
+                  </button>
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label">Playlist Name</label>
+                  <input
+                    type="text"
+                    value={activePlaylist.name}
+                    onChange={(e) => handleUpdateName(e.target.value)}
+                  />
+                </div>
+
+                <div style={{ display: "flex", gap: "16px" }}>
+                  <div className="form-group" style={{ flex: 1 }}>
+                    <label className="form-label" style={{ display: "flex", justifyContent: "space-between" }}>
+                      <span>Sources</span>
+                      <span className="text-success" style={{ cursor: "pointer" }} onClick={selectAndAddSource}>
+                        + Add Folder
+                      </span>
+                    </label>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                      {activePlaylist.sources.map((src, srcIdx) => (
+                        <div className="form-row" key={srcIdx}>
+                          <input type="text" readOnly value={src} style={{ fontSize: "0.85rem" }} />
+                          <button className="btn btn-secondary" onClick={() => removeSource(srcIdx)} style={{ padding: "10px" }}>
+                            🗑
+                          </button>
+                        </div>
+                      ))}
+                      {activePlaylist.sources.length === 0 && (
+                        <p className="no-data" style={{ padding: "8px" }}>No source paths. Add one above.</p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="form-group" style={{ flex: 1 }}>
+                    <label className="form-label" style={{ display: "flex", justifyContent: "space-between" }}>
+                      <span>Exclusions</span>
+                      <span className="text-warning" style={{ cursor: "pointer" }} onClick={selectAndAddExclusion}>
+                        + Add Folder
+                      </span>
+                    </label>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                      {(activePlaylist.exclusions || []).map((ex, exIdx) => (
+                        <div className="form-row" key={exIdx}>
+                          <input type="text" readOnly value={ex} style={{ fontSize: "0.85rem" }} />
+                          <button className="btn btn-secondary" onClick={() => removeExclusion(exIdx)} style={{ padding: "10px" }}>
+                            🗑
+                          </button>
+                        </div>
+                      ))}
+                      {(activePlaylist.exclusions || []).length === 0 && (
+                        <p className="no-data" style={{ padding: "8px" }}>No exclusions defined.</p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Preview card */}
+              <div className="card" style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: "300px" }}>
+                <div className="card-title">
+                  <span>Resolved Music Tracks ({previews.length})</span>
+                  <button className="btn btn-secondary" onClick={loadPreview} disabled={isLoadingPreview} style={{ padding: "6px 12px", fontSize: "0.85rem" }}>
+                    {isLoadingPreview ? "Reloading..." : "🔄 Refresh Preview"}
+                  </button>
+                </div>
+
+                {previewError && <div className="no-data text-danger">{previewError}</div>}
+
+                {isLoadingPreview ? (
+                  <div className="no-data">Loading resolved file list...</div>
+                ) : previews.length > 0 ? (
+                  <div className="table-container" style={{ flex: 1, overflowY: "auto" }}>
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Play</th>
+                          <th>Title</th>
+                          <th>Artist</th>
+                          <th>Duration</th>
+                          <th>Size</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {previews.map((track, trackIdx) => (
+                          <tr key={trackIdx}>
+                            <td style={{ width: "60px" }}>
+                              <button
+                                className="btn btn-secondary"
+                                style={{ padding: "4px 8px", borderRadius: "50%" }}
+                                onClick={() =>
+                                  onPlayTrack({
+                                    file_path: track.file_path,
+                                    title: track.title,
+                                    artist: track.artist,
+                                    duration: track.duration,
+                                  })
+                                }
+                              >
+                                ▶
+                              </button>
+                            </td>
+                            <td>
+                              <div style={{ fontWeight: 600 }}>{track.title}</div>
+                              <div className="text-secondary" style={{ fontSize: "0.75rem", fontFamily: "var(--font-mono)" }}>
+                                {track.relative_path}
+                              </div>
+                            </td>
+                            <td className="text-secondary">{track.artist || "—"}</td>
+                            <td style={{ fontFamily: "var(--font-mono)" }}>{formatDuration(track.duration)}</td>
+                            <td style={{ fontFamily: "var(--font-mono)" }}>{formatSize(track.size_bytes)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="no-data">No music files found in specified sources with the allowed formats.</div>
+                )}
+              </div>
+            </>
+          ) : (
+            <div className="card">
+              <p className="no-data">No playlist selected. Create or select a playlist.</p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Generator logs and trigger card */}
+      <div className="card">
+        <div className="card-title">
+          <span>M3U Playlist Compiler</span>
+          <button className="btn btn-primary" onClick={handleGeneratePlaylists} disabled={isGenerating}>
+            {isGenerating ? "Compiling..." : "⚡ Generate Playlists (.m3u)"}
+          </button>
+        </div>
+        
+        {generationLogs.length > 0 && (
+          <div className="console-log mt-24">
+            {generationLogs.join("\n")}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
