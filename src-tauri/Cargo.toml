@@ -31,4 +31,5 @@ pathdiff = "0.2"
 regex = "1"
 tokio = { version = "1", features = ["full"] }
 rfd = "0.14"
+base64 = "0.22"
 

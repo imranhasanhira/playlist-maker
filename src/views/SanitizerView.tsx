@@ -5,6 +5,7 @@ type SanitizerViewProps = {
   formats: string;
   stripPhrases: string[];
   setStripPhrases: (phrases: string[]) => void;
+  addBackgroundTask: (id: string, name: string, taskPromise: Promise<any>) => void;
 };
 
 type SanitizeItem = {
@@ -25,6 +26,7 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
   formats,
   stripPhrases,
   setStripPhrases,
+  addBackgroundTask,
 }) => {
   const [scanFolder, setScanFolder] = useState<string>("");
   const [sanitizeItems, setSanitizeItems] = useState<SanitizeItem[]>([]);
@@ -132,7 +134,9 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
 
     setIsRenaming(true);
     try {
-      await invoke("execute_sanitizer", { items: itemsToRename });
+      const promise = invoke("execute_sanitizer", { items: itemsToRename });
+      addBackgroundTask(`rename_${Date.now()}`, `Sanitize ${itemsToRename.length} files`, promise);
+      await promise;
       alert(`Successfully sanitized ${itemsToRename.length} files!`);
       handleScan(scanFolder);
     } catch (e) {
@@ -153,7 +157,9 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
 
     setIsDeleting(true);
     try {
-      await invoke("delete_hidden", { filePaths: Array.from(selectedDeletePaths) });
+      const promise = invoke("delete_hidden", { filePaths: Array.from(selectedDeletePaths) });
+      addBackgroundTask(`delete_${Date.now()}`, `Delete ${selectedDeletePaths.size} hidden files`, promise);
+      await promise;
       alert(`Successfully deleted ${selectedDeletePaths.size} hidden files!`);
       handleScan(scanFolder);
     } catch (e) {

@@ -21,6 +21,8 @@ pub struct MainConfig {
     pub source_dir: Option<String>,
     #[serde(rename = "targetDir")]
     pub target_dir: Option<String>,
+    #[serde(rename = "relativeToConfig")]
+    pub relative_to_config: Option<bool>,
     pub playlists: Vec<PlaylistConfig>,
 }
 
@@ -204,4 +206,15 @@ pub fn write_playlist_file(playlist_file_path: &Path, music_files: &[PathBuf]) -
 
     writer.flush().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_parse() {
+        let content = std::fs::read_to_string("../sample_config.yaml").unwrap();
+        let config: MainConfig = serde_yaml::from_str(&content).unwrap();
+        println!("Loaded config successfully: {:?}", config);
+    }
 }

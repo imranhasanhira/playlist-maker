@@ -6,12 +6,14 @@ type ToolsViewProps = {
   formats: string;
   stripPhrases: string[];
   setStripPhrases: (phrases: string[]) => void;
+  addBackgroundTask: (id: string, name: string, taskPromise: Promise<any>) => void;
 };
 
 export const ToolsView: React.FC<ToolsViewProps> = ({
   formats,
   stripPhrases,
   setStripPhrases,
+  addBackgroundTask,
 }) => {
   const [subView, setSubView] = useState<"sanitizer" | "transcoder">("sanitizer");
 
@@ -78,6 +80,7 @@ export const ToolsView: React.FC<ToolsViewProps> = ({
             formats={formats}
             stripPhrases={stripPhrases}
             setStripPhrases={setStripPhrases}
+            addBackgroundTask={addBackgroundTask}
           />
         )}
         {subView === "transcoder" && (
