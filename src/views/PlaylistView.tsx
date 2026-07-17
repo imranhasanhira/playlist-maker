@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { MainConfig } from "./WorkspaceView";
+import { MainConfig } from "../App";
 import { AudioTrack } from "../components/AudioPlayer";
 
 type PlaylistViewProps = {

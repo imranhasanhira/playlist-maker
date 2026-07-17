@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { MainConfig } from "./WorkspaceView";
+import { MainConfig } from "../App";
 
 type LibraryViewProps = {
   config: MainConfig | null;
@@ -36,6 +36,9 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
   const [treeError, setTreeError] = useState<string>("");
   const [collapsedPaths, setCollapsedPaths] = useState<Set<string>>(new Set());
 
+  // Resizable panel width state
+  const [leftWidth, setLeftWidth] = useState<number>(280);
+
   // Selected item
   const [selectedNode, setSelectedNode] = useState<DirTreeNode | null>(null);
 
@@ -49,6 +52,8 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
   const [batchAlbum, setBatchAlbum] = useState<string>("");
   const [batchGenre, setBatchGenre] = useState<string>("");
   const [batchYear, setBatchYear] = useState<string>("");
+  const [batchCoverB64, setBatchCoverB64] = useState<string>("");
+  const [batchCoverMime, setBatchCoverMime] = useState<string>("");
   const [isSavingBatch, setIsSavingBatch] = useState<boolean>(false);
 
   useEffect(() => {
@@ -94,6 +99,8 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
     setBatchAlbum("");
     setBatchGenre("");
     setBatchYear("");
+    setBatchCoverB64("");
+    setBatchCoverMime("");
 
     if (!node.is_dir) {
       setIsReadingTags(true);
@@ -113,10 +120,22 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
   const handleSaveTags = async () => {
     if (!selectedNode || !selectedFileTags) return;
     setIsSavingTags(true);
+
+    // Clean up empty strings to null for clean tag removal
+    const cleanedTags = {
+      ...selectedFileTags,
+      title: selectedFileTags.title?.trim() === "" ? null : selectedFileTags.title,
+      artist: selectedFileTags.artist?.trim() === "" ? null : selectedFileTags.artist,
+      album: selectedFileTags.album?.trim() === "" ? null : selectedFileTags.album,
+      genre: selectedFileTags.genre?.trim() === "" ? null : selectedFileTags.genre,
+      year: selectedFileTags.year || null,
+      track: selectedFileTags.track || null,
+    };
+
     try {
       const promise = invoke("write_track_tags", {
         filePath: selectedNode.path,
-        tags: selectedFileTags,
+        tags: cleanedTags,
       });
       addBackgroundTask(`save_tags_${Date.now()}`, `Write tags to ${selectedNode.name}`, promise);
       await promise;
@@ -145,6 +164,10 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
     setIsSavingBatch(true);
     try {
       const formatsList = formats.split(",").map((f) => f.trim());
+      
+      const coverParam = batchCoverB64 === "" ? null : batchCoverB64;
+      const mimeParam = batchCoverB64 === "REMOVE" || batchCoverB64 === "" ? null : batchCoverMime;
+
       const promise = invoke("batch_update_folder_tags", {
         folderPath: selectedNode.path,
         formats: formatsList,
@@ -152,6 +175,8 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
         album: batchAlbum || null,
         genre: batchGenre || null,
         year: yearNum || null,
+        coverB64: coverParam,
+        coverMime: mimeParam,
       });
 
       addBackgroundTask(
@@ -189,6 +214,24 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
     }
   };
 
+  const handleUploadBatchCover = async () => {
+    try {
+      const selected = await invoke<string | null>("select_file", {
+        title: "Select Cover Image",
+        filterName: "Images",
+        filterExt: "jpg,jpeg,png",
+      });
+      if (selected) {
+        const b64Data = await invoke<string>("read_image_base64", { filePath: selected });
+        const mime = selected.toLowerCase().endsWith(".png") ? "image/png" : "image/jpeg";
+        setBatchCoverB64(b64Data);
+        setBatchCoverMime(mime);
+      }
+    } catch (e) {
+      alert("Error loading cover: " + e);
+    }
+  };
+
   const handleRemoveCover = () => {
     if (selectedFileTags) {
       setSelectedFileTags({
@@ -199,15 +242,38 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
     }
   };
 
-  // Recursive Tree Node Renderer
+  // Drag resizer handler
+  const handleMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = leftWidth;
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const deltaX = moveEvent.clientX - startX;
+      const newWidth = startWidth + deltaX;
+      if (newWidth > 180 && newWidth < 600) {
+        setLeftWidth(newWidth);
+      }
+    };
+
+    const handleMouseUp = () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+  };
+
   const renderTree = (node: DirTreeNode, depth = 0) => {
     const isCollapsed = collapsedPaths.has(node.path);
     const isSelected = selectedNode?.path === node.path;
-
+    
     return (
-      <div key={node.path} style={{ marginLeft: `${depth > 0 ? 12 : 0}px` }}>
+      <div key={node.path} style={{ display: "flex", flexDirection: "column", gap: "2px", userSelect: "none" }}>
         <div
-          onClick={() => {
+          onClick={(e) => {
+            e.stopPropagation();
             if (node.is_dir) {
               toggleCollapse(node.path);
             }
@@ -216,26 +282,30 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
           style={{
             display: "flex",
             alignItems: "center",
-            gap: "6px",
-            padding: "4px 8px",
-            borderRadius: "4px",
+            gap: "8px",
+            padding: "6px 8px",
+            borderRadius: "6px",
             cursor: "pointer",
-            backgroundColor: isSelected ? "var(--bg-tertiary)" : "transparent",
-            color: isSelected ? "var(--text-primary)" : "var(--text-secondary)",
             fontSize: "0.9rem",
-            marginBottom: "2px",
-            transition: "all 0.15s",
+            backgroundColor: isSelected ? "var(--accent-purple-glow)" : "transparent",
+            border: isSelected ? "1px solid var(--accent-purple)" : "1px solid transparent",
+            color: isSelected ? "var(--text-primary)" : "var(--text-secondary)",
+            marginLeft: `${depth * 4}px`,
           }}
+          className="tree-node-item"
         >
           {node.is_dir ? (
             <>
-              <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
+              <span style={{ fontSize: "0.8rem", color: "var(--text-muted)", width: "12px" }}>
                 {isCollapsed ? "▶" : "▼"}
               </span>
               <span>📁</span>
             </>
           ) : (
-            <span>🎵</span>
+            <>
+              <span style={{ width: "12px" }} />
+              <span>🎵</span>
+            </>
           )}
           <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {node.name}
@@ -251,15 +321,6 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
     );
   };
 
-  if (!config) {
-    return (
-      <div className="view-container">
-        <h1>Library Management</h1>
-        <p className="no-data">Please load a workspace configuration file in the Workspaces tab.</p>
-      </div>
-    );
-  }
-
   return (
     <div className="view-container" style={{ display: "flex", flexDirection: "column", height: "100%", gap: "20px" }}>
       <div>
@@ -267,9 +328,9 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
         <p className="subtitle" style={{ margin: 0 }}>Scan your music directories, view folders, edit tags, cover arts, and apply batch updates.</p>
       </div>
 
-      <div style={{ display: "flex", gap: "24px", flex: 1, minHeight: 0 }}>
+      <div style={{ display: "flex", gap: "0", flex: 1, minHeight: 0 }}>
         {/* Left Side: Directory Tree */}
-        <div className="card" style={{ width: "280px", flexShrink: 0, overflowY: "auto", display: "flex", flexDirection: "column", margin: 0 }}>
+        <div className="card" style={{ width: `${leftWidth}px`, flexShrink: 0, overflowY: "auto", display: "flex", flexDirection: "column", margin: 0 }}>
           <div className="card-title" style={{ fontSize: "1rem", borderBottom: "1px solid var(--border-color)", paddingBottom: "12px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span>Library Tree</span>
             <button className="btn btn-secondary" onClick={loadLibraryTree} disabled={isLoadingTree} style={{ padding: "4px 8px", fontSize: "0.75rem" }}>
@@ -289,8 +350,34 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
           </div>
         </div>
 
+        {/* Resizable separator handle */}
+        <div
+          onMouseDown={handleMouseDown}
+          style={{
+            width: "12px",
+            cursor: "col-resize",
+            backgroundColor: "transparent",
+            alignSelf: "stretch",
+            position: "relative",
+            zIndex: 10,
+            display: "flex",
+            justifyContent: "center",
+            alignItems: "center",
+          }}
+          className="resizable-separator"
+          title="Drag to resize tree panel"
+        >
+          <div style={{
+            width: "2px",
+            height: "40px",
+            borderRadius: "1px",
+            backgroundColor: "var(--border-color)",
+            transition: "background-color 0.2s"
+          }} className="resizable-indicator" />
+        </div>
+
         {/* Right Side: Editors */}
-        <div style={{ flex: 1, overflowY: "auto", minWidth: 0 }}>
+        <div style={{ flex: 1, overflowY: "auto", minWidth: 0, paddingLeft: "8px" }}>
           {selectedNode ? (
             selectedNode.is_dir ? (
               // Batch Folder Tag Editor
@@ -298,6 +385,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
                 <div className="card-title">
                   <span>Batch Metadata Editor</span>
                 </div>
+                
                 <div style={{ marginBottom: "16px" }}>
                   <div style={{ fontSize: "1.05rem", fontWeight: 600 }}>📁 {selectedNode.name}</div>
                   <div className="text-secondary" style={{ fontSize: "0.8rem", fontFamily: "var(--font-mono)", wordBreak: "break-all" }}>
@@ -309,54 +397,130 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
                   Apply batch tags to all songs inside this folder recursively. Leave fields empty if you do not want to alter them.
                 </p>
 
-                <div className="form-group">
-                  <label className="form-label">Batch Artist</label>
-                  <input
-                    type="text"
-                    value={batchArtist}
-                    onChange={(e) => setBatchArtist(e.target.value)}
-                    placeholder="e.g. James, Pink Floyd"
-                  />
-                </div>
+                <div style={{ display: "flex", gap: "24px" }}>
+                  <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "12px" }}>
+                    <div className="form-group" style={{ marginBottom: 0 }}>
+                      <label className="form-label">Batch Artist</label>
+                      <input
+                        type="text"
+                        value={batchArtist}
+                        onChange={(e) => setBatchArtist(e.target.value)}
+                        placeholder="e.g. James, Pink Floyd"
+                      />
+                    </div>
 
-                <div className="form-group">
-                  <label className="form-label">Batch Album</label>
-                  <input
-                    type="text"
-                    value={batchAlbum}
-                    onChange={(e) => setBatchAlbum(e.target.value)}
-                    placeholder="e.g. Greatest Hits"
-                  />
-                </div>
+                    <div className="form-group" style={{ marginBottom: 0 }}>
+                      <label className="form-label">Batch Album</label>
+                      <input
+                        type="text"
+                        value={batchAlbum}
+                        onChange={(e) => setBatchAlbum(e.target.value)}
+                        placeholder="e.g. Greatest Hits"
+                      />
+                    </div>
 
-                <div className="form-group">
-                  <label className="form-label">Batch Genre</label>
-                  <input
-                    type="text"
-                    value={batchGenre}
-                    onChange={(e) => setBatchGenre(e.target.value)}
-                    placeholder="e.g. Rock, Folk, Classic"
-                  />
-                </div>
+                    <div className="form-group" style={{ marginBottom: 0 }}>
+                      <label className="form-label">Batch Genre</label>
+                      <input
+                        type="text"
+                        value={batchGenre}
+                        onChange={(e) => setBatchGenre(e.target.value)}
+                        placeholder="e.g. Rock, Folk, Classic"
+                      />
+                    </div>
 
-                <div className="form-group">
-                  <label className="form-label">Batch Year</label>
-                  <input
-                    type="text"
-                    value={batchYear}
-                    onChange={(e) => setBatchYear(e.target.value)}
-                    placeholder="e.g. 2026"
-                  />
-                </div>
+                    <div className="form-group" style={{ marginBottom: 0 }}>
+                      <label className="form-label">Batch Year</label>
+                      <input
+                        type="text"
+                        value={batchYear}
+                        onChange={(e) => setBatchYear(e.target.value)}
+                        placeholder="e.g. 2026"
+                      />
+                    </div>
 
-                <button
-                  className="btn btn-primary"
-                  onClick={handleSaveBatchTags}
-                  disabled={isSavingBatch}
-                  style={{ marginTop: "12px", width: "100%" }}
-                >
-                  {isSavingBatch ? "Saving Batch Updates..." : "⚡ Apply Batch Tags"}
-                </button>
+                    <button
+                      className="btn btn-primary"
+                      onClick={handleSaveBatchTags}
+                      disabled={isSavingBatch}
+                      style={{ marginTop: "12px", width: "100%" }}
+                    >
+                      {isSavingBatch ? "Saving Batch Updates..." : "⚡ Apply Batch Tags"}
+                    </button>
+                  </div>
+
+                  {/* Batch Album Art Cover Panel */}
+                  <div style={{ width: "200px", flexShrink: 0, display: "flex", flexDirection: "column", gap: "12px", alignItems: "center" }}>
+                    <div className="form-label" style={{ alignSelf: "flex-start" }}>Batch Cover Art</div>
+                    {batchCoverB64 === "REMOVE" ? (
+                      <div
+                        style={{
+                          width: "200px",
+                          height: "200px",
+                          borderRadius: "8px",
+                          backgroundColor: "rgba(239, 68, 68, 0.1)",
+                          border: "1px dashed var(--danger)",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          color: "var(--danger)",
+                          fontSize: "0.85rem",
+                          fontWeight: 600,
+                          textAlign: "center",
+                          padding: "16px",
+                        }}
+                      >
+                        ⚠️ Cover art will be REMOVED from all tracks
+                      </div>
+                    ) : batchCoverB64 ? (
+                      <img
+                        src={`data:${batchCoverMime};base64,${batchCoverB64}`}
+                        alt="Batch Cover Art"
+                        style={{
+                          width: "200px",
+                          height: "200px",
+                          borderRadius: "8px",
+                          objectFit: "cover",
+                          border: "1px solid var(--border-color)",
+                        }}
+                      />
+                    ) : (
+                      <div
+                        style={{
+                          width: "200px",
+                          height: "200px",
+                          borderRadius: "8px",
+                          backgroundColor: "var(--bg-tertiary)",
+                          border: "1px dashed var(--border-color)",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          color: "var(--text-secondary)",
+                          fontSize: "0.85rem",
+                          textAlign: "center",
+                          padding: "16px",
+                        }}
+                      >
+                        No change to cover art tags
+                      </div>
+                    )}
+                    <div style={{ display: "flex", flexDirection: "column", gap: "8px", width: "100%" }}>
+                      <button type="button" className="btn btn-secondary" onClick={handleUploadBatchCover} style={{ width: "100%", fontSize: "0.8rem", padding: "6px" }}>
+                        Upload image
+                      </button>
+                      <div style={{ display: "flex", gap: "6px", width: "100%" }}>
+                        <button type="button" className="btn btn-danger" onClick={() => setBatchCoverB64("REMOVE")} style={{ flex: 1, fontSize: "0.8rem", padding: "6px" }}>
+                          Remove
+                        </button>
+                        {(batchCoverB64 || batchCoverB64 === "REMOVE") && (
+                          <button type="button" className="btn btn-secondary" onClick={() => { setBatchCoverB64(""); setBatchCoverMime(""); }} style={{ flex: 1, fontSize: "0.8rem", padding: "6px" }}>
+                            Reset
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
             ) : (
               // Single Track Tag Editor

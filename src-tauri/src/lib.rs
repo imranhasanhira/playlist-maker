@@ -1,4 +1,5 @@
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+#![allow(non_snake_case)]
+
 mod playlist;
 mod sanitizer;
 mod transcoder;
@@ -6,136 +7,179 @@ mod library;
 
 use std::collections::HashSet;
 use std::path::Path;
+use tauri::Emitter;
 
 #[tauri::command]
-async fn load_workspace(config_path: String) -> Result<playlist::MainConfig, String> {
-    playlist::read_config_file(Path::new(&config_path))
+async fn load_workspace(configPath: String) -> Result<playlist::MainConfig, String> {
+    playlist::read_config_file(Path::new(&configPath))
 }
 
 #[tauri::command]
-async fn save_workspace(config_path: String, config: playlist::MainConfig) -> Result<(), String> {
-    playlist::write_config_file(Path::new(&config_path), &config)
+async fn save_workspace(configPath: String, config: playlist::MainConfig) -> Result<(), String> {
+    playlist::write_config_file(Path::new(&configPath), &config)
 }
 
 #[tauri::command]
 async fn preview_playlist_tracks(
-    config_path: String,
-    source_dir_override: Option<String>,
-    playlist_index: usize,
+    configPath: String,
+    sourceDirOverride: Option<String>,
+    playlistIndex: usize,
     formats: String,
 ) -> Result<Vec<playlist::TrackPreview>, String> {
-    let config = playlist::read_config_file(Path::new(&config_path))?;
-    if playlist_index >= config.playlists.len() {
-        return Err("Playlist index out of bounds".to_string());
-    }
+    tokio::task::spawn_blocking(move || {
+        let config = playlist::read_config_file(Path::new(&configPath))?;
+        if playlistIndex >= config.playlists.len() {
+            return Err("Playlist index out of bounds".to_string());
+        }
 
-    let resolved_source_dir = playlist::find_right_dir(
-        source_dir_override,
-        config.source_dir.clone(),
-        true,
-        Path::new(&config_path),
-    );
+        let resolved_source_dir = playlist::find_right_dir(
+            sourceDirOverride,
+            config.source_dir.clone(),
+            true,
+            Path::new(&configPath),
+        );
 
-    let formats_set: HashSet<String> = formats
-        .split(',')
-        .map(|s| s.trim().to_lowercase())
-        .collect();
+        let formats_set: HashSet<String> = formats
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .collect();
 
-    let playlist_config = &config.playlists[playlist_index];
-    let (files, _) = playlist::resolve_playlist_files(playlist_config, &resolved_source_dir, &formats_set);
+        let playlist_config = &config.playlists[playlistIndex];
+        let (files, _) = playlist::resolve_playlist_files(playlist_config, &resolved_source_dir, &formats_set);
 
-    let resolved_target_dir = playlist::find_right_dir(
-        None,
-        config.target_dir.clone(),
-        true,
-        Path::new(&config_path),
-    );
+        let resolved_target_dir = playlist::find_right_dir(
+            None,
+            config.target_dir.clone(),
+            true,
+            Path::new(&configPath),
+        );
 
-    let previews = files
-        .iter()
-        .map(|f| playlist::get_track_preview(f, &resolved_target_dir))
-        .collect();
+        let previews = files
+            .iter()
+            .map(|f| playlist::get_track_preview(f, &resolved_target_dir))
+            .collect();
 
-    Ok(previews)
+        Ok(previews)
+    })
+    .await
+    .map_err(|e| format!("Thread execution error: {}", e))?
 }
 
 #[tauri::command]
 async fn generate_all_playlists(
-    config_path: String,
-    source_dir_override: Option<String>,
-    target_dir_override: Option<String>,
-    relative_to_config: bool,
+    configPath: String,
+    sourceDirOverride: Option<String>,
+    targetDirOverride: Option<String>,
+    relativeToConfig: bool,
     formats: String,
 ) -> Result<Vec<String>, String> {
-    let config = playlist::read_config_file(Path::new(&config_path))?;
-    
-    let resolved_source_dir = playlist::find_right_dir(
-        source_dir_override,
-        config.source_dir.clone(),
-        relative_to_config,
-        Path::new(&config_path),
-    );
+    tokio::task::spawn_blocking(move || {
+        let config = playlist::read_config_file(Path::new(&configPath))?;
+        
+        let resolved_source_dir = playlist::find_right_dir(
+            sourceDirOverride,
+            config.source_dir.clone(),
+            relativeToConfig,
+            Path::new(&configPath),
+        );
 
-    let resolved_target_dir = playlist::find_right_dir(
-        target_dir_override,
-        config.target_dir.clone(),
-        relative_to_config,
-        Path::new(&config_path),
-    );
+        let resolved_target_dir = playlist::find_right_dir(
+            targetDirOverride,
+            config.target_dir.clone(),
+            relativeToConfig,
+            Path::new(&configPath),
+        );
 
-    if !resolved_target_dir.exists() {
-        std::fs::create_dir_all(&resolved_target_dir)
-            .map_err(|e| format!("Failed to create target directory: {}", e))?;
-    }
-
-    let formats_set: HashSet<String> = formats
-        .split(',')
-        .map(|s| s.trim().to_lowercase())
-        .collect();
-
-    let mut logs = Vec::new();
-    logs.push(format!("Writing all playlist files to {}", resolved_target_dir.display()));
-
-    for playlist_config in &config.playlists {
-        logs.push(format!("Making playlist: {}", playlist_config.name));
-
-        let (files, errors) = playlist::resolve_playlist_files(playlist_config, &resolved_source_dir, &formats_set);
-        for err in errors {
-            logs.push(format!("  {}", err));
+        if !resolved_target_dir.exists() {
+            std::fs::create_dir_all(&resolved_target_dir)
+                .map_err(|e| format!("Failed to create target directory: {}", e))?;
         }
 
-        if !files.is_empty() {
-            let playlist_file_path = resolved_target_dir.join(format!("{}.m3u", playlist_config.name));
-            match playlist::write_playlist_file(&playlist_file_path, &files) {
-                Ok(_) => logs.push(format!("  Done with {} files", files.len())),
-                Err(e) => logs.push(format!("  ERROR: {}", e)),
+        let formats_set: HashSet<String> = formats
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .collect();
+
+        let mut logs = Vec::new();
+        logs.push(format!("Writing all playlist files to {}", resolved_target_dir.display()));
+
+        for playlist_config in &config.playlists {
+            logs.push(format!("Making playlist: {}", playlist_config.name));
+
+            let (files, errors) = playlist::resolve_playlist_files(playlist_config, &resolved_source_dir, &formats_set);
+            for err in errors {
+                logs.push(format!("  {}", err));
             }
-        } else {
-            logs.push(format!("  SKIPPED due to no available music"));
-        }
-    }
 
-    Ok(logs)
+            if !files.is_empty() {
+                let playlist_file_path = resolved_target_dir.join(format!("{}.m3u", playlist_config.name));
+                match playlist::write_playlist_file(&playlist_file_path, &files) {
+                    Ok(_) => logs.push(format!("  Done with {} files", files.len())),
+                    Err(e) => logs.push(format!("  ERROR: {}", e)),
+                }
+            } else {
+                logs.push(format!("  SKIPPED due to no available music"));
+            }
+        }
+
+        Ok(logs)
+    })
+    .await
+    .map_err(|e| format!("Thread execution error: {}", e))?
 }
 
 #[tauri::command]
-async fn scan_sanitizer(folder: String, formats: Vec<String>, strip_phrases: Vec<String>) -> Result<Vec<sanitizer::SanitizeItem>, String> {
-    sanitizer::scan_sanitize_files(Path::new(&folder), &formats, &strip_phrases)
+async fn scan_sanitizer(app: tauri::AppHandle, taskId: String, folder: String, formats: Vec<String>, stripPhrases: Vec<String>) -> Result<Vec<sanitizer::SanitizeItem>, String> {
+    tokio::task::spawn_blocking(move || {
+        sanitizer::scan_sanitize_files(&app, &taskId, Path::new(&folder), &formats, &stripPhrases)
+    })
+    .await
+    .map_err(|e| format!("Thread execution error: {}", e))?
 }
 
 #[tauri::command]
 async fn execute_sanitizer(items: Vec<sanitizer::SanitizeItem>) -> Result<(), String> {
-    sanitizer::execute_rename_files(items)
+    tokio::task::spawn_blocking(move || {
+        sanitizer::execute_rename_files(items)
+    })
+    .await
+    .map_err(|e| format!("Thread execution error: {}", e))?
 }
 
 #[tauri::command]
-async fn scan_hidden(folder: String) -> Result<Vec<sanitizer::HiddenFileItem>, String> {
-    sanitizer::scan_hidden_files(Path::new(&folder))
+async fn scan_metadata_sanitizer(app: tauri::AppHandle, taskId: String, folder: String, formats: Vec<String>, stripPhrases: Vec<String>) -> Result<Vec<sanitizer::MetadataSanitizeItem>, String> {
+    tokio::task::spawn_blocking(move || {
+        sanitizer::scan_sanitize_metadata(&app, &taskId, Path::new(&folder), &formats, &stripPhrases)
+    })
+    .await
+    .map_err(|e| format!("Thread execution error: {}", e))?
 }
 
 #[tauri::command]
-async fn delete_hidden(file_paths: Vec<String>) -> Result<(), String> {
-    sanitizer::execute_delete_files(file_paths)
+async fn execute_metadata_sanitizer(items: Vec<sanitizer::MetadataSanitizeItem>) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        sanitizer::execute_sanitize_metadata(items)
+    })
+    .await
+    .map_err(|e| format!("Thread execution error: {}", e))?
+}
+
+#[tauri::command]
+async fn scan_hidden(app: tauri::AppHandle, taskId: String, folder: String) -> Result<Vec<sanitizer::HiddenFileItem>, String> {
+    tokio::task::spawn_blocking(move || {
+        sanitizer::scan_hidden_files(&app, &taskId, Path::new(&folder))
+    })
+    .await
+    .map_err(|e| format!("Thread execution error: {}", e))?
+}
+
+#[tauri::command]
+async fn delete_hidden(filePaths: Vec<String>) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        sanitizer::execute_delete_files(filePaths)
+    })
+    .await
+    .map_err(|e| format!("Thread execution error: {}", e))?
 }
 
 #[tauri::command]
@@ -175,69 +219,121 @@ async fn select_directory(title: String) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-async fn scan_flac_files(folder: String) -> Result<Vec<String>, String> {
-    let path = Path::new(&folder);
-    if !path.exists() {
-        return Err("Folder does not exist".to_string());
-    }
-    let mut flac_files = Vec::new();
-    for entry in walkdir::WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
-        if entry.file_type().is_file() {
-            let p = entry.path();
+async fn scan_flac_files(app: tauri::AppHandle, taskId: String, folder: String) -> Result<Vec<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        let path = Path::new(&folder);
+        if !path.exists() {
+            return Err("Folder does not exist".to_string());
+        }
+        
+        // 1. Quick Scan: count files
+        let mut entries = Vec::new();
+        for entry in walkdir::WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
+            if entry.file_type().is_file() {
+                entries.push(entry.path().to_path_buf());
+            }
+        }
+
+        let total = entries.len();
+        let mut flac_files = Vec::new();
+
+        // 2. Loop and process
+        for (index, p) in entries.iter().enumerate() {
             if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
                 if ext.to_lowercase() == "flac" {
                     flac_files.push(p.to_string_lossy().to_string());
                 }
             }
+
+            // Emit progress
+            let _ = app.emit(
+                "task-progress",
+                transcoder::TaskProgress {
+                    task_id: taskId.clone(),
+                    task_name: "FLAC Files Scan".to_string(),
+                    index,
+                    total,
+                    status: if index + 1 == total { "completed".to_string() } else { "running".to_string() },
+                    message: p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                    file_path: None,
+                }
+            );
         }
-    }
-    flac_files.sort();
-    Ok(flac_files)
+
+        flac_files.sort();
+        Ok(flac_files)
+    })
+    .await
+    .map_err(|e| format!("Thread execution error: {}", e))?
 }
 
 // Library Management Commands
 #[tauri::command]
 async fn read_dir_tree(folder: String, formats: Vec<String>) -> Result<library::DirTreeNode, String> {
-    let formats_set: HashSet<String> = formats.iter().map(|f| f.to_lowercase()).collect();
-    library::read_tree_recursive(Path::new(&folder), &formats_set)
+    tokio::task::spawn_blocking(move || {
+        let formats_set: HashSet<String> = formats.iter().map(|f| f.to_lowercase()).collect();
+        library::read_tree_recursive(Path::new(&folder), &formats_set)
+    })
+    .await
+    .map_err(|e| format!("Thread execution error: {}", e))?
 }
 
 #[tauri::command]
-async fn read_track_tags(file_path: String) -> Result<library::TrackTags, String> {
-    library::read_track_tags_impl(Path::new(&file_path))
+async fn read_track_tags(filePath: String) -> Result<library::TrackTags, String> {
+    tokio::task::spawn_blocking(move || {
+        library::read_track_tags_impl(Path::new(&filePath))
+    })
+    .await
+    .map_err(|e| format!("Thread execution error: {}", e))?
 }
 
 #[tauri::command]
-async fn write_track_tags(file_path: String, tags: library::TrackTags) -> Result<(), String> {
-    library::write_track_tags_impl(Path::new(&file_path), tags)
+async fn write_track_tags(filePath: String, tags: library::TrackTags) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        library::write_track_tags_impl(Path::new(&filePath), tags)
+    })
+    .await
+    .map_err(|e| format!("Thread execution error: {}", e))?
 }
 
 #[tauri::command]
 async fn batch_update_folder_tags(
-    folder_path: String,
+    folderPath: String,
     formats: Vec<String>,
     artist: Option<String>,
     album: Option<String>,
     genre: Option<String>,
     year: Option<u32>,
+    coverB64: Option<String>,
+    coverMime: Option<String>,
 ) -> Result<(), String> {
-    let formats_set: HashSet<String> = formats.iter().map(|f| f.to_lowercase()).collect();
-    library::batch_update_folder_tags_impl(
-        Path::new(&folder_path),
-        &formats_set,
-        artist,
-        album,
-        genre,
-        year,
-    )
+    tokio::task::spawn_blocking(move || {
+        let formats_set: HashSet<String> = formats.iter().map(|f| f.to_lowercase()).collect();
+        library::batch_update_folder_tags_impl(
+            Path::new(&folderPath),
+            &formats_set,
+            artist,
+            album,
+            genre,
+            year,
+            coverB64,
+            coverMime,
+        )
+    })
+    .await
+    .map_err(|e| format!("Thread execution error: {}", e))?
 }
 
 #[tauri::command]
-async fn read_image_base64(file_path: String) -> Result<String, String> {
-    let data = std::fs::read(Path::new(&file_path))
-        .map_err(|e| format!("Failed to read file: {}", e))?;
-    use base64::prelude::*;
-    Ok(BASE64_STANDARD.encode(&data))
+async fn read_image_base64(filePath: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let data = std::fs::read(Path::new(&filePath))
+            .map_err(|e| format!("Failed to read file: {}", e))?;
+        use base64::prelude::*;
+        Ok(BASE64_STANDARD.encode(&data))
+    })
+    .await
+    .map_err(|e| format!("Thread execution error: {}", e))?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -262,7 +358,9 @@ pub fn run() {
             read_track_tags,
             write_track_tags,
             batch_update_folder_tags,
-            read_image_base64
+            read_image_base64,
+            scan_metadata_sanitizer,
+            execute_metadata_sanitizer
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

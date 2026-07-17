@@ -16,12 +16,15 @@ pub struct TranscodeJob {
 }
 
 #[derive(Debug, Serialize, Clone)]
-pub struct TranscodeProgress {
-    pub file_path: String,
+pub struct TaskProgress {
+    pub task_id: String,
+    pub task_name: String,
     pub index: usize,
     pub total: usize,
-    pub success: bool,
-    pub error_msg: Option<String>,
+    pub status: String,
+    pub message: String,
+    #[serde(rename = "filePath")]
+    pub file_path: Option<String>,
 }
 
 // Convert a single FLAC file to MP3
@@ -191,14 +194,22 @@ pub fn run_transcode_queue(app: AppHandle, jobs: Vec<TranscodeJob>) {
                 Err(e) => (false, Some(e)),
             };
 
+            let message = if success {
+                format!("Converted: {}", file_stem.to_string_lossy())
+            } else {
+                format!("Failed: {}", error_msg.as_deref().unwrap_or(""))
+            };
+
             let _ = app.emit(
-                "transcode-progress",
-                TranscodeProgress {
-                    file_path: job.file_path,
-                    index: index + 1,
+                "task-progress",
+                TaskProgress {
+                    task_id: "flac_transcode".to_string(),
+                    task_name: "FLAC Transcoding".to_string(),
+                    index,
                     total,
-                    success,
-                    error_msg,
+                    status: if index + 1 == total { "completed".to_string() } else { "running".to_string() },
+                    message,
+                    file_path: Some(job.file_path.clone()),
                 },
             );
         }

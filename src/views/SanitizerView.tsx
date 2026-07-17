@@ -22,6 +22,13 @@ type HiddenFileItem = {
   size_bytes: number;
 };
 
+type MetadataSanitizeItem = {
+  file_path: string;
+  field_name: string;
+  original_value: string;
+  sanitized_value: string;
+};
+
 export const SanitizerView: React.FC<SanitizerViewProps> = ({
   formats,
   stripPhrases,
@@ -33,6 +40,14 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
   const [selectedRenamePaths, setSelectedRenamePaths] = useState<Set<string>>(new Set());
   const [hiddenItems, setHiddenItems] = useState<HiddenFileItem[]>([]);
   const [selectedDeletePaths, setSelectedDeletePaths] = useState<Set<string>>(new Set());
+
+  // Metadata tags sanitization state
+  const [metadataItems, setMetadataItems] = useState<MetadataSanitizeItem[]>([]);
+  const [selectedMetadataIndices, setSelectedMetadataIndices] = useState<Set<number>>(new Set());
+  const [isCleaningMetadata, setIsCleaningMetadata] = useState<boolean>(false);
+
+  // Cleaner Tab state
+  const [sanitizerSubTab, setSanitizerSubTab] = useState<"files" | "metadata" | "hidden">("files");
   
   // Custom phrase state
   const [newPhrase, setNewPhrase] = useState<string>("");
@@ -61,24 +76,48 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
     setIsScanning(true);
     try {
       const formatsList = formats.split(",").map((f) => f.trim());
-      // Filter out unchecked phrases
       const activePhrases = stripPhrases.filter((p) => !uncheckedPhrases.has(p));
 
-      const renameResult = await invoke<SanitizeItem[]>("scan_sanitizer", {
+      // 1. Scan Filenames
+      const renamePromise = invoke<SanitizeItem[]>("scan_sanitizer", {
+        taskId: "filename_scan",
         folder,
         formats: formatsList,
         stripPhrases: activePhrases,
       });
-      setSanitizeItems(renameResult);
-      // Select all renames by default
-      setSelectedRenamePaths(new Set(renameResult.map((i) => i.original_path)));
+      addBackgroundTask("filename_scan", "Filename Sanitizer Scan", renamePromise);
 
-      const hiddenResult = await invoke<HiddenFileItem[]>("scan_hidden", {
+      // 2. Scan Hidden Files
+      const hiddenPromise = invoke<HiddenFileItem[]>("scan_hidden", {
+        taskId: "hidden_scan",
         folder,
       });
+      addBackgroundTask("hidden_scan", "Hidden Files Scan", hiddenPromise);
+
+      // 3. Scan Metadata Tags
+      const metadataPromise = invoke<MetadataSanitizeItem[]>("scan_metadata_sanitizer", {
+        taskId: "metadata_scan",
+        folder,
+        formats: formatsList,
+        stripPhrases: activePhrases,
+      });
+      addBackgroundTask("metadata_scan", "Metadata Sanitizer Scan", metadataPromise);
+
+      // Wait for all to complete in parallel
+      const [renameResult, hiddenResult, metadataResult] = await Promise.all([
+        renamePromise,
+        hiddenPromise,
+        metadataPromise,
+      ]);
+
+      setSanitizeItems(renameResult);
+      setSelectedRenamePaths(new Set(renameResult.map((i) => i.original_path)));
+
       setHiddenItems(hiddenResult);
-      // Select all hidden files by default
       setSelectedDeletePaths(new Set(hiddenResult.map((i) => i.file_path)));
+
+      setMetadataItems(metadataResult);
+      setSelectedMetadataIndices(new Set(metadataResult.map((_, idx) => idx)));
     } catch (e) {
       alert("Error scanning folder: " + e);
     } finally {
@@ -122,11 +161,28 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
     }
   };
 
+  const handleToggleMetadataSelect = (idx: number) => {
+    const next = new Set(selectedMetadataIndices);
+    if (next.has(idx)) {
+      next.delete(idx);
+    } else {
+      next.add(idx);
+    }
+    setSelectedMetadataIndices(next);
+  };
+
+  const handleToggleAllMetadata = () => {
+    if (selectedMetadataIndices.size === metadataItems.length) {
+      setSelectedMetadataIndices(new Set());
+    } else {
+      setSelectedMetadataIndices(new Set(metadataItems.map((_, idx) => idx)));
+    }
+  };
+
   const executeRename = async () => {
     if (selectedRenamePaths.size === 0) return;
     const itemsToRename = sanitizeItems.filter((i) => selectedRenamePaths.has(i.original_path));
     
-    // Explicit confirmation
     const confirmed = confirm(
       `Are you absolutely sure you want to sanitize/rename these ${itemsToRename.length} files?\nThis will rename files on your local disk.`
     );
@@ -149,7 +205,6 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
   const executeDelete = async () => {
     if (selectedDeletePaths.size === 0) return;
     
-    // Explicit confirmation
     const confirmed = confirm(
       `WARNING: You are about to permanently delete ${selectedDeletePaths.size} hidden files!\nThis operation is irreversible. Do you want to proceed?`
     );
@@ -166,6 +221,29 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
       alert("Error deleting hidden files: " + e);
     } finally {
       setIsDeleting(false);
+    }
+  };
+
+  const executeCleanMetadata = async () => {
+    const itemsToClean = metadataItems.filter((_, idx) => selectedMetadataIndices.has(idx));
+    if (itemsToClean.length === 0) return;
+
+    const confirmed = confirm(
+      `Are you sure you want to clean metadata tags for the ${itemsToClean.length} selected fields?`
+    );
+    if (!confirmed) return;
+
+    setIsCleaningMetadata(true);
+    try {
+      const promise = invoke("execute_metadata_sanitizer", { items: itemsToClean });
+      addBackgroundTask(`clean_metadata_${Date.now()}`, `Clean tags of ${itemsToClean.length} files`, promise);
+      await promise;
+      alert("Metadata tags cleaned successfully!");
+      handleScan(scanFolder);
+    } catch (e) {
+      alert("Error cleaning metadata tags: " + e);
+    } finally {
+      setIsCleaningMetadata(false);
     }
   };
 
@@ -208,7 +286,7 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
   return (
     <div className="view-container">
       <h1>Sanitizer & Cleaner</h1>
-      <p className="subtitle">Scan directories to strip web names, unwanted text, and clean up hidden files.</p>
+      <p className="subtitle">Scan directories to strip web names, unwanted text from filenames, clean tags/metadata, and remove hidden junk files.</p>
 
       {/* Target directory selector */}
       <div className="card">
@@ -239,7 +317,7 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
       <div className="card">
         <div className="card-title">Editable Sanitization Rules</div>
         <p className="text-secondary" style={{ fontSize: "0.85rem", marginBottom: "12px" }}>
-          Check or uncheck which words/phrases should be stripped from filenames, or add your own custom words to strip.
+          Check or uncheck which words/phrases should be stripped from filenames and metadata, or add your own custom words to strip.
         </p>
 
         {/* Custom Input */}
@@ -313,126 +391,224 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
       </div>
 
       {scanFolder && !isScanning && (
-        <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
-          {/* Side-by-side rename comparison checklist */}
-          <div className="card">
-            <div className="card-title">
-              <span>Sanitize File Names Comparison ({sanitizeItems.length} items found)</span>
-              {sanitizeItems.length > 0 && (
-                <button
-                  className="btn btn-primary"
-                  onClick={executeRename}
-                  disabled={selectedRenamePaths.size === 0 || isRenaming}
-                >
-                  {isRenaming ? "Renaming..." : `Sanitize Selected (${selectedRenamePaths.size})`}
-                </button>
-              )}
+        <div className="card" style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+          
+          {/* Sub-Tabs selection bar inside card */}
+          <div style={{ display: "flex", borderBottom: "1px solid var(--border-color)", paddingBottom: "12px", gap: "12px", alignItems: "center", justifyContent: "space-between" }}>
+            <div style={{ display: "flex", gap: "8px" }}>
+              <button
+                className={`btn ${sanitizerSubTab === "files" ? "btn-primary" : "btn-secondary"}`}
+                onClick={() => setSanitizerSubTab("files")}
+                style={{ padding: "8px 16px", fontSize: "0.85rem" }}
+              >
+                📁 Filename Cleaner ({sanitizeItems.length})
+              </button>
+              <button
+                className={`btn ${sanitizerSubTab === "metadata" ? "btn-primary" : "btn-secondary"}`}
+                onClick={() => setSanitizerSubTab("metadata")}
+                style={{ padding: "8px 16px", fontSize: "0.85rem" }}
+              >
+                🏷️ Metadata Tags Cleaner ({metadataItems.length})
+              </button>
+              <button
+                className={`btn ${sanitizerSubTab === "hidden" ? "btn-primary" : "btn-secondary"}`}
+                onClick={() => setSanitizerSubTab("hidden")}
+                style={{ padding: "8px 16px", fontSize: "0.85rem" }}
+              >
+                👻 Hidden Files Cleaner ({hiddenItems.length})
+              </button>
             </div>
 
-            {sanitizeItems.length > 0 ? (
-              <div className="table-container">
-                <table>
-                  <thead>
-                    <tr>
-                      <th style={{ width: "40px", textAlign: "center" }}>
-                        <input
-                          type="checkbox"
-                          checked={selectedRenamePaths.size === sanitizeItems.length}
-                          onChange={handleToggleAllRename}
-                        />
-                      </th>
-                      <th>Original Filename</th>
-                      <th>Proposed Sanitized Filename</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {sanitizeItems.map((item, idx) => (
-                      <tr key={idx}>
-                        <td style={{ textAlign: "center" }}>
-                          <input
-                            type="checkbox"
-                            checked={selectedRenamePaths.has(item.original_path)}
-                            onChange={() => handleToggleRenameSelect(item.original_path)}
-                          />
-                        </td>
-                        <td>
-                          <div style={{ color: "var(--danger)" }}>{item.original_name}</div>
-                          <div className="text-secondary" style={{ fontSize: "0.75rem", fontFamily: "var(--font-mono)" }}>
-                            {item.relative_path}
-                          </div>
-                        </td>
-                        <td style={{ color: "var(--success)", fontWeight: 600 }}>
-                          {item.sanitized_name}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              <p className="no-data">All file names are already clean! No changes needed.</p>
+            {/* Action Buttons depending on sub-tab */}
+            {sanitizerSubTab === "files" && sanitizeItems.length > 0 && (
+              <button
+                className="btn btn-primary"
+                onClick={executeRename}
+                disabled={selectedRenamePaths.size === 0 || isRenaming}
+                style={{ padding: "8px 16px", fontSize: "0.85rem" }}
+              >
+                {isRenaming ? "Renaming..." : `Sanitize Names (${selectedRenamePaths.size})`}
+              </button>
+            )}
+
+            {sanitizerSubTab === "metadata" && metadataItems.length > 0 && (
+              <button
+                className="btn btn-primary"
+                onClick={executeCleanMetadata}
+                disabled={selectedMetadataIndices.size === 0 || isCleaningMetadata}
+                style={{ padding: "8px 16px", fontSize: "0.85rem" }}
+              >
+                {isCleaningMetadata ? "Cleaning..." : `Clean Tags (${selectedMetadataIndices.size})`}
+              </button>
+            )}
+
+            {sanitizerSubTab === "hidden" && hiddenItems.length > 0 && (
+              <button
+                className="btn btn-danger"
+                onClick={executeDelete}
+                disabled={selectedDeletePaths.size === 0 || isDeleting}
+                style={{ padding: "8px 16px", fontSize: "0.85rem" }}
+              >
+                {isDeleting ? "Deleting..." : `Delete Hidden (${selectedDeletePaths.size})`}
+              </button>
             )}
           </div>
 
-          {/* Hidden files cleaner */}
-          <div className="card">
-            <div className="card-title">
-              <span>Delete Hidden Files ({hiddenItems.length} items found)</span>
-              {hiddenItems.length > 0 && (
-                <button
-                  className="btn btn-danger"
-                  onClick={executeDelete}
-                  disabled={selectedDeletePaths.size === 0 || isDeleting}
-                >
-                  {isDeleting ? "Deleting..." : `Delete Selected (${selectedDeletePaths.size})`}
-                </button>
-              )}
-            </div>
-
-            {hiddenItems.length > 0 ? (
-              <div className="table-container">
-                <table>
-                  <thead>
-                    <tr>
-                      <th style={{ width: "40px", textAlign: "center" }}>
-                        <input
-                          type="checkbox"
-                          checked={selectedDeletePaths.size === hiddenItems.length}
-                          onChange={handleToggleAllDelete}
-                        />
-                      </th>
-                      <th>File Path / Location</th>
-                      <th>Size</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {hiddenItems.map((item, idx) => (
-                      <tr key={idx}>
-                        <td style={{ textAlign: "center" }}>
+          {/* Sub-Tab Panels */}
+          {sanitizerSubTab === "files" && (
+            <div>
+              {sanitizeItems.length > 0 ? (
+                <div className="table-container">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th style={{ width: "40px", textAlign: "center" }}>
                           <input
                             type="checkbox"
-                            checked={selectedDeletePaths.has(item.file_path)}
-                            onChange={() => handleToggleDeleteSelect(item.file_path)}
+                            checked={selectedRenamePaths.size === sanitizeItems.length}
+                            onChange={handleToggleAllRename}
                           />
-                        </td>
-                        <td>
-                          <div style={{ fontWeight: 600, color: "var(--text-secondary)" }}>{item.file_name}</div>
-                          <div className="text-secondary" style={{ fontSize: "0.75rem", fontFamily: "var(--font-mono)" }}>
-                            {item.relative_path}
-                          </div>
-                        </td>
-                        <td style={{ fontFamily: "var(--font-mono)", width: "100px" }}>
-                          {formatSize(item.size_bytes)}
-                        </td>
+                        </th>
+                        <th>Original Filename</th>
+                        <th>Proposed Sanitized Filename</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              <p className="no-data">No hidden files found in this directory.</p>
-            )}
-          </div>
+                    </thead>
+                    <tbody>
+                      {sanitizeItems.map((item, idx) => (
+                        <tr key={idx}>
+                          <td style={{ textAlign: "center" }}>
+                            <input
+                              type="checkbox"
+                              checked={selectedRenamePaths.has(item.original_path)}
+                              onChange={() => handleToggleRenameSelect(item.original_path)}
+                            />
+                          </td>
+                          <td>
+                            <div style={{ color: "var(--danger)" }}>{item.original_name}</div>
+                            <div className="text-secondary" style={{ fontSize: "0.75rem", fontFamily: "var(--font-mono)" }}>
+                              {item.relative_path}
+                            </div>
+                          </td>
+                          <td style={{ color: "var(--success)", fontWeight: 600 }}>
+                            {item.sanitized_name}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="no-data">All file names are already clean! No changes needed.</p>
+              )}
+            </div>
+          )}
+
+          {sanitizerSubTab === "metadata" && (
+            <div>
+              {metadataItems.length > 0 ? (
+                <div className="table-container">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th style={{ width: "40px", textAlign: "center" }}>
+                          <input
+                            type="checkbox"
+                            checked={selectedMetadataIndices.size === metadataItems.length}
+                            onChange={handleToggleAllMetadata}
+                          />
+                        </th>
+                        <th>Track / File</th>
+                        <th>Tag Field</th>
+                        <th>Original Tag Value</th>
+                        <th>Sanitized Tag Value</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {metadataItems.map((item, idx) => (
+                        <tr key={idx}>
+                          <td style={{ textAlign: "center" }}>
+                            <input
+                              type="checkbox"
+                              checked={selectedMetadataIndices.has(idx)}
+                              onChange={() => handleToggleMetadataSelect(idx)}
+                            />
+                          </td>
+                          <td>
+                            <div style={{ fontWeight: 600, color: "var(--text-secondary)" }}>
+                              {item.file_path.split("/").pop()}
+                            </div>
+                            <div className="text-secondary" style={{ fontSize: "0.75rem", fontFamily: "var(--font-mono)" }}>
+                              {item.file_path}
+                            </div>
+                          </td>
+                          <td style={{ fontWeight: 600, color: "var(--accent-purple-hover)" }}>
+                            {item.field_name}
+                          </td>
+                          <td>
+                            <div style={{ color: "var(--danger)" }}>{item.original_value}</div>
+                          </td>
+                          <td style={{ color: "var(--success)", fontWeight: 600 }}>
+                            {item.sanitized_value}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="no-data">All audio tags and descriptions are clean! No changes needed.</p>
+              )}
+            </div>
+          )}
+
+          {sanitizerSubTab === "hidden" && (
+            <div>
+              {hiddenItems.length > 0 ? (
+                <div className="table-container">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th style={{ width: "40px", textAlign: "center" }}>
+                          <input
+                            type="checkbox"
+                            checked={selectedDeletePaths.size === hiddenItems.length}
+                            onChange={handleToggleAllDelete}
+                          />
+                        </th>
+                        <th>File Path / Location</th>
+                        <th>Size</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {hiddenItems.map((item, idx) => (
+                        <tr key={idx}>
+                          <td style={{ textAlign: "center" }}>
+                            <input
+                              type="checkbox"
+                              checked={selectedDeletePaths.has(item.file_path)}
+                              onChange={() => handleToggleDeleteSelect(item.file_path)}
+                            />
+                          </td>
+                          <td>
+                            <div style={{ fontWeight: 600, color: "var(--text-secondary)" }}>{item.file_name}</div>
+                            <div className="text-secondary" style={{ fontSize: "0.75rem", fontFamily: "var(--font-mono)" }}>
+                              {item.relative_path}
+                            </div>
+                          </td>
+                          <td style={{ fontFamily: "var(--font-mono)", width: "100px" }}>
+                            {formatSize(item.size_bytes)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="no-data">No hidden files found in this directory.</p>
+              )}
+            </div>
+          )}
+
         </div>
       )}
     </div>
