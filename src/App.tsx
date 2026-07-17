@@ -154,17 +154,23 @@ function App() {
       });
       console.log("load_workspace returned config:", loadedConfig);
       setConfig(loadedConfig);
+      setConfigPath(path);
+      localStorage.setItem("lastConfigPath", path);
       return loadedConfig;
     } catch (e) {
       console.error("load_workspace failed:", e);
       alert("Error loading workspace config: " + e);
+      localStorage.removeItem("lastConfigPath");
+      setConfigPath("");
+      setConfig(null);
       return null;
     }
   };
 
   useEffect(() => {
-    if (configPath) {
-      handleLoadConfig(configPath);
+    const lastPath = localStorage.getItem("lastConfigPath");
+    if (lastPath) {
+      handleLoadConfig(lastPath);
     }
   }, []);
 
@@ -262,6 +268,7 @@ function App() {
 
       setConfigPath(newConfigPath);
       setConfig(newConfig);
+      localStorage.setItem("lastConfigPath", newConfigPath);
       alert("New workspace created successfully!");
       setCurrentView("playlists");
     } catch (e) {
