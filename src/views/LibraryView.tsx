@@ -34,7 +34,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
   const [treeRoot, setTreeRoot] = useState<DirTreeNode | null>(null);
   const [isLoadingTree, setIsLoadingTree] = useState<boolean>(false);
   const [treeError, setTreeError] = useState<string>("");
-  const [collapsedPaths, setCollapsedPaths] = useState<Set<string>>(new Set());
+  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
 
   // Resizable panel width state
   const [leftWidth, setLeftWidth] = useState<number>(280);
@@ -70,11 +70,17 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
     setTreeError("");
     try {
       const formatsList = formats.split(",").map((f) => f.trim());
-      const rootNode = await invoke<DirTreeNode>("read_dir_tree", {
+      const scanPromise = invoke<DirTreeNode>("read_dir_tree", {
+        taskId: "library_scan",
         folder: config.sourceDir,
         formats: formatsList,
       });
+
+      addBackgroundTask("library_scan", "Library Tree Scan", scanPromise);
+
+      const rootNode = await scanPromise;
       setTreeRoot(rootNode);
+      setExpandedPaths(new Set([rootNode.path])); // Expand root level by default
     } catch (e) {
       setTreeError(String(e));
     } finally {
@@ -83,13 +89,13 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
   };
 
   const toggleCollapse = (path: string) => {
-    const next = new Set(collapsedPaths);
+    const next = new Set(expandedPaths);
     if (next.has(path)) {
       next.delete(path);
     } else {
       next.add(path);
     }
-    setCollapsedPaths(next);
+    setExpandedPaths(next);
   };
 
   const handleSelectNode = async (node: DirTreeNode) => {
@@ -266,7 +272,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
   };
 
   const renderTree = (node: DirTreeNode, depth = 0) => {
-    const isCollapsed = collapsedPaths.has(node.path);
+    const isExpanded = expandedPaths.has(node.path);
     const isSelected = selectedNode?.path === node.path;
     
     return (
@@ -297,7 +303,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
           {node.is_dir ? (
             <>
               <span style={{ fontSize: "0.8rem", color: "var(--text-muted)", width: "12px" }}>
-                {isCollapsed ? "▶" : "▼"}
+                {isExpanded ? "▼" : "▶"}
               </span>
               <span>📁</span>
             </>
@@ -312,7 +318,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
           </span>
         </div>
         
-        {node.is_dir && !isCollapsed && node.children.length > 0 && (
+        {node.is_dir && isExpanded && node.children.length > 0 && (
           <div style={{ borderLeft: "1px solid var(--border-color)", marginLeft: "14px", paddingLeft: "4px" }}>
             {node.children.map((child) => renderTree(child, depth + 1))}
           </div>

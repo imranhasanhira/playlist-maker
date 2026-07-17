@@ -11,12 +11,16 @@ use tauri::Emitter;
 
 #[tauri::command]
 async fn load_workspace(configPath: String) -> Result<playlist::MainConfig, String> {
-    playlist::read_config_file(Path::new(&configPath))
+    let path = Path::new(&configPath);
+    let config = playlist::read_config_file(path)?;
+    Ok(playlist::make_paths_absolute(config, path))
 }
 
 #[tauri::command]
 async fn save_workspace(configPath: String, config: playlist::MainConfig) -> Result<(), String> {
-    playlist::write_config_file(Path::new(&configPath), &config)
+    let path = Path::new(&configPath);
+    let relative_config = playlist::make_paths_relative(config, path);
+    playlist::write_config_file(path, &relative_config)
 }
 
 #[tauri::command]
@@ -269,10 +273,17 @@ async fn scan_flac_files(app: tauri::AppHandle, taskId: String, folder: String) 
 
 // Library Management Commands
 #[tauri::command]
-async fn read_dir_tree(folder: String, formats: Vec<String>) -> Result<library::DirTreeNode, String> {
+async fn read_dir_tree(app: tauri::AppHandle, taskId: String, folder: String, formats: Vec<String>) -> Result<library::DirTreeNode, String> {
     tokio::task::spawn_blocking(move || {
+        let path = Path::new(&folder);
+        if !path.exists() {
+            return Err("Folder does not exist".to_string());
+        }
+
+        let total = walkdir::WalkDir::new(path).into_iter().count();
         let formats_set: HashSet<String> = formats.iter().map(|f| f.to_lowercase()).collect();
-        library::read_tree_recursive(Path::new(&folder), &formats_set)
+        let mut counter = 0;
+        library::read_tree_recursive(&app, &taskId, path, &formats_set, 0, &mut counter, total)
     })
     .await
     .map_err(|e| format!("Thread execution error: {}", e))?

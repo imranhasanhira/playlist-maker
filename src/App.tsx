@@ -59,6 +59,36 @@ function App() {
   const [activeTrack, setActiveTrack] = useState<AudioTrack | null>(null);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
 
+  // Theme state: defaults to system preference, then user override
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    const saved = localStorage.getItem("theme");
+    if (saved === 'light' || saved === 'dark') return saved;
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  });
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem("theme", theme);
+  }, [theme]);
+
+  const toggleTheme = () => {
+    setTheme(prev => prev === 'dark' ? 'light' : 'dark');
+  };
+
+  const saveAndSetConfig = async (newConfig: MainConfig | null) => {
+    setConfig(newConfig);
+    if (newConfig && configPath) {
+      try {
+        await invoke("save_workspace", {
+          configPath,
+          config: newConfig,
+        });
+      } catch (e) {
+        console.error("Auto-save configuration failed:", e);
+      }
+    }
+  };
+
   // Background Task Queue
   const [bgTasks, setBgTasks] = useState<BgTask[]>([]);
 
@@ -315,6 +345,16 @@ function App() {
             ⚙️ Settings
           </li>
         </ul>
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", paddingRight: "20px" }}>
+          <button
+            className="btn btn-secondary"
+            onClick={toggleTheme}
+            style={{ padding: "6px 12px", fontSize: "0.8rem", display: "flex", alignItems: "center", gap: "6px" }}
+            title={`Switch to ${theme === 'dark' ? 'Light' : 'Dark'} Mode`}
+          >
+            <span>{theme === 'dark' ? '☀️ Light' : '🌙 Dark'}</span>
+          </button>
+        </div>
       </header>
 
       {/* Main Content Area */}
@@ -331,7 +371,7 @@ function App() {
           <PlaylistView
             configPath={configPath}
             config={config}
-            setConfig={setConfig}
+            setConfig={saveAndSetConfig}
             formats={formats}
             onPlayTrack={handlePlayTrack}
             relativeToConfig={config?.relativeToConfig ?? true}
@@ -352,7 +392,7 @@ function App() {
             configPath={configPath}
             setConfigPath={setConfigPath}
             config={config}
-            setConfig={setConfig}
+            setConfig={saveAndSetConfig}
             onLoadConfig={handleLoadConfig}
             formats={formats}
             setFormats={setFormats}

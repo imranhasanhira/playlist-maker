@@ -1,11 +1,11 @@
-use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{Write, BufWriter};
 use std::path::{Path, PathBuf};
+use std::collections::HashSet;
+use std::io::{BufWriter, Write};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 use lofty::probe::Probe;
-use lofty::file::{TaggedFileExt, AudioFile};
+use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::tag::Accessor;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -26,7 +26,7 @@ pub struct MainConfig {
     pub playlists: Vec<PlaylistConfig>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TrackPreview {
     pub file_path: String,
     pub relative_path: String,
@@ -58,8 +58,132 @@ pub fn find_right_dir(
             }
         }
     } else {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        if relative_to_config {
+            config_path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."))
+        } else {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        }
     }
+}
+
+// Helper to clean paths (resolving ParentDir and CurDir components) without filesystem checks
+pub fn clean_path(path: &Path) -> String {
+    use std::path::Component;
+    let mut clean = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                clean.pop();
+            }
+            Component::CurDir => {}
+            Component::Normal(c) => {
+                clean.push(c);
+            }
+            Component::RootDir => {
+                clean.push("/");
+            }
+            Component::Prefix(p) => {
+                clean.push(p.as_os_str());
+            }
+        }
+    }
+    clean.to_string_lossy().to_string()
+}
+
+
+// Helper to resolve a path string to be relative to parent
+fn resolve_to_relative(path_str: &str, parent: &Path) -> String {
+    let p = Path::new(path_str);
+    if !p.is_absolute() {
+        return path_str.to_string();
+    }
+    if let Some(rel) = pathdiff::diff_paths(p, parent) {
+        let rel_str = rel.to_string_lossy().to_string();
+        if rel_str.is_empty() {
+            ".".to_string()
+        } else if !rel_str.starts_with('.') && !rel_str.starts_with('/') {
+            format!("./{}", rel_str)
+        } else {
+            rel_str
+        }
+    } else {
+        path_str.to_string()
+    }
+}
+
+// Converts relative paths in MainConfig to absolute resolved paths for frontend robustness
+pub fn make_paths_absolute(mut config: MainConfig, config_path: &Path) -> MainConfig {
+    let relative_to_config = config.relative_to_config.unwrap_or(true);
+    
+    // Resolve sourceDir & targetDir
+    let resolved_src = find_right_dir(None, config.source_dir.clone(), relative_to_config, config_path);
+    config.source_dir = Some(clean_path(&resolved_src));
+    
+    let resolved_tgt = find_right_dir(None, config.target_dir.clone(), relative_to_config, config_path);
+    config.target_dir = Some(clean_path(&resolved_tgt));
+
+    // Resolve playlists relative to the resolved absolute sourceDir
+    if let Some(base_src_str) = &config.source_dir.clone() {
+        let base_src_dir = Path::new(base_src_str);
+        for playlist in &mut config.playlists {
+            playlist.sources = playlist.sources.iter().map(|s| {
+                let p = Path::new(s);
+                if p.is_absolute() {
+                    s.clone()
+                } else {
+                    clean_path(&base_src_dir.join(p))
+                }
+            }).collect();
+            
+            if let Some(exclusions) = &mut playlist.exclusions {
+                *exclusions = exclusions.iter().map(|e| {
+                    let p = Path::new(e);
+                    if p.is_absolute() {
+                        e.clone()
+                    } else {
+                        clean_path(&base_src_dir.join(p))
+                    }
+                }).collect();
+            }
+        }
+    }
+    
+    config
+}
+
+// Converts absolute paths in MainConfig to relative paths before writing to disk
+pub fn make_paths_relative(mut config: MainConfig, config_path: &Path) -> MainConfig {
+    let relative_to_config = config.relative_to_config.unwrap_or(true);
+    if !relative_to_config {
+        return config;
+    }
+    
+    let parent = match config_path.parent() {
+        Some(p) => p,
+        None => return config,
+    };
+    
+    // Resolve playlists relative to absolute sourceDir before sourceDir itself is made relative
+    if let Some(abs_src_str) = &config.source_dir {
+        let abs_src_path = Path::new(abs_src_str);
+        
+        for playlist in &mut config.playlists {
+            playlist.sources = playlist.sources.iter().map(|s| resolve_to_relative(s, abs_src_path)).collect();
+            if let Some(exclusions) = &mut playlist.exclusions {
+                *exclusions = exclusions.iter().map(|e| resolve_to_relative(e, abs_src_path)).collect();
+            }
+        }
+    }
+    
+    // Make source_dir and target_dir relative to config parent dir
+    if let Some(src) = config.source_dir {
+        config.source_dir = Some(resolve_to_relative(&src, parent));
+    }
+    if let Some(tgt) = config.target_dir {
+        config.target_dir = Some(resolve_to_relative(&tgt, parent));
+    }
+    
+    config
 }
 
 // Read and parse config YAML
@@ -178,13 +302,14 @@ pub fn resolve_playlist_files(
     }
 
     let mut files_vec: Vec<PathBuf> = files.into_iter().collect();
-    // Sort files to keep stable ordering (unlike python's set random order)
     files_vec.sort();
-
     (files_vec, errors)
 }
 
-pub fn write_playlist_file(playlist_file_path: &Path, music_files: &[PathBuf]) -> Result<(), String> {
+pub fn write_playlist_file(
+    playlist_file_path: &Path,
+    music_files: &[PathBuf],
+) -> Result<(), String> {
     let file = File::create(playlist_file_path)
         .map_err(|e| format!("Failed to create playlist file: {}", e))?;
     let mut writer = BufWriter::new(file);
