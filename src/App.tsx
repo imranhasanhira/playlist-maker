@@ -283,7 +283,7 @@ function App() {
       {/* Top Header Navigation */}
       <header className="top-nav">
         <div className="top-nav-logo">
-          <span>🎵</span> PlaylistMaker
+          <span>💎</span> Diamond Music Manager
         </div>
         <ul className="top-nav-menu">
           <li
@@ -460,7 +460,7 @@ function App() {
               <div className="card" style={{ maxWidth: "560px", width: "90%", padding: "40px", textAlign: "center", display: "flex", flexDirection: "column", gap: "28px" }}>
                 <div>
                   <h1 style={{ fontSize: "2.2rem", marginBottom: "12px", background: "linear-gradient(135deg, var(--accent-indigo) 0%, var(--accent-purple) 100%)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
-                    Welcome to PlaylistMaker
+                    Welcome to Diamond Music Manager
                   </h1>
                   <p className="subtitle" style={{ fontSize: "1rem" }}>
                     Load an existing workspace configuration or create a new one to begin managing your music library.

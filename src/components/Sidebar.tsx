@@ -18,7 +18,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentView, onViewChange, has
     <aside className="sidebar">
       <div className="sidebar-header">
         <h1 className="sidebar-title">
-          <span>🎵</span> PlaylistMaker
+          <span>💎</span> Diamond Music Manager
         </h1>
       </div>
       <ul className="sidebar-menu">

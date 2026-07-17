@@ -370,7 +370,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 placeholder="e.g. mp3,aac,ogg,wma,alac,m4a,wav,flac"
               />
               <p className="text-secondary" style={{ fontSize: "0.8rem", marginTop: "4px" }}>
-                The playlist maker, library tree, and sanitizer will only process files matching these extensions.
+                The Diamond Music Manager (library tree, playlist maker, and sanitizer) will only process files matching these extensions.
               </p>
             </div>
           </div>
