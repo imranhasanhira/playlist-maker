@@ -756,6 +756,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "diamond-music-manager"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "claxon",
+ "lofty",
+ "pathdiff",
+ "regex",
+ "rfd",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "shine-rs",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-opener",
+ "tokio",
+ "walkdir",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3602,27 +3623,6 @@ dependencies = [
  "webview2-com",
  "window-vibrancy",
  "windows",
-]
-
-[[package]]
-name = "tauri-app"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "claxon",
- "lofty",
- "pathdiff",
- "regex",
- "rfd",
- "serde",
- "serde_json",
- "serde_yaml",
- "shine-rs",
- "tauri",
- "tauri-build",
- "tauri-plugin-opener",
- "tokio",
- "walkdir",
 ]
 
 [[package]]
