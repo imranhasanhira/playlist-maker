@@ -12,12 +12,14 @@ type AudioPlayerProps = {
   activeTrack: AudioTrack | null;
   isPlaying: boolean;
   onPlayPause: (playing: boolean) => void;
+  onClose: () => void;
 };
 
 export const AudioPlayer: React.FC<AudioPlayerProps> = ({
   activeTrack,
   isPlaying,
   onPlayPause,
+  onClose,
 }) => {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
@@ -29,7 +31,6 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
     if (!audioRef.current) return;
 
     if (activeTrack) {
-      // Convert path to Tauri asset src URL
       const assetUrl = convertFileSrc(String(activeTrack.file_path));
       audioRef.current.src = assetUrl;
       audioRef.current.load();
@@ -98,6 +99,10 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
     return `${minutes}:${seconds < 10 ? "0" : ""}${seconds}`;
   };
 
+  if (!activeTrack) {
+    return null;
+  }
+
   return (
     <div className="bottom-player">
       <audio
@@ -108,24 +113,17 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
       />
 
       <div className="player-track-info">
-        {activeTrack ? (
-          <>
-            <div className="player-title" title={String(activeTrack.title)}>
-              {activeTrack.title || "Unknown Track"}
-            </div>
-            <div className="player-artist" title={String(activeTrack.artist)}>
-              {activeTrack.artist || "Unknown Artist"}
-            </div>
-          </>
-        ) : (
-          <div className="player-title text-secondary">No track loaded</div>
-        )}
+        <div className="player-title" title={String(activeTrack.title)}>
+          {activeTrack.title || "Unknown Track"}
+        </div>
+        <div className="player-artist" title={String(activeTrack.artist)}>
+          {activeTrack.artist || "Unknown Artist"}
+        </div>
       </div>
 
       <div className="player-controls">
         <button
           className="player-btn player-btn-play"
-          disabled={!activeTrack}
           onClick={() => onPlayPause(!isPlaying)}
         >
           {isPlaying ? "⏸" : "▶"}
@@ -141,16 +139,14 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
           max={duration || 100}
           value={currentTime}
           onChange={handleSeek}
-          disabled={!activeTrack}
         />
-        <span className="player-time">{formatTime(duration || activeTrack?.duration || 0)}</span>
+        <span className="player-time">{formatTime(duration || activeTrack.duration || 0)}</span>
       </div>
 
       <div className="player-volume">
         <button
           className="player-btn"
           onClick={toggleMute}
-          disabled={!activeTrack}
         >
           {muted || volume === 0 ? "🔇" : volume < 0.5 ? "🔉" : "🔊"}
         </button>
@@ -162,9 +158,25 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
           step="0.05"
           value={muted ? 0 : volume}
           onChange={handleVolumeChange}
-          disabled={!activeTrack}
         />
       </div>
+
+      <button
+        className="player-btn"
+        onClick={onClose}
+        style={{
+          marginLeft: "24px",
+          color: "var(--danger)",
+          fontSize: "1.4rem",
+          fontWeight: 700,
+          cursor: "pointer",
+          border: "none",
+          background: "transparent",
+        }}
+        title="Close & Hide Player"
+      >
+        ×
+      </button>
     </div>
   );
 };

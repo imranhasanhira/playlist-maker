@@ -84,7 +84,7 @@ export const ToolsView: React.FC<ToolsViewProps> = ({
           />
         )}
         {subView === "transcoder" && (
-          <TranscoderView />
+          <TranscoderView addBackgroundTask={addBackgroundTask} />
         )}
       </div>
     </div>

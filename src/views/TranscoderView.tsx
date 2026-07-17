@@ -2,7 +2,9 @@ import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
-type TranscoderViewProps = {};
+type TranscoderViewProps = {
+  addBackgroundTask?: (id: string, name: string, taskPromise: Promise<any>) => void;
+};
 
 type QueueItem = {
   filePath: string;
@@ -11,12 +13,14 @@ type QueueItem = {
   errorMsg?: string;
 };
 
-type TranscodeProgress = {
-  file_path: string;
+type TaskProgress = {
+  task_id: string;
+  task_name: string;
   index: number;
   total: number;
-  success: boolean;
-  error_msg: string | null;
+  status: string;
+  message: string;
+  filePath?: string;
 };
 
 type TranscodeJob = {
@@ -25,7 +29,7 @@ type TranscodeJob = {
   bitrate: number;
 };
 
-export const TranscoderView: React.FC<TranscoderViewProps> = () => {
+export const TranscoderView: React.FC<TranscoderViewProps> = ({ addBackgroundTask }) => {
   const [outputDir, setOutputDir] = useState<string>("");
   const [bitrate, setBitrate] = useState<number>(320); // default CBR 320kbps
   const [queue, setQueue] = useState<QueueItem[]>([]);
@@ -35,16 +39,19 @@ export const TranscoderView: React.FC<TranscoderViewProps> = () => {
 
   useEffect(() => {
     // Listen to background progress events
-    const unlisten = listen<TranscodeProgress>("transcode-progress", (event) => {
-      const { file_path, index, total, success, error_msg } = event.payload;
+    const unlisten = listen<TaskProgress>("task-progress", (event) => {
+      const { task_id, index, total, status, message, filePath } = event.payload;
+      if (task_id !== "flac_transcode") return;
+
+      const isSuccess = !message.startsWith("Failed");
 
       setQueue((prevQueue) =>
         prevQueue.map((item) => {
-          if (item.filePath === file_path) {
+          if (item.filePath === filePath) {
             return {
               ...item,
-              status: success ? "success" : "failed",
-              errorMsg: error_msg || undefined,
+              status: isSuccess ? "success" : "failed",
+              errorMsg: isSuccess ? undefined : message,
             };
           }
           return item;
@@ -52,11 +59,12 @@ export const TranscoderView: React.FC<TranscoderViewProps> = () => {
       );
 
       // Set progress bar
-      const percentage = Math.round((index / total) * 100);
+      const currentFile = index + 1;
+      const percentage = Math.round((currentFile / total) * 100);
       setCurrentProgress(percentage);
-      setCurrentProgressText(`Processed ${index} of ${total} files (${percentage}%)`);
+      setCurrentProgressText(`Processed ${currentFile} of ${total} files (${percentage}%)`);
 
-      if (index === total) {
+      if (currentFile === total && status === "completed") {
         setIsProcessing(false);
         alert("FLAC conversion completed!");
       }
@@ -109,9 +117,16 @@ export const TranscoderView: React.FC<TranscoderViewProps> = () => {
         title: "Select Folder Containing FLAC Files",
       });
       if (selected) {
-        const files = await invoke<string[]>("scan_flac_files", {
+        const scanPromise = invoke<string[]>("scan_flac_files", {
+          taskId: "flac_scan",
           folder: selected,
         });
+
+        if (addBackgroundTask) {
+          addBackgroundTask("flac_scan", "Scan folder for FLAC files", scanPromise);
+        }
+
+        const files = await scanPromise;
 
         const newItems: QueueItem[] = files.map((filePath) => {
           const fileName = filePath.split("/").pop() || filePath;

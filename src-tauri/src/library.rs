@@ -209,6 +209,8 @@ pub fn batch_update_folder_tags_impl(
     album: Option<String>,
     genre: Option<String>,
     year: Option<u32>,
+    cover_b64: Option<String>,
+    cover_mime: Option<String>,
 ) -> Result<(), String> {
     for entry in walkdir::WalkDir::new(folder_path).into_iter().filter_map(|e| e.ok()) {
         if entry.file_type().is_file() {
@@ -252,6 +254,29 @@ pub fn batch_update_folder_tags_impl(
                             tag.set_year(y);
                             changed = true;
                         }
+                    }
+                    if let Some(ref b64) = cover_b64 {
+                        while !tag.pictures().is_empty() {
+                            tag.remove_picture(0);
+                        }
+                        if b64 != "REMOVE" && !b64.is_empty() {
+                            if let Ok(data) = BASE64_STANDARD.decode(b64) {
+                                let mime = cover_mime.clone().unwrap_or_else(|| "image/jpeg".to_string());
+                                let lofty_mime = match mime.as_str() {
+                                    "image/png" => Some(MimeType::Png),
+                                    "image/jpeg" | "image/jpg" => Some(MimeType::Jpeg),
+                                    _ => None,
+                                };
+                                let picture = Picture::new_unchecked(
+                                    PictureType::CoverFront,
+                                    lofty_mime,
+                                    None,
+                                    data,
+                                );
+                                tag.push_picture(picture);
+                            }
+                        }
+                        changed = true;
                     }
 
                     if changed {
