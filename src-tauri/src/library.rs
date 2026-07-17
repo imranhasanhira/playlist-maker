@@ -6,6 +6,8 @@ use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::tag::{Accessor, Tag};
 use lofty::picture::{Picture, PictureType, MimeType};
 use base64::prelude::*;
+use tauri::Emitter;
+use crate::sanitizer::TaskProgress;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DirTreeNode {
@@ -27,7 +29,38 @@ pub struct TrackTags {
     pub cover_mime: Option<String>,
 }
 
-pub fn read_tree_recursive(path: &Path, formats: &HashSet<String>) -> Result<DirTreeNode, String> {
+pub fn read_tree_recursive(
+    app: &tauri::AppHandle,
+    task_id: &str,
+    path: &Path,
+    formats: &HashSet<String>,
+    current_depth: usize,
+    counter: &mut usize,
+    total: usize,
+) -> Result<DirTreeNode, String> {
+    if current_depth > 8 {
+        return Ok(DirTreeNode {
+            name: path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "/".to_string()),
+            path: path.to_string_lossy().to_string(),
+            is_dir: true,
+            children: Vec::new(),
+        });
+    }
+
+    *counter += 1;
+    let _ = app.emit(
+        "task-progress",
+        TaskProgress {
+            task_id: task_id.to_string(),
+            task_name: "Library Tree Scan".to_string(),
+            index: *counter,
+            total,
+            status: if *counter >= total { "completed".to_string() } else { "running".to_string() },
+            message: path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+            file_path: None,
+        },
+    );
+
     let name = path.file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "/".to_string());
@@ -39,7 +72,7 @@ pub fn read_tree_recursive(path: &Path, formats: &HashSet<String>) -> Result<Dir
             for entry in entries.flatten() {
                 let p = entry.path();
                 if p.is_dir() {
-                    if let Ok(child) = read_tree_recursive(&p, formats) {
+                    if let Ok(child) = read_tree_recursive(app, task_id, &p, formats, current_depth + 1, counter, total) {
                         children.push(child);
                     }
                 } else if p.is_file() {

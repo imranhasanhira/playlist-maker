@@ -36,16 +36,24 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   const [generationLogs, setGenerationLogs] = useState<string[]>([]);
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
   const [showLogsModal, setShowLogsModal] = useState<boolean>(false);
+  const [isConfirmingDelete, setIsConfirmingDelete] = useState<boolean>(false);
 
   const activePlaylist = config && config.playlists[selectedPlaylistIndex] ? config.playlists[selectedPlaylistIndex] : null;
 
   useEffect(() => {
+    setIsConfirmingDelete(false);
     if (activePlaylist) {
       loadPreview();
     } else {
       setPreviews([]);
     }
   }, [selectedPlaylistIndex, config]);
+
+  const cleanDisplayPath = (path: string) => {
+    let p = path.replace(/\\/g, '/');
+    p = p.replace(/^(\.\.\/|\.\/)+/, '');
+    return p;
+  };
 
   const loadPreview = async () => {
     if (!configPath || activePlaylist === null) return;
@@ -84,7 +92,10 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
 
   const handleDeletePlaylist = () => {
     if (!config || activePlaylist === null) return;
-    if (!confirm(`Are you sure you want to delete the playlist: "${activePlaylist.name}"?`)) return;
+    if (!isConfirmingDelete) {
+      setIsConfirmingDelete(true);
+      return;
+    }
 
     const newPlaylists = config.playlists.filter((_, idx) => idx !== selectedPlaylistIndex);
     setConfig({
@@ -92,6 +103,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
       playlists: newPlaylists,
     });
     setSelectedPlaylistIndex(Math.max(0, selectedPlaylistIndex - 1));
+    setIsConfirmingDelete(false);
   };
 
   const handleUpdateName = (name: string) => {
@@ -267,8 +279,13 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
               <div className="card" style={{ margin: 0 }}>
                 <div className="card-title">
                   <span>Playlist Configuration</span>
-                  <button className="btn btn-danger" onClick={handleDeletePlaylist} style={{ padding: "6px 12px", fontSize: "0.85rem" }}>
-                    Delete Playlist
+                  <button 
+                    className="btn btn-danger" 
+                    onClick={handleDeletePlaylist} 
+                    onMouseLeave={() => setIsConfirmingDelete(false)}
+                    style={{ padding: "6px 12px", fontSize: "0.85rem" }}
+                  >
+                    {isConfirmingDelete ? "⚠️ Confirm Delete?" : "Delete Playlist"}
                   </button>
                 </div>
 
@@ -374,8 +391,8 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                             </td>
                             <td>
                               <div style={{ fontWeight: 600 }}>{track.title}</div>
-                              <div className="text-secondary" style={{ fontSize: "0.75rem", fontFamily: "var(--font-mono)" }}>
-                                {track.relative_path}
+                              <div className="text-secondary" style={{ fontSize: "0.75rem", fontFamily: "var(--font-mono)" }} title={track.relative_path}>
+                                {cleanDisplayPath(track.relative_path)}
                               </div>
                             </td>
                             <td className="text-secondary">{track.artist || "—"}</td>
