@@ -104,6 +104,14 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     return p;
   };
 
+  const formatPathTail = (pathStr: string) => {
+    if (!pathStr) return "";
+    const normalized = pathStr.replace(/\\/g, '/');
+    const parts = normalized.split('/').filter(Boolean);
+    if (parts.length <= 3) return pathStr;
+    return "…/" + parts.slice(-3).join('/');
+  };
+
   const handlePlayAll = (shuffle = false) => {
     if (onPlayQueue && previews.length > 0) {
       const audioTracks: AudioTrack[] = previews.map((t) => ({
@@ -288,17 +296,17 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   }
 
   return (
-    <div className="view-container" style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
-      <div className="flex justify-between align-center">
+    <div className="view-container" style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+      <div className="flex justify-between align-center" style={{ marginBottom: "4px" }}>
         <div>
-          <h1>Playlist Builder</h1>
-          <p className="subtitle" style={{ margin: 0 }}>Visually build, customize, and preview your playlist directories.</p>
+          <h1 style={{ fontSize: "1.4rem", margin: 0 }}>Playlist Builder</h1>
+          <p className="subtitle" style={{ margin: 0, fontSize: "0.82rem" }}>Visually build, customize, and preview your playlist directories.</p>
         </div>
         <button
           className="btn btn-primary"
           onClick={handleGeneratePlaylists}
           disabled={isGenerating}
-          style={{ padding: "12px 24px" }}
+          style={{ padding: "8px 16px", fontSize: "0.85rem" }}
         >
           {isGenerating ? "Compiling..." : "⚡ Generate Playlists (.m3u)"}
         </button>
@@ -416,11 +424,17 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                     <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                        {activePlaylist.sources.map((src, srcIdx) => (
                          <div className="form-row" key={srcIdx}>
-                           <input type="text" readOnly value={src} style={{ fontSize: "0.85rem" }} />
+                           <input 
+                             type="text" 
+                             readOnly 
+                             value={formatPathTail(src)} 
+                             title={src} 
+                             style={{ fontSize: "0.82rem", direction: "rtl", textAlign: "left" }} 
+                           />
                            <button 
                              className="btn btn-secondary" 
                              onClick={() => removeSource(srcIdx)} 
-                             style={{ padding: "10px", display: "flex", alignItems: "center", justifyContent: "center" }}
+                             style={{ padding: "8px", display: "flex", alignItems: "center", justifyContent: "center" }}
                              title="Remove Source Folder"
                            >
                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -446,11 +460,17 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                     <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                        {(activePlaylist.exclusions || []).map((ex, exIdx) => (
                          <div className="form-row" key={exIdx}>
-                           <input type="text" readOnly value={ex} style={{ fontSize: "0.85rem" }} />
+                           <input 
+                             type="text" 
+                             readOnly 
+                             value={formatPathTail(ex)} 
+                             title={ex} 
+                             style={{ fontSize: "0.82rem", direction: "rtl", textAlign: "left" }} 
+                           />
                            <button 
                              className="btn btn-secondary" 
                              onClick={() => removeExclusion(exIdx)} 
-                             style={{ padding: "10px", display: "flex", alignItems: "center", justifyContent: "center" }}
+                             style={{ padding: "8px", display: "flex", alignItems: "center", justifyContent: "center" }}
                              title="Remove Exclusion Folder"
                            >
                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -530,21 +550,21 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                 {isLoadingPreview ? (
                   <div className="no-data">Loading resolved file list...</div>
                 ) : previews.length > 0 ? (
-                  <div className="table-container" style={{ flex: 1, overflowY: "auto" }}>
-                    <table>
+                  <div className="table-container" style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
+                    <table style={{ tableLayout: "fixed", width: "100%" }}>
                       <thead>
                         <tr>
-                          <th>Play</th>
-                          <th>Title</th>
-                          <th>Artist</th>
-                          <th>Duration</th>
-                          <th>Size</th>
+                          <th style={{ width: "42px", textAlign: "center" }}>Play</th>
+                          <th style={{ width: "52%" }}>Title</th>
+                          <th style={{ width: "24%" }}>Artist</th>
+                          <th style={{ width: "65px", textAlign: "right" }}>Duration</th>
+                          <th style={{ width: "70px", textAlign: "right" }}>Size</th>
                         </tr>
                       </thead>
                       <tbody>
                         {previews.map((track, trackIdx) => (
                           <tr key={trackIdx}>
-                            <td style={{ width: "60px" }}>
+                            <td style={{ width: "42px", textAlign: "center" }}>
                               <button
                                 className="btn btn-secondary"
                                 onClick={() => {
@@ -563,10 +583,10 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                                   }, audioTracks, playlistName);
                                 }}
                                 style={{ 
-                                  padding: "6px", 
+                                  padding: "5px", 
                                   borderRadius: "50%", 
-                                  width: "28px", 
-                                  height: "28px", 
+                                  width: "26px", 
+                                  height: "26px", 
                                   display: "flex", 
                                   alignItems: "center", 
                                   justifyContent: "center",
@@ -579,15 +599,30 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                                 </svg>
                               </button>
                             </td>
-                            <td>
-                              <div style={{ fontWeight: 600 }}>{track.title}</div>
-                              <div className="text-secondary" style={{ fontSize: "0.75rem", fontFamily: "var(--font-mono)" }} title={track.relative_path}>
+                            <td style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              <div 
+                                style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: "0.85rem" }} 
+                                title={track.title || "Unknown Title"}
+                              >
+                                {track.title || "Unknown Title"}
+                              </div>
+                              <div 
+                                className="text-secondary" 
+                                style={{ fontSize: "0.72rem", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} 
+                                title={track.relative_path}
+                              >
                                 {cleanDisplayPath(track.relative_path)}
                               </div>
                             </td>
-                            <td className="text-secondary">{track.artist || "—"}</td>
-                            <td style={{ fontFamily: "var(--font-mono)" }}>{formatDuration(track.duration)}</td>
-                            <td style={{ fontFamily: "var(--font-mono)" }}>{formatSize(track.size_bytes)}</td>
+                            <td 
+                              className="text-secondary" 
+                              style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: "0.82rem" }} 
+                              title={track.artist || "—"}
+                            >
+                              {track.artist || "—"}
+                            </td>
+                            <td style={{ fontFamily: "var(--font-mono)", textAlign: "right", fontSize: "0.78rem" }}>{formatDuration(track.duration)}</td>
+                            <td style={{ fontFamily: "var(--font-mono)", textAlign: "right", fontSize: "0.78rem" }}>{formatSize(track.size_bytes)}</td>
                           </tr>
                         ))}
                       </tbody>
