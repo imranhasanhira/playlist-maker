@@ -339,8 +339,17 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
         <div className="card" style={{ width: `${leftWidth}px`, flexShrink: 0, overflowY: "auto", display: "flex", flexDirection: "column", margin: 0 }}>
           <div className="card-title" style={{ fontSize: "1rem", borderBottom: "1px solid var(--border-color)", paddingBottom: "12px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span>Library Tree</span>
-            <button className="btn btn-secondary" onClick={loadLibraryTree} disabled={isLoadingTree} style={{ padding: "4px 8px", fontSize: "0.75rem" }}>
-              {isLoadingTree ? "Scanning..." : "🔄 Refresh"}
+            <button 
+              className="btn btn-secondary" 
+              onClick={loadLibraryTree} 
+              disabled={isLoadingTree} 
+              style={{ padding: "4px 8px", fontSize: "0.75rem", display: "flex", alignItems: "center", gap: "4px" }}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ display: "inline-block" }}>
+                <path d="M23 4v6h-6"></path>
+                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+              </svg>
+              {isLoadingTree ? "Scanning..." : "Refresh"}
             </button>
           </div>
           

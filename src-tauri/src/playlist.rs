@@ -225,8 +225,11 @@ pub fn list_music_files(folder: &Path, formats: &HashSet<String>) -> Vec<PathBuf
 }
 
 pub fn get_track_preview(path: &Path, base_playlist_dir: &Path) -> TrackPreview {
-    let file_path = path.to_string_lossy().to_string();
-    let relative_path = pathdiff::diff_paths(path, base_playlist_dir)
+    let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let file_path = canonical.to_string_lossy().to_string();
+    
+    let canonical_base = fs::canonicalize(base_playlist_dir).unwrap_or_else(|_| base_playlist_dir.to_path_buf());
+    let relative_path = pathdiff::diff_paths(&canonical, &canonical_base)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| file_path.clone());
 

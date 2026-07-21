@@ -51,16 +51,10 @@ async fn preview_playlist_tracks(
         let playlist_config = &config.playlists[playlistIndex];
         let (files, _) = playlist::resolve_playlist_files(playlist_config, &resolved_source_dir, &formats_set);
 
-        let resolved_target_dir = playlist::find_right_dir(
-            None,
-            config.target_dir.clone(),
-            true,
-            Path::new(&configPath),
-        );
 
         let previews = files
             .iter()
-            .map(|f| playlist::get_track_preview(f, &resolved_target_dir))
+            .map(|f| playlist::get_track_preview(f, &resolved_source_dir))
             .collect();
 
         Ok(previews)

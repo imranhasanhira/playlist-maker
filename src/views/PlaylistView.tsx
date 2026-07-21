@@ -8,7 +8,8 @@ type PlaylistViewProps = {
   config: MainConfig | null;
   setConfig: (config: MainConfig | null) => void;
   formats: string;
-  onPlayTrack: (track: AudioTrack) => void;
+  onPlayTrack: (track: AudioTrack, queue: AudioTrack[], playlistName: string) => void;
+  onPlayQueue?: (queue: AudioTrack[], playlistName: string, shuffle?: boolean) => void;
   relativeToConfig: boolean;
 };
 
@@ -27,6 +28,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   setConfig,
   formats,
   onPlayTrack,
+  onPlayQueue,
   relativeToConfig,
 }) => {
   const [selectedPlaylistIndex, setSelectedPlaylistIndex] = useState<number>(0);
@@ -37,6 +39,53 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
   const [showLogsModal, setShowLogsModal] = useState<boolean>(false);
   const [isConfirmingDelete, setIsConfirmingDelete] = useState<boolean>(false);
+  const [sidebarWidth, setSidebarWidth] = useState<number>(240);
+  const [configWidth, setConfigWidth] = useState<number>(360);
+
+  // Resizing mouse drag handlers
+  const handleSidebarMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = sidebarWidth;
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const deltaX = moveEvent.clientX - startX;
+      const newWidth = startWidth + deltaX;
+      if (newWidth > 150 && newWidth < 500) {
+        setSidebarWidth(newWidth);
+      }
+    };
+
+    const handleMouseUp = () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+  };
+
+  const handleConfigMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = configWidth;
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const deltaX = moveEvent.clientX - startX;
+      const newWidth = startWidth + deltaX;
+      if (newWidth > 250 && newWidth < 800) {
+        setConfigWidth(newWidth);
+      }
+    };
+
+    const handleMouseUp = () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+  };
 
   const activePlaylist = config && config.playlists[selectedPlaylistIndex] ? config.playlists[selectedPlaylistIndex] : null;
 
@@ -53,6 +102,19 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     let p = path.replace(/\\/g, '/');
     p = p.replace(/^(\.\.\/|\.\/)+/, '');
     return p;
+  };
+
+  const handlePlayAll = (shuffle = false) => {
+    if (onPlayQueue && previews.length > 0) {
+      const audioTracks: AudioTrack[] = previews.map((t) => ({
+        file_path: t.file_path,
+        title: t.title,
+        artist: t.artist,
+        duration: t.duration,
+      }));
+      const playlistName = activePlaylist ? activePlaylist.name : "Playlist";
+      onPlayQueue(audioTracks, playlistName, shuffle);
+    }
   };
 
   const loadPreview = async () => {
@@ -242,41 +304,86 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
         </button>
       </div>
 
-      <div style={{ display: "flex", gap: "24px", flex: 1, minHeight: 0 }}>
+      <div style={{ display: "flex", gap: "0", flex: 1, minHeight: 0 }}>
         {/* Playlist selection sidebar */}
-        <div className="card" style={{ width: "240px", flexShrink: 0, overflowY: "auto", display: "flex", flexDirection: "column", margin: 0 }}>
+        <div className="card" style={{ width: `${sidebarWidth}px`, flexShrink: 0, margin: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
           <div className="card-title" style={{ fontSize: "1rem", borderBottom: "1px solid var(--border-color)", paddingBottom: "12px" }}>
             Playlists
           </div>
-          <ul style={{ listStyle: "none", flex: 1, display: "flex", flexDirection: "column", gap: "4px", margin: "12px 0" }}>
-            {config.playlists.map((pl, idx) => (
-              <li
-                key={idx}
-                onClick={() => setSelectedPlaylistIndex(idx)}
-                style={{
-                  padding: "8px 12px",
-                  borderRadius: "6px",
-                  cursor: "pointer",
-                  backgroundColor: selectedPlaylistIndex === idx ? "var(--bg-tertiary)" : "transparent",
-                  borderLeft: selectedPlaylistIndex === idx ? "3px solid var(--accent-purple)" : "none",
-                  fontWeight: selectedPlaylistIndex === idx ? 600 : 400,
-                }}
-              >
-                {pl.name}
-              </li>
-            ))}
-          </ul>
-          <button className="btn btn-secondary" onClick={handleAddPlaylist} style={{ width: "100%" }}>
-            + Add Playlist
+          <div style={{ flex: 1, overflowY: "auto", margin: "12px 0", paddingRight: "4px" }}>
+            <ul style={{ listStyle: "none", display: "flex", flexDirection: "column", gap: "4px" }}>
+              {config.playlists.map((pl, idx) => (
+                <li
+                  key={idx}
+                  onClick={() => setSelectedPlaylistIndex(idx)}
+                  style={{
+                    padding: "8px 12px",
+                    borderRadius: "6px",
+                    cursor: "pointer",
+                    backgroundColor: selectedPlaylistIndex === idx ? "var(--bg-tertiary)" : "transparent",
+                    borderLeft: selectedPlaylistIndex === idx ? "3px solid var(--accent-purple)" : "none",
+                    fontWeight: selectedPlaylistIndex === idx ? 600 : 400,
+                  }}
+                >
+                  {pl.name}
+                </li>
+              ))}
+            </ul>
+          </div>
+          <button 
+            className="btn btn-secondary" 
+            onClick={handleAddPlaylist} 
+            style={{ 
+              width: "100%", 
+              marginTop: "auto", 
+              flexShrink: 0,
+              padding: "10px 12px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "6px"
+            }}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ display: "inline-block" }}>
+              <line x1="12" y1="5" x2="12" y2="19"></line>
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+            Add Playlist
           </button>
         </div>
 
+        {/* Resizable separator handle 1 */}
+        <div
+          onMouseDown={handleSidebarMouseDown}
+          style={{
+            width: "12px",
+            cursor: "col-resize",
+            backgroundColor: "transparent",
+            alignSelf: "stretch",
+            position: "relative",
+            zIndex: 10,
+            display: "flex",
+            justifyContent: "center",
+            alignItems: "center",
+          }}
+          className="resizable-separator"
+          title="Drag to resize sidebar"
+        >
+          <div style={{
+            width: "2px",
+            height: "40px",
+            borderRadius: "1px",
+            backgroundColor: "var(--border-color)",
+            transition: "background-color 0.2s"
+          }} className="resizable-indicator" />
+        </div>
+
         {/* Playlist properties and preview */}
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "24px", minWidth: 0 }}>
+        <div style={{ flex: 1, display: "flex", flexDirection: "row", gap: "0", minWidth: 0, alignItems: "stretch" }}>
           {activePlaylist ? (
             <>
               {/* Properties card */}
-              <div className="card" style={{ margin: 0 }}>
+              <div className="card" style={{ width: `${configWidth}px`, flexShrink: 0, margin: 0, display: "flex", flexDirection: "column", overflowY: "auto" }}>
                 <div className="card-title">
                   <span>Playlist Configuration</span>
                   <button 
@@ -298,8 +405,8 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                   />
                 </div>
 
-                <div style={{ display: "flex", gap: "16px" }}>
-                  <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+                  <div className="form-group" style={{ marginBottom: 0 }}>
                     <label className="form-label" style={{ display: "flex", justifyContent: "space-between" }}>
                       <span>Sources</span>
                       <span className="text-success" style={{ cursor: "pointer" }} onClick={selectAndAddSource}>
@@ -307,21 +414,29 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                       </span>
                     </label>
                     <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-                      {activePlaylist.sources.map((src, srcIdx) => (
-                        <div className="form-row" key={srcIdx}>
-                          <input type="text" readOnly value={src} style={{ fontSize: "0.85rem" }} />
-                          <button className="btn btn-secondary" onClick={() => removeSource(srcIdx)} style={{ padding: "10px" }}>
-                            🗑
-                          </button>
-                        </div>
-                      ))}
+                       {activePlaylist.sources.map((src, srcIdx) => (
+                         <div className="form-row" key={srcIdx}>
+                           <input type="text" readOnly value={src} style={{ fontSize: "0.85rem" }} />
+                           <button 
+                             className="btn btn-secondary" 
+                             onClick={() => removeSource(srcIdx)} 
+                             style={{ padding: "10px", display: "flex", alignItems: "center", justifyContent: "center" }}
+                             title="Remove Source Folder"
+                           >
+                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                               <polyline points="3 6 5 6 21 6"></polyline>
+                               <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                             </svg>
+                           </button>
+                         </div>
+                       ))}
                       {activePlaylist.sources.length === 0 && (
                         <p className="no-data" style={{ padding: "8px" }}>No source paths. Add one above.</p>
                       )}
                     </div>
                   </div>
 
-                  <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
+                  <div className="form-group" style={{ marginBottom: 0 }}>
                     <label className="form-label" style={{ display: "flex", justifyContent: "space-between" }}>
                       <span>Exclusions</span>
                       <span className="text-warning" style={{ cursor: "pointer" }} onClick={selectAndAddExclusion}>
@@ -329,14 +444,22 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                       </span>
                     </label>
                     <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-                      {(activePlaylist.exclusions || []).map((ex, exIdx) => (
-                        <div className="form-row" key={exIdx}>
-                          <input type="text" readOnly value={ex} style={{ fontSize: "0.85rem" }} />
-                          <button className="btn btn-secondary" onClick={() => removeExclusion(exIdx)} style={{ padding: "10px" }}>
-                            🗑
-                          </button>
-                        </div>
-                      ))}
+                       {(activePlaylist.exclusions || []).map((ex, exIdx) => (
+                         <div className="form-row" key={exIdx}>
+                           <input type="text" readOnly value={ex} style={{ fontSize: "0.85rem" }} />
+                           <button 
+                             className="btn btn-secondary" 
+                             onClick={() => removeExclusion(exIdx)} 
+                             style={{ padding: "10px", display: "flex", alignItems: "center", justifyContent: "center" }}
+                             title="Remove Exclusion Folder"
+                           >
+                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                               <polyline points="3 6 5 6 21 6"></polyline>
+                               <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                             </svg>
+                           </button>
+                         </div>
+                       ))}
                       {(activePlaylist.exclusions || []).length === 0 && (
                         <p className="no-data" style={{ padding: "8px" }}>No exclusions defined.</p>
                       )}
@@ -345,13 +468,61 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                 </div>
               </div>
 
+              {/* Resizable separator handle 2 */}
+              <div
+                onMouseDown={handleConfigMouseDown}
+                style={{
+                  width: "12px",
+                  cursor: "col-resize",
+                  backgroundColor: "transparent",
+                  alignSelf: "stretch",
+                  position: "relative",
+                  zIndex: 10,
+                  display: "flex",
+                  justifyContent: "center",
+                  alignItems: "center",
+                }}
+                className="resizable-separator"
+                title="Drag to resize configuration panel"
+              >
+                <div style={{
+                  width: "2px",
+                  height: "40px",
+                  borderRadius: "1px",
+                  backgroundColor: "var(--border-color)",
+                  transition: "background-color 0.2s"
+                }} className="resizable-indicator" />
+              </div>
+
               {/* Preview card */}
-              <div className="card" style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: "200px", margin: 0 }}>
-                <div className="card-title">
+              <div className="card" style={{ flex: 1, display: "flex", flexDirection: "column", margin: 0, minWidth: 0, overflow: "hidden" }}>
+                <div className="card-title" style={{ display: "flex", gap: "10px", alignItems: "center" }}>
                   <span>Resolved Music Tracks ({previews.length})</span>
-                  <button className="btn btn-secondary" onClick={loadPreview} disabled={isLoadingPreview} style={{ padding: "6px 12px", fontSize: "0.85rem" }}>
-                    {isLoadingPreview ? "Reloading..." : "🔄 Refresh Preview"}
-                  </button>
+                  <div style={{ marginLeft: "auto", display: "flex", gap: "8px" }}>
+                    <button 
+                      className="btn btn-primary" 
+                      onClick={() => handlePlayAll()} 
+                      disabled={previews.length === 0} 
+                      style={{ padding: "6px 12px", fontSize: "0.85rem", display: "flex", alignItems: "center", gap: "6px" }}
+                    >
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M8 5v14l11-7z"/>
+                      </svg>
+                      Play All
+                    </button>
+                    <button 
+                      className="btn btn-secondary" 
+                      onClick={loadPreview} 
+                      disabled={isLoadingPreview} 
+                      style={{ padding: "6px 12px", fontSize: "0.85rem", display: "flex", alignItems: "center", gap: "6px" }}
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M23 4v6h-6"></path>
+                        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+                      </svg>
+                      {isLoadingPreview ? "Reloading..." : "Refresh"}
+                    </button>
+                  </div>
                 </div>
 
                 {previewError && <div className="no-data text-danger">{previewError}</div>}
@@ -376,17 +547,36 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                             <td style={{ width: "60px" }}>
                               <button
                                 className="btn btn-secondary"
-                                style={{ padding: "4px 8px", borderRadius: "50%" }}
-                                onClick={() =>
+                                onClick={() => {
+                                  const audioTracks: AudioTrack[] = previews.map((t) => ({
+                                    file_path: t.file_path,
+                                    title: t.title,
+                                    artist: t.artist,
+                                    duration: t.duration,
+                                  }));
+                                  const playlistName = activePlaylist ? activePlaylist.name : "Playlist";
                                   onPlayTrack({
                                     file_path: track.file_path,
                                     title: track.title,
                                     artist: track.artist,
                                     duration: track.duration,
-                                  })
-                                }
+                                  }, audioTracks, playlistName);
+                                }}
+                                style={{ 
+                                  padding: "6px", 
+                                  borderRadius: "50%", 
+                                  width: "28px", 
+                                  height: "28px", 
+                                  display: "flex", 
+                                  alignItems: "center", 
+                                  justifyContent: "center",
+                                  cursor: "pointer" 
+                                }}
+                                title="Play Track"
                               >
-                                ▶
+                                <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+                                  <path d="M8 5v14l11-7z"/>
+                                </svg>
                               </button>
                             </td>
                             <td>
