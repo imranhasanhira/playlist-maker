@@ -382,6 +382,7 @@ function App() {
             config={config}
             formats={formats}
             addBackgroundTask={addBackgroundTask}
+            onPlayTrack={handlePlayTrack}
           />
         )}
 

@@ -1,11 +1,14 @@
 import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { MainConfig } from "../App";
+import { AudioTrack } from "../components/AudioPlayer";
+import { ResolvedTracksPanel, TrackPreview } from "../components/ResolvedTracksPanel";
 
 type LibraryViewProps = {
   config: MainConfig | null;
   formats: string;
   addBackgroundTask: (id: string, name: string, taskPromise: Promise<any>) => void;
+  onPlayTrack?: (track: AudioTrack, queue: AudioTrack[], playlistName: string) => void;
 };
 
 type DirTreeNode = {
@@ -30,11 +33,26 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
   config,
   formats,
   addBackgroundTask,
+  onPlayTrack,
 }) => {
   const [treeRoot, setTreeRoot] = useState<DirTreeNode | null>(null);
   const [isLoadingTree, setIsLoadingTree] = useState<boolean>(false);
   const [treeError, setTreeError] = useState<string>("");
-  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
+  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => {
+    try {
+      const saved = localStorage.getItem("library_expanded_paths");
+      if (saved) {
+        return new Set(JSON.parse(saved));
+      }
+    } catch (e) {}
+    return new Set();
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("library_expanded_paths", JSON.stringify(Array.from(expandedPaths)));
+    } catch (e) {}
+  }, [expandedPaths]);
 
   // Resizable panel width state
   const [leftWidth, setLeftWidth] = useState<number>(280);
@@ -55,14 +73,43 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
   const [batchCoverB64, setBatchCoverB64] = useState<string>("");
   const [batchCoverMime, setBatchCoverMime] = useState<string>("");
   const [isSavingBatch, setIsSavingBatch] = useState<boolean>(false);
+  const [showBatchConfirmModal, setShowBatchConfirmModal] = useState<boolean>(false);
 
+  // Resolved tracks for directory preview panel
+  const [middleWidth, setMiddleWidth] = useState<number>(380);
+  const [dirPreviews, setDirPreviews] = useState<TrackPreview[]>([]);
+  const [isLoadingDirPreviews, setIsLoadingDirPreviews] = useState<boolean>(false);
+  const [dirPreviewsError, setDirPreviewsError] = useState<string>("");
+  const [activeFolderPath, setActiveFolderPath] = useState<string>("");
   useEffect(() => {
     if (config?.sourceDir) {
       loadLibraryTree();
     } else {
       setTreeRoot(null);
+      setDirPreviews([]);
+      setActiveFolderPath("");
     }
   }, [config?.sourceDir, formats]);
+
+  const loadFolderPreviews = async (folderPath: string) => {
+    if (!folderPath) return;
+    setActiveFolderPath(folderPath);
+    setIsLoadingDirPreviews(true);
+    setDirPreviewsError("");
+    try {
+      const formatsList = formats.split(",").map((f) => f.trim());
+      const previews = await invoke<TrackPreview[]>("preview_directory_tracks", {
+        folder: folderPath,
+        formats: formatsList,
+      });
+      setDirPreviews(previews);
+    } catch (e) {
+      setDirPreviewsError(String(e));
+      setDirPreviews([]);
+    } finally {
+      setIsLoadingDirPreviews(false);
+    }
+  };
 
   const loadLibraryTree = async () => {
     if (!config?.sourceDir) return;
@@ -80,7 +127,25 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
 
       const rootNode = await scanPromise;
       setTreeRoot(rootNode);
-      setExpandedPaths(new Set([rootNode.path])); // Expand root level by default
+      setExpandedPaths((prevExpanded) => {
+        if (!prevExpanded || prevExpanded.size === 0) {
+          return new Set([rootNode.path]);
+        }
+        const available = new Set<string>();
+        const checkNode = (n: DirTreeNode) => {
+          if (prevExpanded.has(n.path)) {
+            available.add(n.path);
+          }
+          if (n.children) {
+            for (const child of n.children) {
+              checkNode(child);
+            }
+          }
+        };
+        checkNode(rootNode);
+        available.add(rootNode.path);
+        return available;
+      });
     } catch (e) {
       setTreeError(String(e));
     } finally {
@@ -108,7 +173,18 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
     setBatchCoverB64("");
     setBatchCoverMime("");
 
-    if (!node.is_dir) {
+    if (node.is_dir) {
+      loadFolderPreviews(node.path);
+    } else {
+      // Determine parent folder for previews if changing directory
+      const lastSlash = Math.max(node.path.lastIndexOf("/"), node.path.lastIndexOf("\\"));
+      if (lastSlash > 0) {
+        const parentFolder = node.path.substring(0, lastSlash);
+        if (parentFolder !== activeFolderPath) {
+          loadFolderPreviews(parentFolder);
+        }
+      }
+
       setIsReadingTags(true);
       try {
         const tags = await invoke<TrackTags>("read_track_tags", {
@@ -153,7 +229,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
     }
   };
 
-  const handleSaveBatchTags = async () => {
+  const handleSaveBatchTags = () => {
     if (!selectedNode || !selectedNode.is_dir) return;
     
     const yearNum = batchYear ? parseInt(batchYear) : null;
@@ -162,13 +238,20 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
       return;
     }
 
-    const confirmed = confirm(
-      `Are you sure you want to batch update metadata tags for all matching tracks in folder:\n"${selectedNode.name}"?`
-    );
-    if (!confirmed) return;
+    if (!batchArtist && !batchAlbum && !batchGenre && !batchYear && !batchCoverB64) {
+      alert("Please specify at least one metadata tag field or cover art action to apply.");
+      return;
+    }
 
+    setShowBatchConfirmModal(true);
+  };
+
+  const executeSaveBatchTags = async () => {
+    if (!selectedNode || !selectedNode.is_dir) return;
+    setShowBatchConfirmModal(false);
     setIsSavingBatch(true);
     try {
+      const yearNum = batchYear ? parseInt(batchYear) : null;
       const formatsList = formats.split(",").map((f) => f.trim());
       
       const coverParam = batchCoverB64 === "" ? null : batchCoverB64;
@@ -192,6 +275,9 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
       );
       await promise;
       alert("Batch tag updates completed successfully!");
+      if (activeFolderPath) {
+        loadFolderPreviews(activeFolderPath);
+      }
     } catch (e) {
       alert("Error in batch folder updates: " + e);
     } finally {
@@ -271,6 +357,28 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
     window.addEventListener("mouseup", handleMouseUp);
   };
 
+  const handleMiddleMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = middleWidth;
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const deltaX = moveEvent.clientX - startX;
+      const newWidth = startWidth + deltaX;
+      if (newWidth > 200 && newWidth < 800) {
+        setMiddleWidth(newWidth);
+      }
+    };
+
+    const handleMouseUp = () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+  };
+
   const renderTree = (node: DirTreeNode, depth = 0) => {
     const isExpanded = expandedPaths.has(node.path);
     const isSelected = selectedNode?.path === node.path;
@@ -299,6 +407,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
             marginLeft: `${depth * 4}px`,
           }}
           className="tree-node-item"
+          title={node.path}
         >
           {node.is_dir ? (
             <>
@@ -343,13 +452,13 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
               className="btn btn-secondary" 
               onClick={loadLibraryTree} 
               disabled={isLoadingTree} 
-              style={{ padding: "4px 8px", fontSize: "0.75rem", display: "flex", alignItems: "center", gap: "4px" }}
+              style={{ padding: "6px", width: "28px", height: "28px", display: "flex", alignItems: "center", justifyContent: "center", borderRadius: "6px" }}
+              title={isLoadingTree ? "Scanning library files..." : "Refresh Library Tree"}
             >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ display: "inline-block" }}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M23 4v6h-6"></path>
                 <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
               </svg>
-              {isLoadingTree ? "Scanning..." : "Refresh"}
             </button>
           </div>
           
@@ -365,7 +474,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
           </div>
         </div>
 
-        {/* Resizable separator handle */}
+        {/* Resizable separator handle 1 */}
         <div
           onMouseDown={handleMouseDown}
           style={{
@@ -391,8 +500,50 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
           }} className="resizable-indicator" />
         </div>
 
+        {/* Middle Side: Resolved Music Tracks */}
+        <div style={{ width: `${middleWidth}px`, flexShrink: 0, display: "flex", flexDirection: "column", margin: 0 }}>
+          <ResolvedTracksPanel
+            previews={dirPreviews}
+            isLoadingPreview={isLoadingDirPreviews}
+            previewError={dirPreviewsError}
+            loadPreview={() => activeFolderPath && loadFolderPreviews(activeFolderPath)}
+            onPlayTrack={onPlayTrack}
+            contextName={activeFolderPath ? activeFolderPath.split(/[/\\]/).pop() || "Library" : "Library"}
+            selectedFilePath={selectedNode && !selectedNode.is_dir ? selectedNode.path : null}
+            onSelectTrack={(track) => handleSelectNode({ name: track.title, path: track.file_path, is_dir: false, children: [] })}
+            emptyMessage="Select a folder or track from the Library Tree to preview resolved music tracks."
+            title={activeFolderPath ? `Resolved Tracks (${dirPreviews.length})` : "Resolved Tracks"}
+          />
+        </div>
+
+        {/* Resizable separator handle 2 */}
+        <div
+          onMouseDown={handleMiddleMouseDown}
+          style={{
+            width: "12px",
+            cursor: "col-resize",
+            backgroundColor: "transparent",
+            alignSelf: "stretch",
+            position: "relative",
+            zIndex: 10,
+            display: "flex",
+            justifyContent: "center",
+            alignItems: "center",
+          }}
+          className="resizable-separator"
+          title="Drag to resize tracks panel"
+        >
+          <div style={{
+            width: "2px",
+            height: "40px",
+            borderRadius: "1px",
+            backgroundColor: "var(--border-color)",
+            transition: "background-color 0.2s"
+          }} className="resizable-indicator" />
+        </div>
+
         {/* Right Side: Editors */}
-        <div style={{ flex: 1, overflowY: "auto", minWidth: 0, paddingLeft: "8px" }}>
+        <div style={{ flex: 1, overflowY: "auto", minWidth: 0 }}>
           {selectedNode ? (
             selectedNode.is_dir ? (
               // Batch Folder Tag Editor
@@ -680,6 +831,88 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
           )}
         </div>
       </div>
+
+      {/* Batch update confirmation modal */}
+      {showBatchConfirmModal && selectedNode && (
+        <div style={{
+          position: "fixed",
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: "rgba(0, 0, 0, 0.75)",
+          backdropFilter: "blur(4px)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          zIndex: 1000
+        }}>
+          <div className="card" style={{ width: "520px", display: "flex", flexDirection: "column", margin: 0, padding: "20px", gap: "14px" }}>
+            <div className="card-title" style={{ borderBottom: "1px solid var(--border-color)", paddingBottom: "10px", margin: 0 }}>
+              <span style={{ color: "var(--warning)", display: "flex", alignItems: "center", gap: "8px", fontSize: "1.05rem" }}>
+                ⚠️ Confirm Batch Tag Update
+              </span>
+            </div>
+
+            <div style={{ fontSize: "0.88rem" }}>
+              <p style={{ marginBottom: "6px" }}>
+                Are you sure you want to batch update metadata tags for all matching tracks in folder:
+              </p>
+              <div style={{ fontWeight: 600, color: "var(--accent-purple)", wordBreak: "break-all", background: "var(--bg-tertiary)", padding: "8px 12px", borderRadius: "6px" }}>
+                📁 {selectedNode.name}
+              </div>
+            </div>
+
+            <div style={{ background: "rgba(234, 179, 8, 0.12)", border: "1px solid var(--warning)", padding: "8px 12px", borderRadius: "6px", fontSize: "0.82rem", color: "var(--text-primary)" }}>
+              <strong>Caution:</strong> This action will recursively overwrite specified metadata tags across all audio tracks in this folder.
+            </div>
+
+            <div style={{ fontSize: "0.85rem", background: "var(--bg-tertiary)", padding: "12px", borderRadius: "6px" }}>
+              <div style={{ fontWeight: 600, marginBottom: "8px", borderBottom: "1px solid var(--border-color)", paddingBottom: "4px" }}>
+                Summary of Changes to Apply:
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "100px 1fr", gap: "6px", fontFamily: "var(--font-mono)", fontSize: "0.8rem" }}>
+                <span className="text-secondary">Artist:</span>
+                <span>{batchArtist ? batchArtist : <em className="text-muted">(Unchanged)</em>}</span>
+                
+                <span className="text-secondary">Album:</span>
+                <span>{batchAlbum ? batchAlbum : <em className="text-muted">(Unchanged)</em>}</span>
+                
+                <span className="text-secondary">Genre:</span>
+                <span>{batchGenre ? batchGenre : <em className="text-muted">(Unchanged)</em>}</span>
+                
+                <span className="text-secondary">Year:</span>
+                <span>{batchYear ? batchYear : <em className="text-muted">(Unchanged)</em>}</span>
+                
+                <span className="text-secondary">Cover Art:</span>
+                <span>
+                  {batchCoverB64 === "REMOVE" 
+                    ? <span className="text-danger">Remove Existing Cover</span> 
+                    : batchCoverB64 
+                      ? <span className="text-success">Set New Cover Image</span> 
+                      : <em className="text-muted">(Unchanged)</em>}
+                </span>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: "10px", marginTop: "6px" }}>
+              <button
+                className="btn btn-secondary"
+                onClick={() => setShowBatchConfirmModal(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn btn-primary"
+                onClick={executeSaveBatchTags}
+                style={{ backgroundColor: "var(--accent-purple)" }}
+              >
+                ⚡ Yes, Apply Batch Updates
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
