@@ -55,9 +55,11 @@ function App() {
   // Sanitizer custom strip phrases
   const [stripPhrases, setStripPhrases] = useState<string[]>(DEFAULT_STRIP_PHRASES);
   
-  // Audio player state
-  const [activeTrack, setActiveTrack] = useState<AudioTrack | null>(null);
+  // Audio player queue state
+  const [playQueue, setPlayQueue] = useState<AudioTrack[]>([]);
+  const [currentTrackIndex, setCurrentTrackIndex] = useState<number>(-1);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [playingPlaylistName, setPlayingPlaylistName] = useState<string>("");
 
   // Theme state: defaults to system preference, then user override
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
@@ -204,9 +206,25 @@ function App() {
     }
   }, []);
 
-  const handlePlayTrack = (track: AudioTrack) => {
-    setActiveTrack(track);
+  const handlePlayTrack = (track: AudioTrack, queueList: AudioTrack[], playlistName: string) => {
+    setPlayQueue(queueList);
+    const idx = queueList.findIndex((t) => t.file_path === track.file_path);
+    setCurrentTrackIndex(idx >= 0 ? idx : 0);
     setIsPlaying(true);
+    setPlayingPlaylistName(playlistName);
+  };
+
+  const handlePlayQueue = (queueList: AudioTrack[], playlistName: string, shuffle = false) => {
+    if (queueList.length === 0) return;
+    if (shuffle) {
+      const shuffled = [...queueList].sort(() => Math.random() - 0.5);
+      setPlayQueue(shuffled);
+    } else {
+      setPlayQueue(queueList);
+    }
+    setCurrentTrackIndex(0);
+    setIsPlaying(true);
+    setPlayingPlaylistName(playlistName);
   };
 
   // Onboarding dialog actions
@@ -358,7 +376,7 @@ function App() {
       </header>
 
       {/* Main Content Area */}
-      <main className={`main-content ${activeTrack ? "has-player" : ""}`}>
+      <main className={`main-content ${playQueue.length > 0 && currentTrackIndex >= 0 && currentTrackIndex < playQueue.length ? "has-player" : ""}`}>
         {currentView === "library" && config && (
           <LibraryView
             config={config}
@@ -374,6 +392,7 @@ function App() {
             setConfig={saveAndSetConfig}
             formats={formats}
             onPlayTrack={handlePlayTrack}
+            onPlayQueue={handlePlayQueue}
             relativeToConfig={config?.relativeToConfig ?? true}
           />
         )}
@@ -403,7 +422,7 @@ function App() {
         {bgTasks.length > 0 && (
           <div style={{
             position: "fixed",
-            bottom: activeTrack ? "110px" : "24px",
+            bottom: playQueue.length > 0 && currentTrackIndex >= 0 && currentTrackIndex < playQueue.length ? "110px" : "24px",
             right: "24px",
             width: "320px",
             backgroundColor: "rgba(22, 22, 33, 0.9)",
@@ -471,15 +490,22 @@ function App() {
         )}
 
         {/* Sticky Audio Player */}
-        <AudioPlayer
-          activeTrack={activeTrack}
-          isPlaying={isPlaying}
-          onPlayPause={setIsPlaying}
-          onClose={() => {
-            setActiveTrack(null);
-            setIsPlaying(false);
-          }}
-        />
+        {playQueue.length > 0 && currentTrackIndex >= 0 && currentTrackIndex < playQueue.length && (
+          <AudioPlayer
+            queue={playQueue}
+            currentTrackIndex={currentTrackIndex}
+            onTrackIndexChange={setCurrentTrackIndex}
+            isPlaying={isPlaying}
+            onPlayPause={setIsPlaying}
+            playlistName={playingPlaylistName}
+            onClose={() => {
+              setPlayQueue([]);
+              setCurrentTrackIndex(-1);
+              setIsPlaying(false);
+              setPlayingPlaylistName("");
+            }}
+          />
+        )}
 
         {/* Startup / No Config Onboarding Modal Overlay */}
         {config === null && (
