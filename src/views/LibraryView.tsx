@@ -57,8 +57,9 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
   // Resizable panel width state
   const [leftWidth, setLeftWidth] = useState<number>(280);
 
-  // Selected item
-  const [selectedNode, setSelectedNode] = useState<DirTreeNode | null>(null);
+  // Selected items (supports Cmd / Ctrl multi-selection)
+  const [selectedNodes, setSelectedNodes] = useState<Map<string, DirTreeNode>>(new Map());
+  const selectedNode = selectedNodes.size === 1 ? Array.from(selectedNodes.values())[0] : null;
 
   // Single file tags editing
   const [selectedFileTags, setSelectedFileTags] = useState<TrackTags | null>(null);
@@ -91,27 +92,38 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
     }
   }, [config?.sourceDir, formats]);
 
-  const loadFolderPreviews = async (folderPath: string, force = false) => {
-    if (!folderPath) return;
-    if (!force && folderPath === activeFolderPath && dirPreviews.length > 0) {
-      return; // Already loaded active folder, skip duplicate disk scan
+  const loadMultipleFolderPreviews = async (folderPaths: string[], force = false) => {
+    if (folderPaths.length === 0) return;
+    const compositeKey = folderPaths.slice().sort().join("|");
+    if (!force && compositeKey === activeFolderPath && dirPreviews.length > 0) {
+      return; // Already loaded active folder(s), skip duplicate disk scan
     }
-    setActiveFolderPath(folderPath);
+    setActiveFolderPath(compositeKey);
     setIsLoadingDirPreviews(true);
     setDirPreviewsError("");
     try {
       const formatsList = formats.split(",").map((f) => f.trim());
-      const previews = await invoke<TrackPreview[]>("preview_directory_tracks", {
-        folder: folderPath,
-        formats: formatsList,
-      });
-      setDirPreviews(previews);
+      const allPreviews: TrackPreview[] = [];
+      for (const folder of folderPaths) {
+        const previews = await invoke<TrackPreview[]>("preview_directory_tracks", {
+          folder,
+          formats: formatsList,
+        });
+        allPreviews.push(...previews);
+      }
+      // Remove duplicates if any
+      const unique = Array.from(new Map(allPreviews.map((t) => [t.file_path, t])).values());
+      setDirPreviews(unique);
     } catch (e) {
       setDirPreviewsError(String(e));
       setDirPreviews([]);
     } finally {
       setIsLoadingDirPreviews(false);
     }
+  };
+
+  const loadFolderPreviews = async (folderPath: string, force = false) => {
+    await loadMultipleFolderPreviews([folderPath], force);
   };
 
   const loadLibraryTree = async () => {
@@ -166,43 +178,68 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
     setExpandedPaths(next);
   };
 
-  const handleSelectNode = async (node: DirTreeNode) => {
-    const isSameNode = selectedNode?.path === node.path;
-    setSelectedNode(node);
+  const handleSelectNode = async (node: DirTreeNode, isMultiSelect = false) => {
+    let nextSelected = new Map<string, DirTreeNode>();
 
-    if (node.is_dir) {
-      loadFolderPreviews(node.path);
+    if (isMultiSelect) {
+      nextSelected = new Map(selectedNodes);
+      if (nextSelected.has(node.path)) {
+        if (nextSelected.size > 1) {
+          nextSelected.delete(node.path);
+        }
+      } else {
+        nextSelected.set(node.path, node);
+      }
     } else {
-      // Determine parent folder for previews if changing directory
-      const lastSlash = Math.max(node.path.lastIndexOf("/"), node.path.lastIndexOf("\\"));
+      nextSelected.set(node.path, node);
+    }
+
+    setSelectedNodes(nextSelected);
+
+    setSelectedFileTags(null);
+    setBatchArtist("");
+    setBatchAlbum("");
+    setBatchGenre("");
+    setBatchYear("");
+    setBatchCoverB64("");
+    setBatchCoverMime("");
+
+    const selectedList = Array.from(nextSelected.values());
+
+    if (selectedList.length === 1 && !selectedList[0].is_dir) {
+      const fileNode = selectedList[0];
+      const lastSlash = Math.max(fileNode.path.lastIndexOf("/"), fileNode.path.lastIndexOf("\\"));
       if (lastSlash > 0) {
-        const parentFolder = node.path.substring(0, lastSlash);
+        const parentFolder = fileNode.path.substring(0, lastSlash);
         loadFolderPreviews(parentFolder);
       }
-
-      // If clicking the exact same file node and tags are already loaded, skip tag read
-      if (isSameNode && selectedFileTags) {
-        return;
-      }
-
-      setSelectedFileTags(null);
-      setBatchArtist("");
-      setBatchAlbum("");
-      setBatchGenre("");
-      setBatchYear("");
-      setBatchCoverB64("");
-      setBatchCoverMime("");
 
       setIsReadingTags(true);
       try {
         const tags = await invoke<TrackTags>("read_track_tags", {
-          filePath: node.path,
+          filePath: fileNode.path,
         });
         setSelectedFileTags(tags);
       } catch (e) {
         alert("Failed to read metadata tags: " + e);
       } finally {
         setIsReadingTags(false);
+      }
+    } else {
+      const targetFolders = new Set<string>();
+      for (const n of selectedList) {
+        if (n.is_dir) {
+          targetFolders.add(n.path);
+        } else {
+          const lastSlash = Math.max(n.path.lastIndexOf("/"), n.path.lastIndexOf("\\"));
+          if (lastSlash > 0) {
+            targetFolders.add(n.path.substring(0, lastSlash));
+          }
+        }
+      }
+
+      if (targetFolders.size > 0) {
+        loadMultipleFolderPreviews(Array.from(targetFolders));
       }
     }
   };
@@ -238,7 +275,9 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
   };
 
   const handleSaveBatchTags = () => {
-    if (!selectedNode || !selectedNode.is_dir) return;
+    const selectedList = Array.from(selectedNodes.values());
+    const hasDirs = selectedList.some((n) => n.is_dir) || selectedList.length > 1;
+    if (!hasDirs) return;
     
     const yearNum = batchYear ? parseInt(batchYear) : null;
     if (batchYear && (isNaN(yearNum!) || yearNum! <= 0)) {
@@ -255,7 +294,9 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
   };
 
   const executeSaveBatchTags = async () => {
-    if (!selectedNode || !selectedNode.is_dir) return;
+    const selectedList = Array.from(selectedNodes.values());
+    const selectedDirs = selectedList.filter((n) => n.is_dir);
+    if (selectedDirs.length === 0) return;
     setShowBatchConfirmModal(false);
     setIsSavingBatch(true);
     try {
@@ -265,26 +306,30 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
       const coverParam = batchCoverB64 === "" ? null : batchCoverB64;
       const mimeParam = batchCoverB64 === "REMOVE" || batchCoverB64 === "" ? null : batchCoverMime;
 
-      const promise = invoke("batch_update_folder_tags", {
-        folderPath: selectedNode.path,
-        formats: formatsList,
-        artist: batchArtist || null,
-        album: batchAlbum || null,
-        genre: batchGenre || null,
-        year: yearNum || null,
-        coverB64: coverParam,
-        coverMime: mimeParam,
-      });
+      for (const dirNode of selectedDirs) {
+        const promise = invoke("batch_update_folder_tags", {
+          folderPath: dirNode.path,
+          formats: formatsList,
+          artist: batchArtist || null,
+          album: batchAlbum || null,
+          genre: batchGenre || null,
+          year: yearNum || null,
+          coverB64: coverParam,
+          coverMime: mimeParam,
+        });
 
-      addBackgroundTask(
-        `batch_tags_${Date.now()}`,
-        `Batch tag folder ${selectedNode.name}`,
-        promise
-      );
-      await promise;
-      alert("Batch tag updates completed successfully!");
+        addBackgroundTask(
+          `batch_tags_${Date.now()}_${dirNode.name}`,
+          `Batch tag folder ${dirNode.name}`,
+          promise
+        );
+        await promise;
+      }
+
+      alert(`Batch tag updates completed successfully across ${selectedDirs.length} folder(s)!`);
       if (activeFolderPath) {
-        loadFolderPreviews(activeFolderPath);
+        const foldersToReload = activeFolderPath.split("|");
+        loadMultipleFolderPreviews(foldersToReload, true);
       }
     } catch (e) {
       alert("Error in batch folder updates: " + e);
@@ -389,17 +434,20 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
 
   const renderTree = (node: DirTreeNode, depth = 0) => {
     const isExpanded = expandedPaths.has(node.path);
-    const isSelected = selectedNode?.path === node.path;
+    const isSelected = selectedNodes.has(node.path);
     
     return (
       <div key={node.path} style={{ display: "flex", flexDirection: "column", gap: "2px", userSelect: "none" }}>
         <div
           onClick={(e) => {
             e.stopPropagation();
+            handleSelectNode(node, e.metaKey || e.ctrlKey);
+          }}
+          onDoubleClick={(e) => {
+            e.stopPropagation();
             if (node.is_dir) {
               toggleCollapse(node.path);
             }
-            handleSelectNode(node);
           }}
           style={{
             display: "flex",
@@ -419,14 +467,32 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
         >
           {node.is_dir ? (
             <>
-              <span style={{ fontSize: "0.8rem", color: "var(--text-muted)", width: "12px" }}>
+              <span
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggleCollapse(node.path);
+                }}
+                style={{
+                  fontSize: "0.8rem",
+                  color: "var(--text-muted)",
+                  width: "16px",
+                  height: "16px",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  cursor: "pointer",
+                  borderRadius: "3px",
+                }}
+                title={isExpanded ? "Collapse Folder" : "Expand Folder"}
+                className="tree-arrow"
+              >
                 {isExpanded ? "▼" : "▶"}
               </span>
               <span>📁</span>
             </>
           ) : (
             <>
-              <span style={{ width: "12px" }} />
+              <span style={{ width: "16px" }} />
               <span>🎵</span>
             </>
           )}
@@ -552,19 +618,27 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
 
         {/* Right Side: Editors */}
         <div style={{ flex: 1, overflowY: "auto", minWidth: 0 }}>
-          {selectedNode ? (
-            selectedNode.is_dir ? (
-              // Batch Folder Tag Editor
+          {selectedNodes.size > 0 ? (
+            selectedNodes.size > 1 || (selectedNode && selectedNode.is_dir) ? (
+              // Batch Folder Tag Editor for single folder or multiple items
               <div className="card" style={{ margin: 0 }}>
                 <div className="card-title">
-                  <span>Batch Metadata Editor</span>
+                  <span>Batch Metadata Editor ({selectedNodes.size} selected)</span>
                 </div>
                 
                 <div style={{ marginBottom: "16px" }}>
-                  <div style={{ fontSize: "1.05rem", fontWeight: 600 }}>📁 {selectedNode.name}</div>
-                  <div className="text-secondary" style={{ fontSize: "0.8rem", fontFamily: "var(--font-mono)", wordBreak: "break-all" }}>
-                    {selectedNode.path}
-                  </div>
+                  {selectedNode ? (
+                    <>
+                      <div style={{ fontSize: "1.05rem", fontWeight: 600 }}>📁 {selectedNode.name}</div>
+                      <div className="text-secondary" style={{ fontSize: "0.8rem", fontFamily: "var(--font-mono)", wordBreak: "break-all" }}>
+                        {selectedNode.path}
+                      </div>
+                    </>
+                  ) : (
+                    <div style={{ fontSize: "1rem", fontWeight: 600, color: "var(--accent-purple)" }}>
+                      📁 {selectedNodes.size} Items Selected
+                    </div>
+                  )}
                 </div>
 
                 <p className="text-secondary" style={{ fontSize: "0.85rem", marginBottom: "16px" }}>
@@ -704,9 +778,9 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
                 </div>
                 
                 <div style={{ marginBottom: "20px" }}>
-                  <div style={{ fontSize: "1.05rem", fontWeight: 600 }}>🎵 {selectedNode.name}</div>
+                  <div style={{ fontSize: "1.05rem", fontWeight: 600 }}>🎵 {selectedNode?.name}</div>
                   <div className="text-secondary" style={{ fontSize: "0.8rem", fontFamily: "var(--font-mono)", wordBreak: "break-all" }}>
-                    {selectedNode.path}
+                    {selectedNode?.path}
                   </div>
                 </div>
 
