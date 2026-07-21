@@ -2,6 +2,9 @@ import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { MainConfig } from "../App";
 import { AudioTrack } from "../components/AudioPlayer";
+import { ResolvedTracksPanel, TrackPreview } from "../components/ResolvedTracksPanel";
+
+export type { TrackPreview };
 
 type PlaylistViewProps = {
   configPath: string;
@@ -11,15 +14,6 @@ type PlaylistViewProps = {
   onPlayTrack: (track: AudioTrack, queue: AudioTrack[], playlistName: string) => void;
   onPlayQueue?: (queue: AudioTrack[], playlistName: string, shuffle?: boolean) => void;
   relativeToConfig: boolean;
-};
-
-type TrackPreview = {
-  file_path: string;
-  relative_path: string;
-  title: string;
-  artist: string;
-  duration: number;
-  size_bytes: number;
 };
 
 export const PlaylistView: React.FC<PlaylistViewProps> = ({
@@ -98,31 +92,12 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     }
   }, [selectedPlaylistIndex, config]);
 
-  const cleanDisplayPath = (path: string) => {
-    let p = path.replace(/\\/g, '/');
-    p = p.replace(/^(\.\.\/|\.\/)+/, '');
-    return p;
-  };
-
   const formatPathTail = (pathStr: string) => {
     if (!pathStr) return "";
     const normalized = pathStr.replace(/\\/g, '/');
     const parts = normalized.split('/').filter(Boolean);
     if (parts.length <= 3) return pathStr;
     return "…/" + parts.slice(-3).join('/');
-  };
-
-  const handlePlayAll = (shuffle = false) => {
-    if (onPlayQueue && previews.length > 0) {
-      const audioTracks: AudioTrack[] = previews.map((t) => ({
-        file_path: t.file_path,
-        title: t.title,
-        artist: t.artist,
-        duration: t.duration,
-      }));
-      const playlistName = activePlaylist ? activePlaylist.name : "Playlist";
-      onPlayQueue(audioTracks, playlistName, shuffle);
-    }
   };
 
   const loadPreview = async () => {
@@ -270,20 +245,6 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     } finally {
       setIsGenerating(false);
     }
-  };
-
-  const formatSize = (bytes: number) => {
-    if (bytes === 0) return "0 Bytes";
-    const k = 1024;
-    const sizes = ["Bytes", "KB", "MB", "GB"];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
-  };
-
-  const formatDuration = (secs: number) => {
-    const minutes = Math.floor(secs / 60);
-    const seconds = secs % 60;
-    return `${minutes}:${seconds < 10 ? "0" : ""}${seconds}`;
   };
 
   if (!config) {
@@ -515,123 +476,26 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
               </div>
 
               {/* Preview card */}
-              <div className="card" style={{ flex: 1, display: "flex", flexDirection: "column", margin: 0, minWidth: 0, overflow: "hidden" }}>
-                <div className="card-title" style={{ display: "flex", gap: "10px", alignItems: "center" }}>
-                  <span>Resolved Music Tracks ({previews.length})</span>
-                  <div style={{ marginLeft: "auto", display: "flex", gap: "8px" }}>
-                    <button 
-                      className="btn btn-primary" 
-                      onClick={() => handlePlayAll()} 
-                      disabled={previews.length === 0} 
-                      style={{ padding: "6px 12px", fontSize: "0.85rem", display: "flex", alignItems: "center", gap: "6px" }}
-                    >
-                      <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M8 5v14l11-7z"/>
-                      </svg>
-                      Play All
-                    </button>
-                    <button 
-                      className="btn btn-secondary" 
-                      onClick={loadPreview} 
-                      disabled={isLoadingPreview} 
-                      style={{ padding: "6px 12px", fontSize: "0.85rem", display: "flex", alignItems: "center", gap: "6px" }}
-                    >
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M23 4v6h-6"></path>
-                        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
-                      </svg>
-                      {isLoadingPreview ? "Reloading..." : "Refresh"}
-                    </button>
-                  </div>
-                </div>
-
-                {previewError && <div className="no-data text-danger">{previewError}</div>}
-
-                {isLoadingPreview ? (
-                  <div className="no-data">Loading resolved file list...</div>
-                ) : previews.length > 0 ? (
-                  <div className="table-container" style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
-                    <table style={{ tableLayout: "fixed", width: "100%" }}>
-                      <thead>
-                        <tr>
-                          <th style={{ width: "42px", textAlign: "center" }}>Play</th>
-                          <th style={{ width: "52%" }}>Title</th>
-                          <th style={{ width: "24%" }}>Artist</th>
-                          <th style={{ width: "65px", textAlign: "right" }}>Duration</th>
-                          <th style={{ width: "70px", textAlign: "right" }}>Size</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {previews.map((track, trackIdx) => (
-                          <tr key={trackIdx}>
-                            <td style={{ width: "42px", textAlign: "center" }}>
-                              <button
-                                className="btn btn-secondary"
-                                onClick={() => {
-                                  const audioTracks: AudioTrack[] = previews.map((t) => ({
-                                    file_path: t.file_path,
-                                    title: t.title,
-                                    artist: t.artist,
-                                    duration: t.duration,
-                                  }));
-                                  const playlistName = activePlaylist ? activePlaylist.name : "Playlist";
-                                  onPlayTrack({
-                                    file_path: track.file_path,
-                                    title: track.title,
-                                    artist: track.artist,
-                                    duration: track.duration,
-                                  }, audioTracks, playlistName);
-                                }}
-                                style={{ 
-                                  padding: "5px", 
-                                  borderRadius: "50%", 
-                                  width: "26px", 
-                                  height: "26px", 
-                                  display: "flex", 
-                                  alignItems: "center", 
-                                  justifyContent: "center",
-                                  cursor: "pointer" 
-                                }}
-                                title="Play Track"
-                              >
-                                <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
-                                  <path d="M8 5v14l11-7z"/>
-                                </svg>
-                              </button>
-                            </td>
-                            <td style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                              <div 
-                                style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: "0.85rem" }} 
-                                title={track.title || "Unknown Title"}
-                              >
-                                {track.title || "Unknown Title"}
-                              </div>
-                              <div 
-                                className="text-secondary" 
-                                style={{ fontSize: "0.72rem", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} 
-                                title={track.relative_path}
-                              >
-                                {cleanDisplayPath(track.relative_path)}
-                              </div>
-                            </td>
-                            <td 
-                              className="text-secondary" 
-                              style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: "0.82rem" }} 
-                              title={track.artist || "—"}
-                            >
-                              {track.artist || "—"}
-                            </td>
-                            <td style={{ fontFamily: "var(--font-mono)", textAlign: "right", fontSize: "0.78rem" }}>{formatDuration(track.duration)}</td>
-                            <td style={{ fontFamily: "var(--font-mono)", textAlign: "right", fontSize: "0.78rem" }}>{formatSize(track.size_bytes)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <div className="no-data">No music files found in specified sources with the allowed formats.</div>
-                )}
-              </div>
+              <ResolvedTracksPanel
+                previews={previews}
+                isLoadingPreview={isLoadingPreview}
+                previewError={previewError}
+                loadPreview={loadPreview}
+                onPlayTrack={(track, queue, name) => onPlayTrack && onPlayTrack(track, queue, name)}
+                onPlayAll={() => {
+                  if (onPlayQueue && previews.length > 0) {
+                    const audioTracks: AudioTrack[] = previews.map((t) => ({
+                      file_path: t.file_path,
+                      title: t.title,
+                      artist: t.artist,
+                      duration: t.duration,
+                    }));
+                    const playlistName = activePlaylist ? activePlaylist.name : "Playlist";
+                    onPlayQueue(audioTracks, playlistName, false);
+                  }
+                }}
+                contextName={activePlaylist ? activePlaylist.name : "Playlist"}
+              />
             </>
           ) : (
             <div className="card">

@@ -341,6 +341,46 @@ async fn read_image_base64(filePath: String) -> Result<String, String> {
     .map_err(|e| format!("Thread execution error: {}", e))?
 }
 
+#[tauri::command]
+async fn preview_directory_tracks(
+    folder: String,
+    formats: Vec<String>,
+) -> Result<Vec<playlist::TrackPreview>, String> {
+    tokio::task::spawn_blocking(move || {
+        let base_path = Path::new(&folder);
+        if !base_path.exists() {
+            return Err("Folder does not exist".to_string());
+        }
+
+        let formats_set: HashSet<String> = formats
+            .iter()
+            .map(|s| s.trim().to_lowercase())
+            .collect();
+
+        let mut files = Vec::new();
+        for entry in walkdir::WalkDir::new(base_path).into_iter().filter_map(|e| e.ok()) {
+            if entry.file_type().is_file() {
+                let path = entry.path();
+                if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                    if formats_set.contains(&ext.to_lowercase()) {
+                        files.push(path.to_path_buf());
+                    }
+                }
+            }
+        }
+        files.sort();
+
+        let previews = files
+            .iter()
+            .map(|f| playlist::get_track_preview(f, base_path))
+            .collect();
+
+        Ok(previews)
+    })
+    .await
+    .map_err(|e| format!("Thread execution error: {}", e))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -349,6 +389,7 @@ pub fn run() {
             load_workspace,
             save_workspace,
             preview_playlist_tracks,
+            preview_directory_tracks,
             generate_all_playlists,
             scan_sanitizer,
             execute_sanitizer,
