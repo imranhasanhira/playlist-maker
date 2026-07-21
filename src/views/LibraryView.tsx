@@ -91,8 +91,11 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
     }
   }, [config?.sourceDir, formats]);
 
-  const loadFolderPreviews = async (folderPath: string) => {
+  const loadFolderPreviews = async (folderPath: string, force = false) => {
     if (!folderPath) return;
+    if (!force && folderPath === activeFolderPath && dirPreviews.length > 0) {
+      return; // Already loaded active folder, skip duplicate disk scan
+    }
     setActiveFolderPath(folderPath);
     setIsLoadingDirPreviews(true);
     setDirPreviewsError("");
@@ -164,14 +167,8 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
   };
 
   const handleSelectNode = async (node: DirTreeNode) => {
+    const isSameNode = selectedNode?.path === node.path;
     setSelectedNode(node);
-    setSelectedFileTags(null);
-    setBatchArtist("");
-    setBatchAlbum("");
-    setBatchGenre("");
-    setBatchYear("");
-    setBatchCoverB64("");
-    setBatchCoverMime("");
 
     if (node.is_dir) {
       loadFolderPreviews(node.path);
@@ -180,10 +177,21 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
       const lastSlash = Math.max(node.path.lastIndexOf("/"), node.path.lastIndexOf("\\"));
       if (lastSlash > 0) {
         const parentFolder = node.path.substring(0, lastSlash);
-        if (parentFolder !== activeFolderPath) {
-          loadFolderPreviews(parentFolder);
-        }
+        loadFolderPreviews(parentFolder);
       }
+
+      // If clicking the exact same file node and tags are already loaded, skip tag read
+      if (isSameNode && selectedFileTags) {
+        return;
+      }
+
+      setSelectedFileTags(null);
+      setBatchArtist("");
+      setBatchAlbum("");
+      setBatchGenre("");
+      setBatchYear("");
+      setBatchCoverB64("");
+      setBatchCoverMime("");
 
       setIsReadingTags(true);
       try {
@@ -506,7 +514,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
             previews={dirPreviews}
             isLoadingPreview={isLoadingDirPreviews}
             previewError={dirPreviewsError}
-            loadPreview={() => activeFolderPath && loadFolderPreviews(activeFolderPath)}
+            loadPreview={() => activeFolderPath && loadFolderPreviews(activeFolderPath, true)}
             onPlayTrack={onPlayTrack}
             contextName={activeFolderPath ? activeFolderPath.split(/[/\\]/).pop() || "Library" : "Library"}
             selectedFilePath={selectedNode && !selectedNode.is_dir ? selectedNode.path : null}
