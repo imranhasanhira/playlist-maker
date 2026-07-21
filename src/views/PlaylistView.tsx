@@ -25,7 +25,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   onPlayQueue,
   relativeToConfig,
 }) => {
-  const [selectedPlaylistIndex, setSelectedPlaylistIndex] = useState<number>(0);
+  const [selectedPlaylistIndex, setSelectedPlaylistIndex] = useState<number | null>(null);
   const [previews, setPreviews] = useState<TrackPreview[]>([]);
   const [previewError, setPreviewError] = useState<string>("");
   const [isLoadingPreview, setIsLoadingPreview] = useState<boolean>(false);
@@ -81,11 +81,11 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     window.addEventListener("mouseup", handleMouseUp);
   };
 
-  const activePlaylist = config && config.playlists[selectedPlaylistIndex] ? config.playlists[selectedPlaylistIndex] : null;
+  const activePlaylist = config && selectedPlaylistIndex !== null && config.playlists[selectedPlaylistIndex] ? config.playlists[selectedPlaylistIndex] : null;
 
   useEffect(() => {
     setIsConfirmingDelete(false);
-    if (activePlaylist) {
+    if (activePlaylist && selectedPlaylistIndex !== null) {
       loadPreview();
     } else {
       setPreviews([]);
@@ -136,7 +136,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   };
 
   const handleDeletePlaylist = () => {
-    if (!config || activePlaylist === null) return;
+    if (!config || activePlaylist === null || selectedPlaylistIndex === null) return;
     if (!isConfirmingDelete) {
       setIsConfirmingDelete(true);
       return;
@@ -147,12 +147,12 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
       ...config,
       playlists: newPlaylists,
     });
-    setSelectedPlaylistIndex(Math.max(0, selectedPlaylistIndex - 1));
+    setSelectedPlaylistIndex(null);
     setIsConfirmingDelete(false);
   };
 
   const handleUpdateName = (name: string) => {
-    if (!config || activePlaylist === null) return;
+    if (!config || activePlaylist === null || selectedPlaylistIndex === null) return;
     const newPlaylists = [...config.playlists];
     newPlaylists[selectedPlaylistIndex].name = name;
     setConfig({
@@ -162,7 +162,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   };
 
   const selectAndAddSource = async () => {
-    if (!config || activePlaylist === null) return;
+    if (!config || activePlaylist === null || selectedPlaylistIndex === null) return;
     try {
       const selected = await invoke<string | null>("select_directory", {
         title: "Add Source Folder",
@@ -183,7 +183,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   };
 
   const removeSource = (srcIdx: number) => {
-    if (!config || activePlaylist === null) return;
+    if (!config || activePlaylist === null || selectedPlaylistIndex === null) return;
     const newPlaylists = [...config.playlists];
     const newSources = newPlaylists[selectedPlaylistIndex].sources.filter((_, idx) => idx !== srcIdx);
     newPlaylists[selectedPlaylistIndex].sources = newSources;
@@ -194,7 +194,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   };
 
   const selectAndAddExclusion = async () => {
-    if (!config || activePlaylist === null) return;
+    if (!config || activePlaylist === null || selectedPlaylistIndex === null) return;
     try {
       const selected = await invoke<string | null>("select_directory", {
         title: "Add Exclusion Folder",
@@ -215,7 +215,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   };
 
   const removeExclusion = (exIdx: number) => {
-    if (!config || activePlaylist === null) return;
+    if (!config || activePlaylist === null || selectedPlaylistIndex === null) return;
     const newPlaylists = [...config.playlists];
     const currentExclusions = newPlaylists[selectedPlaylistIndex].exclusions || [];
     const newExclusions = currentExclusions.filter((_, idx) => idx !== exIdx);
@@ -494,12 +494,14 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                     onPlayQueue(audioTracks, playlistName, false);
                   }
                 }}
+                emptyMessage="Select a playlist from the sidebar to preview resolved tracks."
                 contextName={activePlaylist ? activePlaylist.name : "Playlist"}
+                title={activePlaylist ? `Resolved Tracks (${previews.length})` : "Resolved Tracks"}
               />
             </>
           ) : (
-            <div className="card">
-              <p className="no-data">No playlist selected. Create or select a playlist.</p>
+            <div className="card" style={{ flex: 1, margin: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <p className="no-data">Select a playlist from the sidebar or click "+ Add Playlist" to configure rules and preview tracks.</p>
             </div>
           )}
         </div>
