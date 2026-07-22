@@ -1,6 +1,6 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { MainConfig } from "../App";
+import { MainConfig, SystemBinariesStatus } from "../types";
 
 type SettingsViewProps = {
   configPath: string;
@@ -23,6 +23,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 }) => {
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
   const [wizardMode, setWizardMode] = useState<"edit" | "create">("edit");
+  const [binaries, setBinaries] = useState<SystemBinariesStatus | null>(null);
+
+  useEffect(() => {
+    invoke<SystemBinariesStatus>("check_system_binaries")
+      .then(setBinaries)
+      .catch((e) => console.error("Error checking system binaries:", e));
+  }, []);
 
   // New config creation states
   const [newConfigPath, setNewConfigPath] = useState<string>("");
@@ -373,6 +380,70 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 The Diamond Music Manager (library tree, playlist maker, and sanitizer) will only process files matching these extensions.
               </p>
             </div>
+          </div>
+
+          {/* System Binary Status & Diagnostics */}
+          <div className="card">
+            <div className="card-title">System Dependencies Diagnostics</div>
+            <p className="text-secondary" style={{ fontSize: "0.82rem", marginBottom: "12px" }}>
+              Status of external tools installed on system PATH required for media downloading and audio encoding.
+            </p>
+
+            {binaries ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--bg-tertiary)", padding: "10px 14px", borderRadius: "8px" }}>
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: "0.9rem" }}>yt-dlp (Playlist & Media Downloader)</div>
+                    <div style={{ fontSize: "0.78rem", color: "var(--text-secondary)", fontFamily: "var(--font-mono)" }}>
+                      {binaries.ytdlp_installed ? `Version: ${binaries.ytdlp_version}` : "Not found on system PATH. Required for 📥 Downloads tab."}
+                    </div>
+                  </div>
+                  <span
+                    style={{
+                      padding: "4px 10px",
+                      borderRadius: "6px",
+                      fontSize: "0.8rem",
+                      fontWeight: 600,
+                      backgroundColor: binaries.ytdlp_installed ? "rgba(34, 197, 94, 0.15)" : "rgba(239, 68, 68, 0.15)",
+                      color: binaries.ytdlp_installed ? "var(--success)" : "var(--danger)",
+                      border: `1px solid ${binaries.ytdlp_installed ? "var(--success)" : "var(--danger)"}`,
+                    }}
+                  >
+                    {binaries.ytdlp_installed ? "✓ Installed" : "✗ Not Installed"}
+                  </span>
+                </div>
+
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--bg-tertiary)", padding: "10px 14px", borderRadius: "8px" }}>
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: "0.9rem" }}>ffmpeg (Audio Transcoding & Metadata Engine)</div>
+                    <div style={{ fontSize: "0.78rem", color: "var(--text-secondary)", fontFamily: "var(--font-mono)" }}>
+                      {binaries.ffmpeg_installed ? binaries.ffmpeg_version : "Not found on system PATH. Recommended for audio conversion & thumbnail embedding."}
+                    </div>
+                  </div>
+                  <span
+                    style={{
+                      padding: "4px 10px",
+                      borderRadius: "6px",
+                      fontSize: "0.8rem",
+                      fontWeight: 600,
+                      backgroundColor: binaries.ffmpeg_installed ? "rgba(34, 197, 94, 0.15)" : "rgba(234, 179, 8, 0.15)",
+                      color: binaries.ffmpeg_installed ? "var(--success)" : "var(--warning)",
+                      border: `1px solid ${binaries.ffmpeg_installed ? "var(--success)" : "var(--warning)"}`,
+                    }}
+                  >
+                    {binaries.ffmpeg_installed ? "✓ Installed" : "⚠️ Recommended"}
+                  </span>
+                </div>
+
+                {(!binaries.ytdlp_installed || !binaries.ffmpeg_installed) && (
+                  <div style={{ fontSize: "0.8rem", background: "rgba(138, 92, 246, 0.1)", border: "1px solid var(--accent-purple)", padding: "10px 14px", borderRadius: "8px", marginTop: "4px" }}>
+                    💡 <strong>Installation Tip (macOS / Homebrew):</strong> Run <code style={{ fontFamily: "var(--font-mono)", color: "var(--accent-purple-hover)" }}>brew install yt-dlp ffmpeg</code> in Terminal to install missing dependencies.
+                  </div>
+                )}
+              </div>
+            ) : (
+              <p className="text-muted" style={{ fontSize: "0.8rem" }}>Checking system dependencies...</p>
+            )}
           </div>
 
           {/* Save Button */}
