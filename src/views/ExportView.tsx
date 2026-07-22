@@ -1,6 +1,18 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { MainConfig } from "../App";
+import {
+  MainConfig,
+  ExportStatus,
+  ExportTrackItem,
+  ExportOrphanItem,
+  ExportPlaylistItem,
+  ExportDiffReport,
+} from "../types";
+import { formatSize, formatSpeed, formatEta } from "../utils/formatters";
+import { useDebounce } from "../hooks/useDebounce";
+import { ConfirmModal } from "../components/common/ConfirmModal";
+
+export type { ExportStatus, ExportTrackItem, ExportOrphanItem, ExportPlaylistItem, ExportDiffReport };
 
 type ExportViewProps = {
   configPath: string;
@@ -13,41 +25,6 @@ type ExportViewProps = {
   isStale: boolean;
   onDismissStale: () => void;
 };
-
-export type ExportStatus = "New" | "Modified" | "UpToDate";
-
-export interface ExportTrackItem {
-  file_path: string;
-  relative_path: string;
-  dest_relative_path: string;
-  size_bytes: number;
-  mtime_secs: number;
-  status: ExportStatus;
-}
-
-export interface ExportOrphanItem {
-  file_path: string;
-  relative_path: string;
-  size_bytes: number;
-  is_playlist: boolean;
-}
-
-export interface ExportPlaylistItem {
-  name: string;
-  filename: string;
-  track_count: number;
-}
-
-export interface ExportDiffReport {
-  destination: string;
-  new_files: ExportTrackItem[];
-  up_to_date_files: ExportTrackItem[];
-  orphan_files: ExportOrphanItem[];
-  playlists: ExportPlaylistItem[];
-  total_bytes_to_copy: number;
-  total_bytes_up_to_date: number;
-  total_bytes_orphans: number;
-}
 
 export const ExportView: React.FC<ExportViewProps> = ({
   configPath,
@@ -75,11 +52,12 @@ export const ExportView: React.FC<ExportViewProps> = ({
   const [showLogsModal, setShowLogsModal] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<"new" | "uptodate" | "orphans">("new");
   const [searchQuery, setSearchQuery] = useState<string>("");
+  const debouncedSearchQuery = useDebounce(searchQuery, 250);
   const [visibleLimit, setVisibleLimit] = useState<number>(100);
 
   useEffect(() => {
     setVisibleLimit(100);
-  }, [activeTab, searchQuery, diffReport]);
+  }, [activeTab, debouncedSearchQuery, diffReport]);
 
   const handleTableScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
@@ -90,7 +68,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
 
   const filteredItems = useMemo(() => {
     if (!diffReport) return { newFiles: [], upToDateFiles: [], orphanFiles: [] };
-    const q = searchQuery.trim().toLowerCase();
+    const q = debouncedSearchQuery.trim().toLowerCase();
     
     if (!q) {
       return {
@@ -111,7 +89,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
         (item) => item.relative_path.toLowerCase().includes(q)
       ),
     };
-  }, [diffReport, searchQuery]);
+  }, [diffReport, debouncedSearchQuery]);
 
   const [selectedItemPaths, setSelectedItemPaths] = useState<Set<string>>(new Set());
   const [excludedPaths, setExcludedPaths] = useState<Set<string>>(new Set());
@@ -237,13 +215,6 @@ export const ExportView: React.FC<ExportViewProps> = ({
     } catch (e) {}
   }, [exportDir]);
 
-  const formatSize = (bytes: number) => {
-    if (bytes === 0) return "0 Bytes";
-    const k = 1024;
-    const sizes = ["Bytes", "KB", "MB", "GB"];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
-  };
 
   const handlePickDestination = async () => {
     try {
@@ -293,24 +264,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
 
   const [exportProgress, setExportProgress] = useState<ExportProgress | null>(null);
 
-  const formatSpeed = (bytesPerSec: number) => {
-    if (bytesPerSec <= 0 || !isFinite(bytesPerSec)) return "0 B/s";
-    const k = 1024;
-    const sizes = ["B/s", "KB/s", "MB/s", "GB/s"];
-    const i = Math.floor(Math.log(bytesPerSec) / Math.log(k));
-    return parseFloat((bytesPerSec / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
-  };
 
-  const formatEta = (seconds: number) => {
-    if (seconds <= 0 || !isFinite(seconds)) return "0s";
-    if (seconds < 60) return `${Math.round(seconds)}s`;
-    const m = Math.floor(seconds / 60);
-    const s = Math.round(seconds % 60);
-    if (m < 60) return `${m}m ${s}s`;
-    const h = Math.floor(m / 60);
-    const remM = m % 60;
-    return `${h}h ${remM}m`;
-  };
 
   const handleCancelExport = async () => {
     try {
@@ -870,45 +824,16 @@ export const ExportView: React.FC<ExportViewProps> = ({
         </div>
       )}
 
-      {/* Delete Confirmation Modal */}
+      {/* Delete Selection Confirmation Modal */}
       {showDeleteConfirmModal && (
-        <div style={{
-          position: "fixed",
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          backgroundColor: "rgba(0, 0, 0, 0.75)",
-          backdropFilter: "blur(4px)",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          zIndex: 1000
-        }}>
-          <div className="card" style={{ width: "480px", display: "flex", flexDirection: "column", margin: 0, padding: "20px", gap: "14px" }}>
-            <div className="card-title" style={{ borderBottom: "1px solid var(--border-color)", paddingBottom: "10px", margin: 0 }}>
-              <span style={{ color: "var(--danger)", display: "flex", alignItems: "center", gap: "8px", fontSize: "1.05rem" }}>
-                ⚠️ Confirm Permanent Deletion
-              </span>
-            </div>
-
-            <div style={{ fontSize: "0.88rem", lineHeight: 1.5 }}>
-              Are you sure you want to permanently delete <strong>{selectedItemPaths.size}</strong> selected file(s) from disk?
-              <div style={{ color: "var(--danger)", fontSize: "0.8rem", marginTop: "8px", fontWeight: 500 }}>
-                ⚠️ This action cannot be undone!
-              </div>
-            </div>
-
-            <div style={{ display: "flex", gap: "10px", justifyContent: "flex-end", borderTop: "1px solid var(--border-color)", paddingTop: "12px", marginTop: "4px" }}>
-              <button className="btn btn-secondary" onClick={() => setShowDeleteConfirmModal(false)}>
-                Cancel
-              </button>
-              <button className="btn btn-danger" onClick={executeDeleteSelected}>
-                🗑 Confirm Delete
-              </button>
-            </div>
-          </div>
-        </div>
+        <ConfirmModal
+          title="⚠️ Confirm Permanent Deletion"
+          message={`Are you sure you want to permanently delete ${selectedItemPaths.size} selected file(s) from disk? This action cannot be undone!`}
+          confirmText="🗑 Confirm Delete"
+          confirmVariant="danger"
+          onConfirm={executeDeleteSelected}
+          onCancel={() => setShowDeleteConfirmModal(false)}
+        />
       )}
 
       {/* Execution Logs Modal */}

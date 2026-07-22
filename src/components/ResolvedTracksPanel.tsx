@@ -1,14 +1,8 @@
 import React from "react";
-import { AudioTrack } from "./AudioPlayer";
+import { AudioTrack, TrackPreview } from "../types";
+import { formatSize, formatDuration, cleanDisplayPath } from "../utils/formatters";
 
-export interface TrackPreview {
-  file_path: string;
-  relative_path: string;
-  title: string;
-  artist: string;
-  duration: number;
-  size_bytes: number;
-}
+export type { TrackPreview };
 
 export interface ResolvedTracksPanelProps {
   previews: TrackPreview[];
@@ -41,26 +35,6 @@ export const ResolvedTracksPanel: React.FC<ResolvedTracksPanelProps> = ({
   title,
   style,
 }) => {
-  const formatSize = (bytes: number) => {
-    if (bytes === 0) return "0 Bytes";
-    const k = 1024;
-    const sizes = ["Bytes", "KB", "MB", "GB"];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
-  };
-
-  const formatDuration = (secs: number) => {
-    const minutes = Math.floor(secs / 60);
-    const seconds = secs % 60;
-    return `${minutes}:${seconds < 10 ? "0" : ""}${seconds}`;
-  };
-
-  const cleanDisplayPath = (path: string) => {
-    let p = path.replace(/\\/g, "/");
-    p = p.replace(/^(\.\.\/|\.\/)+/, "");
-    return p;
-  };
-
   const handlePlaySingle = (track: TrackPreview, e: React.MouseEvent) => {
     e.stopPropagation();
     if (!onPlayTrack) return;

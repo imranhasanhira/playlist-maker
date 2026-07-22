@@ -6,6 +6,7 @@ mod transcoder;
 mod library;
 mod export;
 mod watcher;
+pub mod utils;
 
 use std::collections::HashSet;
 use std::path::Path;

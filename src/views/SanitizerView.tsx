@@ -1,5 +1,8 @@
 import React, { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { SanitizeItem, HiddenFileItem, MetadataSanitizeItem } from "../types";
+import { formatSize } from "../utils/formatters";
+import { ConfirmModal } from "../components/common/ConfirmModal";
 
 type SanitizerViewProps = {
   formats: string;
@@ -14,27 +17,6 @@ type SanitizerViewProps = {
   setHiddenItems: (items: HiddenFileItem[]) => void;
   metadataItems: MetadataSanitizeItem[];
   setMetadataItems: (items: MetadataSanitizeItem[]) => void;
-};
-
-type SanitizeItem = {
-  original_path: string;
-  original_name: string;
-  sanitized_name: string;
-  relative_path: string;
-};
-
-type HiddenFileItem = {
-  file_path: string;
-  file_name: string;
-  relative_path: string;
-  size_bytes: number;
-};
-
-type MetadataSanitizeItem = {
-  file_path: string;
-  field_name: string;
-  original_value: string;
-  sanitized_value: string;
 };
 
 export const SanitizerView: React.FC<SanitizerViewProps> = ({
@@ -343,13 +325,6 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
     setUncheckedPhrases(next);
   };
 
-  const formatSize = (bytes: number) => {
-    if (bytes === 0) return "0 Bytes";
-    const k = 1024;
-    const sizes = ["Bytes", "KB", "MB"];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
-  };
 
   return (
     <div className="view-container">
@@ -714,51 +689,21 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
             </div>
           )}
 
-        </div>
-      )}
-
-      {/* Confirmation Modal */}
-      {confirmModal && (
-        <div style={{
-          position: "fixed",
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          backgroundColor: "rgba(0, 0, 0, 0.75)",
-          backdropFilter: "blur(4px)",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          zIndex: 1000
-        }}>
-          <div className="card" style={{ width: "480px", display: "flex", flexDirection: "column", margin: 0, padding: "20px", gap: "14px" }}>
-            <div className="card-title" style={{ borderBottom: "1px solid var(--border-color)", paddingBottom: "10px", margin: 0 }}>
-              <span style={{ color: confirmModal.type === "hidden" ? "var(--danger)" : "var(--accent-purple-hover)", display: "flex", alignItems: "center", gap: "8px", fontSize: "1.05rem" }}>
-                {confirmModal.type === "hidden" ? "⚠️ Delete Confirmation" : "✨ Action Confirmation"}
-              </span>
-            </div>
-
-            <div style={{ fontSize: "0.88rem", lineHeight: 1.5 }}>
-              {confirmModal.message}
-            </div>
-
-            <div style={{ display: "flex", gap: "10px", justifyContent: "flex-end", borderTop: "1px solid var(--border-color)", paddingTop: "12px", marginTop: "4px" }}>
-              <button className="btn btn-secondary" onClick={() => setConfirmModal(null)}>
-                Cancel
-              </button>
-              <button
-                className={`btn ${confirmModal.type === "hidden" ? "btn-danger" : "btn-primary"}`}
-                onClick={() => {
-                  if (confirmModal.type === "rename") handleConfirmExecuteRename();
-                  if (confirmModal.type === "hidden") handleConfirmExecuteDelete();
-                  if (confirmModal.type === "metadata") handleConfirmExecuteCleanMetadata();
-                }}
-              >
-                Confirm ({confirmModal.count})
-              </button>
-            </div>
-          </div>
+          {/* Action Confirmation Modal */}
+          {confirmModal && (
+            <ConfirmModal
+              title={confirmModal.title}
+              message={confirmModal.message}
+              confirmText={`Confirm (${confirmModal.count})`}
+              confirmVariant={confirmModal.type === "hidden" ? "danger" : "primary"}
+              onConfirm={() => {
+                if (confirmModal.type === "rename") handleConfirmExecuteRename();
+                if (confirmModal.type === "hidden") handleConfirmExecuteDelete();
+                if (confirmModal.type === "metadata") handleConfirmExecuteCleanMetadata();
+              }}
+              onCancel={() => setConfirmModal(null)}
+            />
+          )}
         </div>
       )}
     </div>

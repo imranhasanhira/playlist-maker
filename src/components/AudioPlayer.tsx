@@ -1,12 +1,9 @@
 import React, { useRef, useState, useEffect } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { AudioTrack } from "../types";
+import { formatDuration } from "../utils/formatters";
 
-export type AudioTrack = {
-  file_path: String;
-  title: String;
-  artist: String;
-  duration: number;
-};
+export type { AudioTrack };
 
 type AudioPlayerProps = {
   queue: AudioTrack[];
@@ -113,12 +110,7 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
     }
   };
 
-  const formatTime = (secs: number) => {
-    if (isNaN(secs)) return "0:00";
-    const minutes = Math.floor(secs / 60);
-    const seconds = Math.floor(secs % 60);
-    return `${minutes}:${seconds < 10 ? "0" : ""}${seconds}`;
-  };
+
 
   const handleNext = () => {
     if (isLoopSingle) {
@@ -319,7 +311,7 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
       </div>
 
       <div className="player-progress">
-        <span className="player-time">{formatTime(currentTime)}</span>
+        <span className="player-time">{formatDuration(Math.floor(currentTime))}</span>
         <input
           type="range"
           className="player-slider"
@@ -328,7 +320,7 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
           value={currentTime}
           onChange={handleSeek}
         />
-        <span className="player-time">{formatTime(duration || activeTrack.duration || 0)}</span>
+        <span className="player-time">{formatDuration(Math.floor(duration || (activeTrack ? activeTrack.duration : 0) || 0))}</span>
       </div>
 
       <div className="player-volume">

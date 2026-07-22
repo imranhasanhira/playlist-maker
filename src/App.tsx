@@ -5,20 +5,12 @@ import { LibraryView } from "./views/LibraryView";
 import { PlaylistView } from "./views/PlaylistView";
 import { ToolsView } from "./views/ToolsView";
 import { SettingsView } from "./views/SettingsView";
-import { ExportView, ExportDiffReport } from "./views/ExportView";
+import { ExportView } from "./views/ExportView";
+import { MainConfig, ExportDiffReport, BgTask } from "./types";
+import { ProgressBar } from "./components/common/ProgressBar";
 import "./App.css";
 
-// Re-export MainConfig type for settings/views
-export type MainConfig = {
-  sourceDir: string | null;
-  targetDir: string | null;
-  relativeToConfig?: boolean | null;
-  playlists: Array<{
-    name: string;
-    sources: string[];
-    exclusions: string[] | null;
-  }>;
-};
+export type { MainConfig };
 
 const DEFAULT_STRIP_PHRASES = [
   "music.com.bd", "SVF", "Tseries",
@@ -36,14 +28,6 @@ const DEFAULT_STRIP_PHRASES = [
   "Quality", "Original", "Official",
   "DVD", "Blue Ray"
 ];
-
-type BgTask = {
-  id: string;
-  name: string;
-  progress: number;
-  status: "running" | "completed" | "failed";
-  text: string;
-};
 
 function App() {
   const [currentView, setCurrentView] = useState<string>("library");
@@ -584,47 +568,12 @@ function App() {
                       {task.status === "running" ? `${task.progress}%` : task.status === "completed" ? "Done ✓" : "Failed ✗"}
                     </span>
                   </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                    <div style={{
-                      flex: 1,
-                      height: "6px",
-                      backgroundColor: "var(--bg-tertiary)",
-                      border: "1px solid var(--border-color)",
-                      borderRadius: "3px",
-                      overflow: "hidden"
-                    }}>
-                      <div style={{
-                        height: "100%",
-                        width: `${task.progress}%`,
-                        backgroundColor: task.status === "completed" ? "var(--success)" : task.status === "failed" ? "var(--danger)" : "var(--accent-purple)",
-                        transition: "width 0.4s ease"
-                      }} />
-                    </div>
-                    {task.status === "running" && (
-                      <button
-                        onClick={() => handleCancelTask(task.id)}
-                        style={{
-                          background: "rgba(239, 68, 68, 0.15)",
-                          border: "1px solid var(--danger)",
-                          color: "var(--danger)",
-                          borderRadius: "4px",
-                          cursor: "pointer",
-                          padding: "1px 5px",
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          fontSize: "0.7rem",
-                          lineHeight: 1,
-                        }}
-                        title={`Cancel task: ${task.name}`}
-                      >
-                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-                          <line x1="18" y1="6" x2="6" y2="18"></line>
-                          <line x1="6" y1="6" x2="18" y2="18"></line>
-                        </svg>
-                      </button>
-                    )}
-                  </div>
+                  <ProgressBar
+                    progress={task.progress}
+                    status={task.status}
+                    onCancel={() => handleCancelTask(task.id)}
+                    cancelTitle={`Cancel task: ${task.name}`}
+                  />
                   <div style={{ fontSize: "0.75rem", color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {task.text}
                   </div>
