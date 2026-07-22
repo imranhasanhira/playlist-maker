@@ -978,9 +978,37 @@ export const ExportView: React.FC<ExportViewProps> = ({
                     </span>
                   </div>
 
-                  {/* Progress Bar Track */}
-                  <div style={{ width: "100%", height: "8px", backgroundColor: "var(--bg-surface)", borderRadius: "4px", overflow: "hidden", marginBottom: "8px" }}>
-                    <div style={{ width: `${progressPercent}%`, height: "100%", backgroundColor: isExporting ? "var(--accent-purple)" : "var(--success)", transition: "width 0.3s ease" }} />
+                  {/* Progress Bar Track with Inline Stop/Cross Button */}
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px" }}>
+                    <div style={{ flex: 1, height: "8px", backgroundColor: "var(--bg-surface)", border: "1px solid var(--border-color)", borderRadius: "4px", overflow: "hidden" }}>
+                      <div style={{ width: `${progressPercent}%`, height: "100%", backgroundColor: isExporting ? "var(--accent-purple)" : "var(--success)", transition: "width 0.3s ease" }} />
+                    </div>
+                    {isExporting && (
+                      <button
+                        onClick={handleCancelExport}
+                        style={{
+                          background: "rgba(239, 68, 68, 0.15)",
+                          border: "1px solid var(--danger)",
+                          color: "var(--danger)",
+                          borderRadius: "4px",
+                          cursor: "pointer",
+                          padding: "2px 6px",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          fontSize: "0.75rem",
+                          fontWeight: 600,
+                          gap: "4px",
+                        }}
+                        title="Stop Export Task"
+                      >
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                          <line x1="18" y1="6" x2="6" y2="18"></line>
+                          <line x1="6" y1="6" x2="18" y2="18"></line>
+                        </svg>
+                        <span>Stop</span>
+                      </button>
+                    )}
                   </div>
 
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.78rem", color: "var(--text-muted)" }}>

@@ -342,12 +342,16 @@ table {
 }
 
 th {
+  position: sticky;
+  top: 0;
   background-color: var(--bg-tertiary);
   color: var(--text-secondary);
   font-weight: 600;
   padding: 6px 10px;
   font-size: 0.8rem;
   border-bottom: 1px solid var(--border-color);
+  z-index: 5;
+  box-shadow: 0 1px 0 var(--border-color);
 }
 
 td {
