@@ -6,6 +6,14 @@ type SanitizerViewProps = {
   stripPhrases: string[];
   setStripPhrases: (phrases: string[]) => void;
   addBackgroundTask: (id: string, name: string, taskPromise: Promise<any>) => void;
+  scanFolder: string;
+  setScanFolder: (folder: string) => void;
+  sanitizeItems: SanitizeItem[];
+  setSanitizeItems: (items: SanitizeItem[]) => void;
+  hiddenItems: HiddenFileItem[];
+  setHiddenItems: (items: HiddenFileItem[]) => void;
+  metadataItems: MetadataSanitizeItem[];
+  setMetadataItems: (items: MetadataSanitizeItem[]) => void;
 };
 
 type SanitizeItem = {
@@ -34,16 +42,26 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
   stripPhrases,
   setStripPhrases,
   addBackgroundTask,
+  scanFolder,
+  setScanFolder,
+  sanitizeItems,
+  setSanitizeItems,
+  hiddenItems,
+  setHiddenItems,
+  metadataItems,
+  setMetadataItems,
 }) => {
-  const [scanFolder, setScanFolder] = useState<string>("");
-  const [sanitizeItems, setSanitizeItems] = useState<SanitizeItem[]>([]);
-  const [selectedRenamePaths, setSelectedRenamePaths] = useState<Set<string>>(new Set());
-  const [hiddenItems, setHiddenItems] = useState<HiddenFileItem[]>([]);
-  const [selectedDeletePaths, setSelectedDeletePaths] = useState<Set<string>>(new Set());
+  const [selectedRenamePaths, setSelectedRenamePaths] = useState<Set<string>>(
+    () => new Set(sanitizeItems.map((i) => i.original_path))
+  );
+  const [selectedDeletePaths, setSelectedDeletePaths] = useState<Set<string>>(
+    () => new Set(hiddenItems.map((i) => i.file_path))
+  );
 
   // Metadata tags sanitization state
-  const [metadataItems, setMetadataItems] = useState<MetadataSanitizeItem[]>([]);
-  const [selectedMetadataIndices, setSelectedMetadataIndices] = useState<Set<number>>(new Set());
+  const [selectedMetadataIndices, setSelectedMetadataIndices] = useState<Set<number>>(
+    () => new Set(metadataItems.map((_, idx) => idx))
+  );
   const [isCleaningMetadata, setIsCleaningMetadata] = useState<boolean>(false);
 
   // Cleaner Tab state
@@ -71,6 +89,14 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
     }
   };
 
+  const handleCancelScan = async () => {
+    try {
+      await invoke("cancel_sanitizer_scan");
+    } catch (e) {
+      console.error("Error cancelling sanitizer scan:", e);
+    }
+  };
+
   const handleScan = async (folder: string) => {
     if (!folder) return;
     setIsScanning(true);
@@ -84,6 +110,10 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
         folder,
         formats: formatsList,
         stripPhrases: activePhrases,
+      }).then((renameResult) => {
+        setSanitizeItems(renameResult);
+        setSelectedRenamePaths(new Set(renameResult.map((i) => i.original_path)));
+        return renameResult;
       });
       addBackgroundTask("filename_scan", "Filename Sanitizer Scan", renamePromise);
 
@@ -91,6 +121,10 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
       const hiddenPromise = invoke<HiddenFileItem[]>("scan_hidden", {
         taskId: "hidden_scan",
         folder,
+      }).then((hiddenResult) => {
+        setHiddenItems(hiddenResult);
+        setSelectedDeletePaths(new Set(hiddenResult.map((i) => i.file_path)));
+        return hiddenResult;
       });
       addBackgroundTask("hidden_scan", "Hidden Files Scan", hiddenPromise);
 
@@ -100,24 +134,15 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
         folder,
         formats: formatsList,
         stripPhrases: activePhrases,
+      }).then((metadataResult) => {
+        setMetadataItems(metadataResult);
+        setSelectedMetadataIndices(new Set(metadataResult.map((_, idx) => idx)));
+        return metadataResult;
       });
       addBackgroundTask("metadata_scan", "Metadata Sanitizer Scan", metadataPromise);
 
-      // Wait for all to complete in parallel
-      const [renameResult, hiddenResult, metadataResult] = await Promise.all([
-        renamePromise,
-        hiddenPromise,
-        metadataPromise,
-      ]);
-
-      setSanitizeItems(renameResult);
-      setSelectedRenamePaths(new Set(renameResult.map((i) => i.original_path)));
-
-      setHiddenItems(hiddenResult);
-      setSelectedDeletePaths(new Set(hiddenResult.map((i) => i.file_path)));
-
-      setMetadataItems(metadataResult);
-      setSelectedMetadataIndices(new Set(metadataResult.map((_, idx) => idx)));
+      // Wait for all promises to settle individually without blocking each other
+      await Promise.allSettled([renamePromise, hiddenPromise, metadataPromise]);
     } catch (e) {
       alert("Error scanning folder: " + e);
     } finally {
@@ -179,19 +204,33 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
     }
   };
 
-  const executeRename = async () => {
+  const [confirmModal, setConfirmModal] = useState<{
+    type: "rename" | "metadata" | "hidden";
+    title: string;
+    message: string;
+    count: number;
+  } | null>(null);
+
+  const promptExecuteRename = () => {
     if (selectedRenamePaths.size === 0) return;
     const itemsToRename = sanitizeItems.filter((i) => selectedRenamePaths.has(i.original_path));
-    
-    const confirmed = confirm(
-      `Are you absolutely sure you want to sanitize/rename these ${itemsToRename.length} files?\nThis will rename files on your local disk.`
-    );
-    if (!confirmed) return;
+    setConfirmModal({
+      type: "rename",
+      title: "Sanitize & Rename Filenames",
+      message: `Are you sure you want to sanitize and rename ${itemsToRename.length} file(s) on disk?`,
+      count: itemsToRename.length,
+    });
+  };
 
+  const handleConfirmExecuteRename = async () => {
+    setConfirmModal(null);
+    if (selectedRenamePaths.size === 0) return;
+    const itemsToRename = sanitizeItems.filter((i) => selectedRenamePaths.has(i.original_path));
+    const taskId = `rename_${Date.now()}`;
     setIsRenaming(true);
     try {
-      const promise = invoke("execute_sanitizer", { items: itemsToRename });
-      addBackgroundTask(`rename_${Date.now()}`, `Sanitize ${itemsToRename.length} files`, promise);
+      const promise = invoke("execute_sanitizer", { taskId, items: itemsToRename });
+      addBackgroundTask(taskId, `Sanitize ${itemsToRename.length} filenames`, promise);
       await promise;
       alert(`Successfully sanitized ${itemsToRename.length} files!`);
       handleScan(scanFolder);
@@ -202,18 +241,24 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
     }
   };
 
-  const executeDelete = async () => {
+  const promptExecuteDelete = () => {
     if (selectedDeletePaths.size === 0) return;
-    
-    const confirmed = confirm(
-      `WARNING: You are about to permanently delete ${selectedDeletePaths.size} hidden files!\nThis operation is irreversible. Do you want to proceed?`
-    );
-    if (!confirmed) return;
+    setConfirmModal({
+      type: "hidden",
+      title: "Delete Hidden Files",
+      message: `WARNING: You are about to permanently delete ${selectedDeletePaths.size} hidden file(s) from disk. This operation is irreversible!`,
+      count: selectedDeletePaths.size,
+    });
+  };
 
+  const handleConfirmExecuteDelete = async () => {
+    setConfirmModal(null);
+    if (selectedDeletePaths.size === 0) return;
+    const taskId = `delete_${Date.now()}`;
     setIsDeleting(true);
     try {
-      const promise = invoke("delete_hidden", { filePaths: Array.from(selectedDeletePaths) });
-      addBackgroundTask(`delete_${Date.now()}`, `Delete ${selectedDeletePaths.size} hidden files`, promise);
+      const promise = invoke("delete_hidden", { taskId, filePaths: Array.from(selectedDeletePaths) });
+      addBackgroundTask(taskId, `Delete ${selectedDeletePaths.size} hidden files`, promise);
       await promise;
       alert(`Successfully deleted ${selectedDeletePaths.size} hidden files!`);
       handleScan(scanFolder);
@@ -224,19 +269,26 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
     }
   };
 
-  const executeCleanMetadata = async () => {
+  const promptExecuteCleanMetadata = () => {
     const itemsToClean = metadataItems.filter((_, idx) => selectedMetadataIndices.has(idx));
     if (itemsToClean.length === 0) return;
+    setConfirmModal({
+      type: "metadata",
+      title: "Clean Metadata Tags",
+      message: `Are you sure you want to clean metadata tags for the ${itemsToClean.length} selected tag fields?`,
+      count: itemsToClean.length,
+    });
+  };
 
-    const confirmed = confirm(
-      `Are you sure you want to clean metadata tags for the ${itemsToClean.length} selected fields?`
-    );
-    if (!confirmed) return;
-
+  const handleConfirmExecuteCleanMetadata = async () => {
+    setConfirmModal(null);
+    const itemsToClean = metadataItems.filter((_, idx) => selectedMetadataIndices.has(idx));
+    if (itemsToClean.length === 0) return;
+    const taskId = `clean_metadata_${Date.now()}`;
     setIsCleaningMetadata(true);
     try {
-      const promise = invoke("execute_metadata_sanitizer", { items: itemsToClean });
-      addBackgroundTask(`clean_metadata_${Date.now()}`, `Clean tags of ${itemsToClean.length} files`, promise);
+      const promise = invoke("execute_metadata_sanitizer", { taskId, items: itemsToClean });
+      addBackgroundTask(taskId, `Clean tags of ${itemsToClean.length} files`, promise);
       await promise;
       alert("Metadata tags cleaned successfully!");
       handleScan(scanFolder);
@@ -309,6 +361,14 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
             >
               {isScanning ? "Scanning..." : "🔍 Scan Folder"}
             </button>
+            {isScanning && (
+              <button
+                className="btn btn-danger"
+                onClick={handleCancelScan}
+              >
+                🛑 Stop Scan
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -423,7 +483,7 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
             {sanitizerSubTab === "files" && sanitizeItems.length > 0 && (
               <button
                 className="btn btn-primary"
-                onClick={executeRename}
+                onClick={promptExecuteRename}
                 disabled={selectedRenamePaths.size === 0 || isRenaming}
                 style={{ padding: "8px 16px", fontSize: "0.85rem" }}
               >
@@ -434,7 +494,7 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
             {sanitizerSubTab === "metadata" && metadataItems.length > 0 && (
               <button
                 className="btn btn-primary"
-                onClick={executeCleanMetadata}
+                onClick={promptExecuteCleanMetadata}
                 disabled={selectedMetadataIndices.size === 0 || isCleaningMetadata}
                 style={{ padding: "8px 16px", fontSize: "0.85rem" }}
               >
@@ -445,7 +505,7 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
             {sanitizerSubTab === "hidden" && hiddenItems.length > 0 && (
               <button
                 className="btn btn-danger"
-                onClick={executeDelete}
+                onClick={promptExecuteDelete}
                 disabled={selectedDeletePaths.size === 0 || isDeleting}
                 style={{ padding: "8px 16px", fontSize: "0.85rem" }}
               >
@@ -609,6 +669,51 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
             </div>
           )}
 
+        </div>
+      )}
+
+      {/* Confirmation Modal */}
+      {confirmModal && (
+        <div style={{
+          position: "fixed",
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: "rgba(0, 0, 0, 0.75)",
+          backdropFilter: "blur(4px)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          zIndex: 1000
+        }}>
+          <div className="card" style={{ width: "480px", display: "flex", flexDirection: "column", margin: 0, padding: "20px", gap: "14px" }}>
+            <div className="card-title" style={{ borderBottom: "1px solid var(--border-color)", paddingBottom: "10px", margin: 0 }}>
+              <span style={{ color: confirmModal.type === "hidden" ? "var(--danger)" : "var(--accent-purple-hover)", display: "flex", alignItems: "center", gap: "8px", fontSize: "1.05rem" }}>
+                {confirmModal.type === "hidden" ? "⚠️ Delete Confirmation" : "✨ Action Confirmation"}
+              </span>
+            </div>
+
+            <div style={{ fontSize: "0.88rem", lineHeight: 1.5 }}>
+              {confirmModal.message}
+            </div>
+
+            <div style={{ display: "flex", gap: "10px", justifyContent: "flex-end", borderTop: "1px solid var(--border-color)", paddingTop: "12px", marginTop: "4px" }}>
+              <button className="btn btn-secondary" onClick={() => setConfirmModal(null)}>
+                Cancel
+              </button>
+              <button
+                className={`btn ${confirmModal.type === "hidden" ? "btn-danger" : "btn-primary"}`}
+                onClick={() => {
+                  if (confirmModal.type === "rename") handleConfirmExecuteRename();
+                  if (confirmModal.type === "hidden") handleConfirmExecuteDelete();
+                  if (confirmModal.type === "metadata") handleConfirmExecuteCleanMetadata();
+                }}
+              >
+                Confirm ({confirmModal.count})
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

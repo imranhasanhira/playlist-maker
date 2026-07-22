@@ -108,6 +108,10 @@ pub fn sanitize_text(original_text: &str, strip_phrases: &[String]) -> String {
     new_text.trim().to_string()
 }
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+pub static SANITZER_CANCELLED: AtomicBool = AtomicBool::new(false);
+
 pub fn scan_sanitize_files(
     app: &AppHandle,
     task_id: &str,
@@ -115,6 +119,7 @@ pub fn scan_sanitize_files(
     formats: &[String],
     strip_phrases: &[String],
 ) -> Result<Vec<SanitizeItem>, String> {
+    SANITZER_CANCELLED.store(false, Ordering::SeqCst);
     if !folder.exists() {
         return Err(format!("Folder does not exist: {}", folder.display()));
     }
@@ -142,6 +147,9 @@ pub fn scan_sanitize_files(
 
     // 2. Loop and process with progress
     for (index, path) in files.iter().enumerate() {
+        if SANITZER_CANCELLED.load(Ordering::SeqCst) {
+            break;
+        }
         if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
             let sanitized = sanitize_text(file_name, strip_phrases);
             if sanitized != file_name && !sanitized.is_empty() {
@@ -176,14 +184,30 @@ pub fn scan_sanitize_files(
     Ok(items)
 }
 
-pub fn execute_rename_files(items: Vec<SanitizeItem>) -> Result<(), String> {
-    for item in items {
+pub fn execute_rename_files(app: &AppHandle, task_id: &str, items: Vec<SanitizeItem>) -> Result<(), String> {
+    let total = items.len();
+    for (index, item) in items.into_iter().enumerate() {
         let old_path = Path::new(&item.original_path);
         if old_path.exists() {
-            let new_path = old_path.parent().unwrap().join(&item.sanitized_name);
-            fs::rename(old_path, new_path)
-                .map_err(|e| format!("Failed to rename {}: {}", item.original_name, e))?;
+            if let Some(parent) = old_path.parent() {
+                let new_path = parent.join(&item.sanitized_name);
+                if let Err(e) = fs::rename(old_path, &new_path) {
+                    eprintln!("Failed to rename {}: {}", item.original_name, e);
+                }
+            }
         }
+        let _ = app.emit(
+            "task-progress",
+            TaskProgress {
+                task_id: task_id.to_string(),
+                task_name: "Filename Sanitizer Execution".to_string(),
+                index,
+                total,
+                status: if index + 1 == total { "completed".to_string() } else { "running".to_string() },
+                message: item.sanitized_name,
+                file_path: None,
+            },
+        );
     }
     Ok(())
 }
@@ -210,6 +234,9 @@ pub fn scan_hidden_files(
 
     // 2. Loop and process
     for (index, path) in files.iter().enumerate() {
+        if SANITZER_CANCELLED.load(Ordering::SeqCst) {
+            break;
+        }
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
             if name.starts_with('.') {
                 let file_path = path.to_string_lossy().to_string();
@@ -244,13 +271,29 @@ pub fn scan_hidden_files(
     Ok(items)
 }
 
-pub fn execute_delete_files(file_paths: Vec<String>) -> Result<(), String> {
-    for path_str in file_paths {
+pub fn execute_delete_files(app: &AppHandle, task_id: &str, file_paths: Vec<String>) -> Result<(), String> {
+    let total = file_paths.len();
+    for (index, path_str) in file_paths.into_iter().enumerate() {
         let path = Path::new(&path_str);
-        if path.exists() && path.is_file() {
-            fs::remove_file(path)
-                .map_err(|e| format!("Failed to delete {}: {}", path_str, e))?;
+        if path.exists() {
+            if path.is_dir() {
+                let _ = fs::remove_dir_all(path);
+            } else {
+                let _ = fs::remove_file(path);
+            }
         }
+        let _ = app.emit(
+            "task-progress",
+            TaskProgress {
+                task_id: task_id.to_string(),
+                task_name: "Hidden Files Delete Execution".to_string(),
+                index,
+                total,
+                status: if index + 1 == total { "completed".to_string() } else { "running".to_string() },
+                message: path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                file_path: None,
+            },
+        );
     }
     Ok(())
 }
@@ -289,6 +332,9 @@ pub fn scan_sanitize_metadata(
 
     // 2. Loop and process with progress
     for (index, path) in files.iter().enumerate() {
+        if SANITZER_CANCELLED.load(Ordering::SeqCst) {
+            break;
+        }
         if let Ok(tagged_file) = Probe::open(path).and_then(|f| f.read()) {
             if let Some(tag) = tagged_file.primary_tag() {
                 let file_path_str = path.to_string_lossy().to_string();
@@ -364,60 +410,54 @@ pub fn scan_sanitize_metadata(
     Ok(items)
 }
 
-pub fn execute_sanitize_metadata(items: Vec<MetadataSanitizeItem>) -> Result<(), String> {
-    for item in items {
+pub fn execute_sanitize_metadata(app: &AppHandle, task_id: &str, items: Vec<MetadataSanitizeItem>) -> Result<(), String> {
+    let total = items.len();
+    for (index, item) in items.into_iter().enumerate() {
         let path = Path::new(&item.file_path);
         if path.exists() {
-            let mut tagged_file = Probe::open(path)
-                .map_err(|e| e.to_string())?
-                .read()
-                .map_err(|e| e.to_string())?;
+            if let Ok(mut tagged_file) = Probe::open(path).and_then(|f| f.read()) {
+                let tag_type = tagged_file.primary_tag_type();
+                let tag = if tagged_file.primary_tag().is_some() {
+                    tagged_file.primary_tag_mut().unwrap()
+                } else {
+                    tagged_file.insert_tag(Tag::new(tag_type));
+                    tagged_file.primary_tag_mut().unwrap()
+                };
 
-            let tag_type = tagged_file.primary_tag_type();
-            let tag = if tagged_file.primary_tag().is_some() {
-                tagged_file.primary_tag_mut().unwrap()
-            } else {
-                tagged_file.insert_tag(Tag::new(tag_type));
-                tagged_file.primary_tag_mut().unwrap()
-            };
+                let sanitized = item.sanitized_value.trim().to_string();
+                let has_value = !sanitized.is_empty();
 
-            let sanitized = item.sanitized_value.trim().to_string();
-            let has_value = !sanitized.is_empty();
+                match item.field_name.as_str() {
+                    "Title" => {
+                        if has_value { tag.set_title(sanitized); } else { tag.remove_title(); }
+                    }
+                    "Artist" => {
+                        if has_value { tag.set_artist(sanitized); } else { tag.remove_artist(); }
+                    }
+                    "Album" => {
+                        if has_value { tag.set_album(sanitized); } else { tag.remove_album(); }
+                    }
+                    "Description (Comment)" => {
+                        if has_value { tag.set_comment(sanitized); } else { tag.remove_comment(); }
+                    }
+                    _ => {}
+                }
 
-            match item.field_name.as_str() {
-                "Title" => {
-                    if has_value {
-                        tag.set_title(sanitized);
-                    } else {
-                        tag.remove_title();
-                    }
-                }
-                "Artist" => {
-                    if has_value {
-                        tag.set_artist(sanitized);
-                    } else {
-                        tag.remove_artist();
-                    }
-                }
-                "Album" => {
-                    if has_value {
-                        tag.set_album(sanitized);
-                    } else {
-                        tag.remove_album();
-                    }
-                }
-                "Description (Comment)" => {
-                    if has_value {
-                        tag.set_comment(sanitized);
-                    } else {
-                        tag.remove_comment();
-                    }
-                }
-                _ => {}
+                let _ = tagged_file.save_to_path(path, lofty::config::WriteOptions::default());
             }
-
-            let _ = tagged_file.save_to_path(path, lofty::config::WriteOptions::default());
         }
+        let _ = app.emit(
+            "task-progress",
+            TaskProgress {
+                task_id: task_id.to_string(),
+                task_name: "Metadata Tags Execution".to_string(),
+                index,
+                total,
+                status: if index + 1 == total { "completed".to_string() } else { "running".to_string() },
+                message: item.field_name,
+                file_path: None,
+            },
+        );
     }
     Ok(())
 }

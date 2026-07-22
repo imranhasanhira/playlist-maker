@@ -4,6 +4,7 @@ mod playlist;
 mod sanitizer;
 mod transcoder;
 mod library;
+mod export;
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -136,9 +137,9 @@ async fn scan_sanitizer(app: tauri::AppHandle, taskId: String, folder: String, f
 }
 
 #[tauri::command]
-async fn execute_sanitizer(items: Vec<sanitizer::SanitizeItem>) -> Result<(), String> {
+async fn execute_sanitizer(app: tauri::AppHandle, taskId: String, items: Vec<sanitizer::SanitizeItem>) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
-        sanitizer::execute_rename_files(items)
+        sanitizer::execute_rename_files(&app, &taskId, items)
     })
     .await
     .map_err(|e| format!("Thread execution error: {}", e))?
@@ -154,9 +155,9 @@ async fn scan_metadata_sanitizer(app: tauri::AppHandle, taskId: String, folder: 
 }
 
 #[tauri::command]
-async fn execute_metadata_sanitizer(items: Vec<sanitizer::MetadataSanitizeItem>) -> Result<(), String> {
+async fn execute_metadata_sanitizer(app: tauri::AppHandle, taskId: String, items: Vec<sanitizer::MetadataSanitizeItem>) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
-        sanitizer::execute_sanitize_metadata(items)
+        sanitizer::execute_sanitize_metadata(&app, &taskId, items)
     })
     .await
     .map_err(|e| format!("Thread execution error: {}", e))?
@@ -172,12 +173,18 @@ async fn scan_hidden(app: tauri::AppHandle, taskId: String, folder: String) -> R
 }
 
 #[tauri::command]
-async fn delete_hidden(filePaths: Vec<String>) -> Result<(), String> {
+async fn delete_hidden(app: tauri::AppHandle, taskId: String, filePaths: Vec<String>) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
-        sanitizer::execute_delete_files(filePaths)
+        sanitizer::execute_delete_files(&app, &taskId, filePaths)
     })
     .await
     .map_err(|e| format!("Thread execution error: {}", e))?
+}
+
+#[tauri::command]
+async fn cancel_sanitizer_scan() -> Result<(), String> {
+    sanitizer::SANITZER_CANCELLED.store(true, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
 }
 
 #[tauri::command]
@@ -406,7 +413,13 @@ pub fn run() {
             batch_update_folder_tags,
             read_image_base64,
             scan_metadata_sanitizer,
-            execute_metadata_sanitizer
+            execute_metadata_sanitizer,
+            cancel_sanitizer_scan,
+            export::analyze_export_diff,
+            export::execute_export,
+            export::reveal_in_finder,
+            export::delete_export_files,
+            export::cancel_export
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
