@@ -11,6 +11,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentView, onViewChange, has
     { id: "workspaces", label: "📂 Workspace", enabled: true },
     { id: "library", label: "📁 Library", enabled: hasConfig },
     { id: "playlists", label: "🎶 Playlists", enabled: hasConfig },
+    { id: "downloads", label: "📥 Downloads", enabled: true },
     { id: "tools", label: "🛠 Tools", enabled: true },
   ];
 

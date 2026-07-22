@@ -6,6 +6,7 @@ import { PlaylistView } from "./views/PlaylistView";
 import { ToolsView } from "./views/ToolsView";
 import { SettingsView } from "./views/SettingsView";
 import { ExportView } from "./views/ExportView";
+import { DownloadsView } from "./views/DownloadsView";
 import { MainConfig, ExportDiffReport, BgTask } from "./types";
 import { ProgressBar } from "./components/common/ProgressBar";
 import "./App.css";
@@ -425,6 +426,12 @@ function App() {
             📦 Export
           </li>
           <li
+            className={`top-nav-item ${currentView === "downloads" ? "active" : ""}`}
+            onClick={() => setCurrentView("downloads")}
+          >
+            📥 Downloads
+          </li>
+          <li
             className={`top-nav-item ${currentView === "tools" ? "active" : ""}`}
             onClick={() => setCurrentView("tools")}
           >
@@ -451,46 +458,56 @@ function App() {
 
       {/* Main Content Area */}
       <main className={`main-content ${playQueue.length > 0 && currentTrackIndex >= 0 && currentTrackIndex < playQueue.length ? "has-player" : ""}`}>
-        {currentView === "library" && config && (
-          <LibraryView
-            config={config}
-            formats={formats}
-            addBackgroundTask={addBackgroundTask}
-            onPlayTrack={handlePlayTrack}
-            fsLibraryVersion={fsLibraryVersion}
-            autoReloadEnabled={autoReloadEnabled}
-            setAutoReloadEnabled={setAutoReloadEnabled}
-            onManualRefresh={handleManualRefresh}
-          />
-        )}
+        <div style={{ display: currentView === "library" ? "flex" : "none", flexDirection: "column", height: "100%", flex: 1, minHeight: 0 }}>
+          {config && (
+            <LibraryView
+              config={config}
+              formats={formats}
+              addBackgroundTask={addBackgroundTask}
+              onPlayTrack={handlePlayTrack}
+              fsLibraryVersion={fsLibraryVersion}
+              autoReloadEnabled={autoReloadEnabled}
+              setAutoReloadEnabled={setAutoReloadEnabled}
+              onManualRefresh={handleManualRefresh}
+            />
+          )}
+        </div>
 
-        {currentView === "playlists" && config && (
-          <PlaylistView
-            configPath={configPath}
-            config={config}
-            setConfig={saveAndSetConfig}
-            formats={formats}
-            onPlayTrack={handlePlayTrack}
-            onPlayQueue={handlePlayQueue}
-            relativeToConfig={config?.relativeToConfig ?? true}
-          />
-        )}
+        <div style={{ display: currentView === "playlists" ? "flex" : "none", flexDirection: "column", height: "100%", flex: 1, minHeight: 0 }}>
+          {config && (
+            <PlaylistView
+              configPath={configPath}
+              config={config}
+              setConfig={saveAndSetConfig}
+              formats={formats}
+              onPlayTrack={handlePlayTrack}
+              onPlayQueue={handlePlayQueue}
+              relativeToConfig={config?.relativeToConfig ?? true}
+            />
+          )}
+        </div>
 
-        {currentView === "export" && config && (
-          <ExportView
-            configPath={configPath}
-            config={config}
-            formats={formats}
-            relativeToConfig={config?.relativeToConfig ?? true}
-            addBackgroundTask={addBackgroundTask}
-            diffReport={exportDiffReport}
-            setDiffReport={setExportDiffReport}
-            isStale={isExportDiffStale}
-            onDismissStale={() => setIsExportDiffStale(false)}
-          />
-        )}
+        <div style={{ display: currentView === "export" ? "flex" : "none", flexDirection: "column", height: "100%", flex: 1, minHeight: 0 }}>
+          {config && (
+            <ExportView
+              configPath={configPath}
+              config={config}
+              formats={formats}
+              relativeToConfig={config?.relativeToConfig ?? true}
+              addBackgroundTask={addBackgroundTask}
+              diffReport={exportDiffReport}
+              setDiffReport={setExportDiffReport}
+              isStale={isExportDiffStale}
+              onDismissStale={() => setIsExportDiffStale(false)}
+            />
+          )}
+        </div>
 
-        {currentView === "tools" && (
+        <div style={{ display: currentView === "downloads" ? "flex" : "none", flexDirection: "column", height: "100%", flex: 1, minHeight: 0 }}>
+          <DownloadsView config={config} />
+        </div>
+
+        <div style={{ display: currentView === "tools" ? "flex" : "none", flexDirection: "column", height: "100%", flex: 1, minHeight: 0 }}>
           <ToolsView
             formats={formats}
             stripPhrases={stripPhrases}
@@ -505,9 +522,9 @@ function App() {
             sanitizerMetadataItems={sanitizerMetadataItems}
             setSanitizerMetadataItems={setSanitizerMetadataItems}
           />
-        )}
+        </div>
 
-        {currentView === "settings" && (
+        <div style={{ display: currentView === "settings" ? "flex" : "none", flexDirection: "column", height: "100%", flex: 1, minHeight: 0 }}>
           <SettingsView
             configPath={configPath}
             setConfigPath={setConfigPath}
@@ -517,7 +534,7 @@ function App() {
             formats={formats}
             setFormats={setFormats}
           />
-        )}
+        </div>
 
         {/* Floating Background Task Queue Panel */}
         {bgTasks.length > 0 && (

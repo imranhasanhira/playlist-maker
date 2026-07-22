@@ -111,3 +111,44 @@ export interface BgTask {
   status: "running" | "completed" | "failed";
   text: string;
 }
+
+export type DownloadStatus = "running" | "completed" | "failed" | "cancelled";
+
+export interface DownloadJob {
+  id: string;
+  url: string;
+  output_dir: string;
+  audio_format: string;
+  use_archive: boolean;
+  archive_path: string;
+  ignore_errors: boolean;
+  status: DownloadStatus;
+  progress: number;
+  current_item?: number;
+  total_items?: number;
+  title?: string;
+  logs: string[];
+  start_time: number;
+}
+
+export interface DownloadLogPayload {
+  job_id: string;
+  line: string;
+}
+
+export interface DownloadProgressPayload {
+  job_id: string;
+  status: DownloadStatus;
+  progress: number;
+  current_item?: number;
+  total_items?: number;
+  title?: string;
+  error?: string;
+}
+
+export interface SystemBinariesStatus {
+  ytdlp_installed: boolean;
+  ytdlp_version?: string;
+  ffmpeg_installed: boolean;
+  ffmpeg_version?: string;
+}

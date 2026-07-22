@@ -7,6 +7,7 @@ mod library;
 mod export;
 mod watcher;
 pub mod utils;
+mod downloader;
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -424,7 +425,10 @@ pub fn run() {
             export::delete_export_files,
             export::cancel_export,
             watcher::start_fs_watcher,
-            watcher::stop_fs_watcher
+            watcher::stop_fs_watcher,
+            downloader::start_download_job,
+            downloader::cancel_download_job,
+            utils::check_system_binaries
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
