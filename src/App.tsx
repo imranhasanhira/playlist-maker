@@ -5,6 +5,7 @@ import { LibraryView } from "./views/LibraryView";
 import { PlaylistView } from "./views/PlaylistView";
 import { ToolsView } from "./views/ToolsView";
 import { SettingsView } from "./views/SettingsView";
+import { ExportView, ExportDiffReport } from "./views/ExportView";
 import "./App.css";
 
 // Re-export MainConfig type for settings/views
@@ -61,6 +62,16 @@ function App() {
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [playingPlaylistName, setPlayingPlaylistName] = useState<string>("");
 
+  // In-memory export diff state & stale flag
+  const [exportDiffReport, setExportDiffReport] = useState<ExportDiffReport | null>(null);
+  const [isExportDiffStale, setIsExportDiffStale] = useState<boolean>(false);
+
+  // In-memory sanitizer scan state across tab switches
+  const [sanitizerScanFolder, setSanitizerScanFolder] = useState<string>("");
+  const [sanitizerItems, setSanitizerItems] = useState<any[]>([]);
+  const [sanitizerHiddenItems, setSanitizerHiddenItems] = useState<any[]>([]);
+  const [sanitizerMetadataItems, setSanitizerMetadataItems] = useState<any[]>([]);
+
   // Theme state: defaults to system preference, then user override
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     const saved = localStorage.getItem("theme");
@@ -79,6 +90,9 @@ function App() {
 
   const saveAndSetConfig = async (newConfig: MainConfig | null) => {
     setConfig(newConfig);
+    if (exportDiffReport) {
+      setIsExportDiffStale(true);
+    }
     if (newConfig && configPath) {
       try {
         await invoke("save_workspace", {
@@ -351,6 +365,14 @@ function App() {
             🎶 Playlists
           </li>
           <li
+            className={`top-nav-item ${config ? "" : "disabled"} ${currentView === "export" ? "active" : ""}`}
+            style={config ? {} : { opacity: 0.4, cursor: "not-allowed" }}
+            onClick={() => config && setCurrentView("export")}
+            title={config ? "Export Playlists & Media" : "Please load a workspace configuration first"}
+          >
+            📦 Export
+          </li>
+          <li
             className={`top-nav-item ${currentView === "tools" ? "active" : ""}`}
             onClick={() => setCurrentView("tools")}
           >
@@ -398,12 +420,34 @@ function App() {
           />
         )}
 
+        {currentView === "export" && config && (
+          <ExportView
+            configPath={configPath}
+            config={config}
+            formats={formats}
+            relativeToConfig={config?.relativeToConfig ?? true}
+            addBackgroundTask={addBackgroundTask}
+            diffReport={exportDiffReport}
+            setDiffReport={setExportDiffReport}
+            isStale={isExportDiffStale}
+            onDismissStale={() => setIsExportDiffStale(false)}
+          />
+        )}
+
         {currentView === "tools" && (
           <ToolsView
             formats={formats}
             stripPhrases={stripPhrases}
             setStripPhrases={setStripPhrases}
             addBackgroundTask={addBackgroundTask}
+            sanitizerScanFolder={sanitizerScanFolder}
+            setSanitizerScanFolder={setSanitizerScanFolder}
+            sanitizerItems={sanitizerItems}
+            setSanitizerItems={setSanitizerItems}
+            sanitizerHiddenItems={sanitizerHiddenItems}
+            setSanitizerHiddenItems={setSanitizerHiddenItems}
+            sanitizerMetadataItems={sanitizerMetadataItems}
+            setSanitizerMetadataItems={setSanitizerMetadataItems}
           />
         )}
 

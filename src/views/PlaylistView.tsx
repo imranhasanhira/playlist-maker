@@ -83,6 +83,17 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
 
   const activePlaylist = config && selectedPlaylistIndex !== null && config.playlists[selectedPlaylistIndex] ? config.playlists[selectedPlaylistIndex] : null;
 
+  const rulesFingerprint = activePlaylist ? JSON.stringify({
+    sources: activePlaylist.sources,
+    exclusions: activePlaylist.exclusions,
+    rules: (activePlaylist as any).rules,
+    sort_by: (activePlaylist as any).sort_by,
+    limit: (activePlaylist as any).limit,
+    extensions: (activePlaylist as any).extensions,
+    sourceDir: config?.sourceDir,
+    relativeToConfig,
+  }) : "";
+
   useEffect(() => {
     setIsConfirmingDelete(false);
     if (activePlaylist && selectedPlaylistIndex !== null) {
@@ -90,7 +101,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     } else {
       setPreviews([]);
     }
-  }, [selectedPlaylistIndex, config]);
+  }, [selectedPlaylistIndex, rulesFingerprint]);
 
   const formatPathTail = (pathStr: string) => {
     if (!pathStr) return "";

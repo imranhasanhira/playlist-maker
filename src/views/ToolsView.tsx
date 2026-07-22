@@ -7,6 +7,14 @@ type ToolsViewProps = {
   stripPhrases: string[];
   setStripPhrases: (phrases: string[]) => void;
   addBackgroundTask: (id: string, name: string, taskPromise: Promise<any>) => void;
+  sanitizerScanFolder: string;
+  setSanitizerScanFolder: (folder: string) => void;
+  sanitizerItems: any[];
+  setSanitizerItems: (items: any[]) => void;
+  sanitizerHiddenItems: any[];
+  setSanitizerHiddenItems: (items: any[]) => void;
+  sanitizerMetadataItems: any[];
+  setSanitizerMetadataItems: (items: any[]) => void;
 };
 
 export const ToolsView: React.FC<ToolsViewProps> = ({
@@ -14,6 +22,14 @@ export const ToolsView: React.FC<ToolsViewProps> = ({
   stripPhrases,
   setStripPhrases,
   addBackgroundTask,
+  sanitizerScanFolder,
+  setSanitizerScanFolder,
+  sanitizerItems,
+  setSanitizerItems,
+  sanitizerHiddenItems,
+  setSanitizerHiddenItems,
+  sanitizerMetadataItems,
+  setSanitizerMetadataItems,
 }) => {
   const [subView, setSubView] = useState<"sanitizer" | "transcoder">("sanitizer");
 
@@ -81,6 +97,14 @@ export const ToolsView: React.FC<ToolsViewProps> = ({
             stripPhrases={stripPhrases}
             setStripPhrases={setStripPhrases}
             addBackgroundTask={addBackgroundTask}
+            scanFolder={sanitizerScanFolder}
+            setScanFolder={setSanitizerScanFolder}
+            sanitizeItems={sanitizerItems}
+            setSanitizeItems={setSanitizerItems}
+            hiddenItems={sanitizerHiddenItems}
+            setHiddenItems={setSanitizerHiddenItems}
+            metadataItems={sanitizerMetadataItems}
+            setMetadataItems={setSanitizerMetadataItems}
           />
         )}
         {subView === "transcoder" && (
