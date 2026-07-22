@@ -108,9 +108,40 @@ pub fn sanitize_text(original_text: &str, strip_phrases: &[String]) -> String {
     new_text.trim().to_string()
 }
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::collections::HashSet;
 
-pub static SANITZER_CANCELLED: AtomicBool = AtomicBool::new(false);
+static CANCELLED_TASKS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn get_cancelled_tasks() -> &'static Mutex<HashSet<String>> {
+    CANCELLED_TASKS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+pub fn is_task_cancelled(task_id: &str) -> bool {
+    if let Ok(guard) = get_cancelled_tasks().lock() {
+        guard.contains(task_id)
+    } else {
+        false
+    }
+}
+
+pub fn cancel_task(task_id: Option<&str>) {
+    if let Ok(mut guard) = get_cancelled_tasks().lock() {
+        if let Some(id) = task_id {
+            guard.insert(id.to_string());
+        } else {
+            guard.insert("filename_scan".to_string());
+            guard.insert("hidden_scan".to_string());
+            guard.insert("metadata_scan".to_string());
+        }
+    }
+}
+
+pub fn clear_task_cancel(task_id: &str) {
+    if let Ok(mut guard) = get_cancelled_tasks().lock() {
+        guard.remove(task_id);
+    }
+}
 
 pub fn scan_sanitize_files(
     app: &AppHandle,
@@ -119,7 +150,7 @@ pub fn scan_sanitize_files(
     formats: &[String],
     strip_phrases: &[String],
 ) -> Result<Vec<SanitizeItem>, String> {
-    SANITZER_CANCELLED.store(false, Ordering::SeqCst);
+    clear_task_cancel(task_id);
     if !folder.exists() {
         return Err(format!("Folder does not exist: {}", folder.display()));
     }
@@ -147,7 +178,7 @@ pub fn scan_sanitize_files(
 
     // 2. Loop and process with progress
     for (index, path) in files.iter().enumerate() {
-        if SANITZER_CANCELLED.load(Ordering::SeqCst) {
+        if is_task_cancelled(task_id) {
             break;
         }
         if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
@@ -217,6 +248,7 @@ pub fn scan_hidden_files(
     task_id: &str,
     folder: &Path,
 ) -> Result<Vec<HiddenFileItem>, String> {
+    clear_task_cancel(task_id);
     if !folder.exists() {
         return Err(format!("Folder does not exist: {}", folder.display()));
     }
@@ -234,7 +266,7 @@ pub fn scan_hidden_files(
 
     // 2. Loop and process
     for (index, path) in files.iter().enumerate() {
-        if SANITZER_CANCELLED.load(Ordering::SeqCst) {
+        if is_task_cancelled(task_id) {
             break;
         }
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
@@ -305,6 +337,7 @@ pub fn scan_sanitize_metadata(
     formats: &[String],
     strip_phrases: &[String],
 ) -> Result<Vec<MetadataSanitizeItem>, String> {
+    clear_task_cancel(task_id);
     if !folder.exists() {
         return Err(format!("Folder does not exist: {}", folder.display()));
     }
@@ -332,7 +365,7 @@ pub fn scan_sanitize_metadata(
 
     // 2. Loop and process with progress
     for (index, path) in files.iter().enumerate() {
-        if SANITZER_CANCELLED.load(Ordering::SeqCst) {
+        if is_task_cancelled(task_id) {
             break;
         }
         if let Ok(tagged_file) = Probe::open(path).and_then(|f| f.read()) {

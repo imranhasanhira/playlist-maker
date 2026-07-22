@@ -5,6 +5,7 @@ mod sanitizer;
 mod transcoder;
 mod library;
 mod export;
+mod watcher;
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -182,8 +183,8 @@ async fn delete_hidden(app: tauri::AppHandle, taskId: String, filePaths: Vec<Str
 }
 
 #[tauri::command]
-async fn cancel_sanitizer_scan() -> Result<(), String> {
-    sanitizer::SANITZER_CANCELLED.store(true, std::sync::atomic::Ordering::SeqCst);
+async fn cancel_sanitizer_scan(taskId: Option<String>) -> Result<(), String> {
+    sanitizer::cancel_task(taskId.as_deref());
     Ok(())
 }
 
@@ -392,6 +393,7 @@ async fn preview_directory_tracks(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .manage(watcher::WatcherState::default())
         .invoke_handler(tauri::generate_handler![
             load_workspace,
             save_workspace,
@@ -419,7 +421,9 @@ pub fn run() {
             export::execute_export,
             export::reveal_in_finder,
             export::delete_export_files,
-            export::cancel_export
+            export::cancel_export,
+            watcher::start_fs_watcher,
+            watcher::stop_fs_watcher
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

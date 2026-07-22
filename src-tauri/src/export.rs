@@ -200,6 +200,13 @@ pub async fn analyze_export_diff(
         }
     }
 
+fn is_os_system_junk(filename: &str) -> bool {
+    filename.starts_with('.')
+        || filename.starts_with("._")
+        || filename.eq_ignore_ascii_case("thumbs.db")
+        || filename.eq_ignore_ascii_case("desktop.ini")
+}
+
     // Expected playlist filenames
     let expected_playlists: HashSet<String> = playlist_items.iter().map(|p| p.filename.clone()).collect();
 
@@ -210,6 +217,11 @@ pub async fn analyze_export_diff(
     if dest_music_dir.exists() {
         for entry in WalkDir::new(&dest_music_dir).into_iter().filter_map(|e| e.ok()) {
             if entry.file_type().is_file() {
+                if let Some(file_name) = entry.path().file_name().and_then(|n| n.to_str()) {
+                    if is_os_system_junk(file_name) {
+                        continue;
+                    }
+                }
                 if let Ok(rel) = entry.path().strip_prefix(&dest_music_dir) {
                     let rel_clean = rel.to_string_lossy().replace('\\', "/");
                     if !expected_dest_rel_paths.contains(&rel_clean) {
@@ -230,6 +242,11 @@ pub async fn analyze_export_diff(
     if dest_playlists_dir.exists() {
         for entry in WalkDir::new(&dest_playlists_dir).into_iter().filter_map(|e| e.ok()) {
             if entry.file_type().is_file() {
+                if let Some(file_name) = entry.path().file_name().and_then(|n| n.to_str()) {
+                    if is_os_system_junk(file_name) {
+                        continue;
+                    }
+                }
                 if let Ok(rel) = entry.path().strip_prefix(&dest_playlists_dir) {
                     let filename = rel.to_string_lossy().to_string();
                     if !expected_playlists.contains(&filename) {
@@ -304,7 +321,14 @@ pub async fn delete_export_files(filePaths: Vec<String>) -> Result<usize, String
         let mut count = 0;
         for path_str in filePaths {
             let path = Path::new(&path_str);
-            if path.exists() {
+            if path.exists() || path.symlink_metadata().is_ok() {
+                if let Ok(metadata) = path.symlink_metadata() {
+                    let mut permissions = metadata.permissions();
+                    if permissions.readonly() {
+                        permissions.set_readonly(false);
+                        let _ = fs::set_permissions(path, permissions);
+                    }
+                }
                 if path.is_dir() {
                     if fs::remove_dir_all(path).is_ok() {
                         count += 1;

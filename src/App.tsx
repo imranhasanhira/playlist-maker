@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AudioPlayer, AudioTrack } from "./components/AudioPlayer";
 import { LibraryView } from "./views/LibraryView";
@@ -71,6 +71,28 @@ function App() {
   const [sanitizerItems, setSanitizerItems] = useState<any[]>([]);
   const [sanitizerHiddenItems, setSanitizerHiddenItems] = useState<any[]>([]);
   const [sanitizerMetadataItems, setSanitizerMetadataItems] = useState<any[]>([]);
+  const [fsLibraryVersion, setFsLibraryVersion] = useState<number>(0);
+  const [autoReloadEnabled, setAutoReloadEnabled] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem("auto_reload_enabled");
+      return saved !== null ? JSON.parse(saved) : true;
+    } catch (e) {
+      return true;
+    }
+  });
+
+  const autoReloadRef = useRef(autoReloadEnabled);
+  useEffect(() => {
+    autoReloadRef.current = autoReloadEnabled;
+    try {
+      localStorage.setItem("auto_reload_enabled", JSON.stringify(autoReloadEnabled));
+    } catch (e) {}
+  }, [autoReloadEnabled]);
+
+  const handleManualRefresh = () => {
+    setFsLibraryVersion((prev) => prev + 1);
+    setIsExportDiffStale(true);
+  };
 
   // Theme state: defaults to system preference, then user override
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
@@ -83,6 +105,40 @@ function App() {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem("theme", theme);
   }, [theme]);
+
+  // OS Filesystem Watcher (3s debounced) listener
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    const setupFsListener = async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        unlisten = await listen<any>("fs-library-changed", (event) => {
+          if (!autoReloadRef.current) {
+            console.log("[App] OS File System change ignored (Auto-Sync is OFF).");
+            return;
+          }
+          console.log("[App] OS File System change detected (3s debounced):", event.payload);
+          setIsExportDiffStale(true);
+          setFsLibraryVersion((prev) => prev + 1);
+        });
+      } catch (e) {
+        console.error("Failed to register fs-library-changed listener:", e);
+      }
+    };
+    setupFsListener();
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  // Auto-start OS watcher on workspace sourceDir
+  useEffect(() => {
+    if (config && config.sourceDir) {
+      invoke("start_fs_watcher", { path: config.sourceDir }).catch((err) => {
+        console.warn("Could not start OS file watcher:", err);
+      });
+    }
+  }, [config?.sourceDir]);
 
   const toggleTheme = () => {
     setTheme(prev => prev === 'dark' ? 'light' : 'dark');
@@ -102,6 +158,18 @@ function App() {
       } catch (e) {
         console.error("Auto-save configuration failed:", e);
       }
+    }
+  };
+
+  const handleCancelTask = async (taskId: string) => {
+    try {
+      if (taskId.startsWith("export_")) {
+        await invoke("cancel_export");
+      } else {
+        await invoke("cancel_sanitizer_scan", { taskId });
+      }
+    } catch (e) {
+      console.error("Error cancelling task:", e);
     }
   };
 
@@ -385,7 +453,7 @@ function App() {
             ⚙️ Settings
           </li>
         </ul>
-        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", paddingRight: "20px" }}>
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "8px", paddingRight: "20px" }}>
           <button
             className="btn btn-secondary"
             onClick={toggleTheme}
@@ -405,6 +473,10 @@ function App() {
             formats={formats}
             addBackgroundTask={addBackgroundTask}
             onPlayTrack={handlePlayTrack}
+            fsLibraryVersion={fsLibraryVersion}
+            autoReloadEnabled={autoReloadEnabled}
+            setAutoReloadEnabled={setAutoReloadEnabled}
+            onManualRefresh={handleManualRefresh}
           />
         )}
 
@@ -470,12 +542,11 @@ function App() {
             bottom: playQueue.length > 0 && currentTrackIndex >= 0 && currentTrackIndex < playQueue.length ? "110px" : "24px",
             right: "24px",
             width: "320px",
-            backgroundColor: "rgba(22, 22, 33, 0.9)",
-            backdropFilter: "blur(8px)",
+            backgroundColor: "var(--bg-secondary)",
             border: "1px solid var(--border-color)",
             borderRadius: "12px",
             padding: "16px",
-            boxShadow: "0 8px 32px rgba(0, 0, 0, 0.6)",
+            boxShadow: "var(--shadow-lg)",
             display: "flex",
             flexDirection: "column",
             gap: "12px",
@@ -502,28 +573,57 @@ function App() {
               {bgTasks.map((task) => (
                 <div key={task.id} style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.85rem", fontWeight: 600 }}>
-                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "220px" }}>
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "240px" }}>
                       {task.name}
                     </span>
                     <span style={{
-                      color: task.status === "completed" ? "var(--success)" : task.status === "failed" ? "var(--danger)" : "var(--accent-purple)"
+                      color: task.status === "completed" ? "var(--success)" : task.status === "failed" ? "var(--danger)" : "var(--accent-purple)",
+                      fontFamily: "var(--font-mono)",
+                      fontSize: "0.78rem"
                     }}>
                       {task.status === "running" ? `${task.progress}%` : task.status === "completed" ? "Done ✓" : "Failed ✗"}
                     </span>
                   </div>
-                  <div style={{
-                    height: "6px",
-                    width: "100%",
-                    backgroundColor: "var(--bg-tertiary)",
-                    borderRadius: "3px",
-                    overflow: "hidden"
-                  }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                     <div style={{
-                      height: "100%",
-                      width: `${task.progress}%`,
-                      backgroundColor: task.status === "completed" ? "var(--success)" : task.status === "failed" ? "var(--danger)" : "var(--accent-purple)",
-                      transition: "width 0.4s ease"
-                    }} />
+                      flex: 1,
+                      height: "6px",
+                      backgroundColor: "var(--bg-tertiary)",
+                      border: "1px solid var(--border-color)",
+                      borderRadius: "3px",
+                      overflow: "hidden"
+                    }}>
+                      <div style={{
+                        height: "100%",
+                        width: `${task.progress}%`,
+                        backgroundColor: task.status === "completed" ? "var(--success)" : task.status === "failed" ? "var(--danger)" : "var(--accent-purple)",
+                        transition: "width 0.4s ease"
+                      }} />
+                    </div>
+                    {task.status === "running" && (
+                      <button
+                        onClick={() => handleCancelTask(task.id)}
+                        style={{
+                          background: "rgba(239, 68, 68, 0.15)",
+                          border: "1px solid var(--danger)",
+                          color: "var(--danger)",
+                          borderRadius: "4px",
+                          cursor: "pointer",
+                          padding: "1px 5px",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          fontSize: "0.7rem",
+                          lineHeight: 1,
+                        }}
+                        title={`Cancel task: ${task.name}`}
+                      >
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                          <line x1="18" y1="6" x2="6" y2="18"></line>
+                          <line x1="6" y1="6" x2="18" y2="18"></line>
+                        </svg>
+                      </button>
+                    )}
                   </div>
                   <div style={{ fontSize: "0.75rem", color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {task.text}

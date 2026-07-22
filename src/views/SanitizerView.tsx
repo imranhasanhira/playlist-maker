@@ -71,9 +71,13 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
   const [newPhrase, setNewPhrase] = useState<string>("");
   const [uncheckedPhrases, setUncheckedPhrases] = useState<Set<string>>(new Set());
 
-  const [isScanning, setIsScanning] = useState<boolean>(false);
+  const [isScanningFilenames, setIsScanningFilenames] = useState<boolean>(false);
+  const [isScanningHidden, setIsScanningHidden] = useState<boolean>(false);
+  const [isScanningMetadata, setIsScanningMetadata] = useState<boolean>(false);
   const [isRenaming, setIsRenaming] = useState<boolean>(false);
   const [isDeleting, setIsDeleting] = useState<boolean>(false);
+
+  const isScanningAny = isScanningFilenames || isScanningHidden || isScanningMetadata;
 
   const selectScanFolder = async () => {
     try {
@@ -82,72 +86,84 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
       });
       if (selected) {
         setScanFolder(selected);
-        handleScan(selected);
       }
     } catch (e) {
       alert("Error picking directory: " + e);
     }
   };
 
-  const handleCancelScan = async () => {
-    try {
-      await invoke("cancel_sanitizer_scan");
-    } catch (e) {
-      console.error("Error cancelling sanitizer scan:", e);
-    }
-  };
-
-  const handleScan = async (folder: string) => {
+  const handleScanFilenames = async (folder: string) => {
     if (!folder) return;
-    setIsScanning(true);
+    setIsScanningFilenames(true);
     try {
       const formatsList = formats.split(",").map((f) => f.trim());
       const activePhrases = stripPhrases.filter((p) => !uncheckedPhrases.has(p));
 
-      // 1. Scan Filenames
       const renamePromise = invoke<SanitizeItem[]>("scan_sanitizer", {
         taskId: "filename_scan",
         folder,
         formats: formatsList,
         stripPhrases: activePhrases,
-      }).then((renameResult) => {
-        setSanitizeItems(renameResult);
-        setSelectedRenamePaths(new Set(renameResult.map((i) => i.original_path)));
-        return renameResult;
       });
       addBackgroundTask("filename_scan", "Filename Sanitizer Scan", renamePromise);
+      const renameResult = await renamePromise;
+      setSanitizeItems(renameResult);
+      setSelectedRenamePaths(new Set(renameResult.map((i) => i.original_path)));
+    } catch (e) {
+      alert("Error scanning filenames: " + e);
+    } finally {
+      setIsScanningFilenames(false);
+    }
+  };
 
-      // 2. Scan Hidden Files
+  const handleScanHidden = async (folder: string) => {
+    if (!folder) return;
+    setIsScanningHidden(true);
+    try {
       const hiddenPromise = invoke<HiddenFileItem[]>("scan_hidden", {
         taskId: "hidden_scan",
         folder,
-      }).then((hiddenResult) => {
-        setHiddenItems(hiddenResult);
-        setSelectedDeletePaths(new Set(hiddenResult.map((i) => i.file_path)));
-        return hiddenResult;
       });
       addBackgroundTask("hidden_scan", "Hidden Files Scan", hiddenPromise);
+      const hiddenResult = await hiddenPromise;
+      setHiddenItems(hiddenResult);
+      setSelectedDeletePaths(new Set(hiddenResult.map((i) => i.file_path)));
+    } catch (e) {
+      alert("Error scanning hidden files: " + e);
+    } finally {
+      setIsScanningHidden(false);
+    }
+  };
 
-      // 3. Scan Metadata Tags
+  const handleScanMetadata = async (folder: string) => {
+    if (!folder) return;
+    setIsScanningMetadata(true);
+    try {
+      const formatsList = formats.split(",").map((f) => f.trim());
+      const activePhrases = stripPhrases.filter((p) => !uncheckedPhrases.has(p));
+
       const metadataPromise = invoke<MetadataSanitizeItem[]>("scan_metadata_sanitizer", {
         taskId: "metadata_scan",
         folder,
         formats: formatsList,
         stripPhrases: activePhrases,
-      }).then((metadataResult) => {
-        setMetadataItems(metadataResult);
-        setSelectedMetadataIndices(new Set(metadataResult.map((_, idx) => idx)));
-        return metadataResult;
       });
       addBackgroundTask("metadata_scan", "Metadata Sanitizer Scan", metadataPromise);
-
-      // Wait for all promises to settle individually without blocking each other
-      await Promise.allSettled([renamePromise, hiddenPromise, metadataPromise]);
+      const metadataResult = await metadataPromise;
+      setMetadataItems(metadataResult);
+      setSelectedMetadataIndices(new Set(metadataResult.map((_, idx) => idx)));
     } catch (e) {
-      alert("Error scanning folder: " + e);
+      alert("Error scanning metadata tags: " + e);
     } finally {
-      setIsScanning(false);
+      setIsScanningMetadata(false);
     }
+  };
+
+  const handleScanAll = (folder: string) => {
+    if (!folder) return;
+    handleScanFilenames(folder);
+    handleScanHidden(folder);
+    handleScanMetadata(folder);
   };
 
   const handleToggleRenameSelect = (path: string) => {
@@ -233,7 +249,7 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
       addBackgroundTask(taskId, `Sanitize ${itemsToRename.length} filenames`, promise);
       await promise;
       alert(`Successfully sanitized ${itemsToRename.length} files!`);
-      handleScan(scanFolder);
+      handleScanFilenames(scanFolder);
     } catch (e) {
       alert("Error executing sanitization: " + e);
     } finally {
@@ -261,7 +277,7 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
       addBackgroundTask(taskId, `Delete ${selectedDeletePaths.size} hidden files`, promise);
       await promise;
       alert(`Successfully deleted ${selectedDeletePaths.size} hidden files!`);
-      handleScan(scanFolder);
+      handleScanHidden(scanFolder);
     } catch (e) {
       alert("Error deleting hidden files: " + e);
     } finally {
@@ -291,7 +307,7 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
       addBackgroundTask(taskId, `Clean tags of ${itemsToClean.length} files`, promise);
       await promise;
       alert("Metadata tags cleaned successfully!");
-      handleScan(scanFolder);
+      handleScanMetadata(scanFolder);
     } catch (e) {
       alert("Error cleaning metadata tags: " + e);
     } finally {
@@ -340,10 +356,10 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
       <h1>Sanitizer & Cleaner</h1>
       <p className="subtitle">Scan directories to strip web names, unwanted text from filenames, clean tags/metadata, and remove hidden junk files.</p>
 
-      {/* Target directory selector */}
+      {/* Target directory selector & Scan Buttons */}
       <div className="card">
-        <div className="card-title">Select Directory to Sanitize</div>
-        <div className="form-group">
+        <div className="card-title">Select Directory & Scan Tools</div>
+        <div className="form-group" style={{ marginBottom: "14px" }}>
           <div className="form-row">
             <input
               type="text"
@@ -354,22 +370,45 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
             <button className="btn btn-secondary" onClick={selectScanFolder}>
               Choose Folder
             </button>
-            <button
-              className="btn btn-primary"
-              disabled={!scanFolder || isScanning}
-              onClick={() => handleScan(scanFolder)}
-            >
-              {isScanning ? "Scanning..." : "🔍 Scan Folder"}
-            </button>
-            {isScanning && (
-              <button
-                className="btn btn-danger"
-                onClick={handleCancelScan}
-              >
-                🛑 Stop Scan
-              </button>
-            )}
           </div>
+        </div>
+
+        {/* Scan Action Buttons Bar */}
+        <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" }}>
+          <button
+            className="btn btn-primary"
+            disabled={!scanFolder || isScanningAny}
+            onClick={() => handleScanAll(scanFolder)}
+            style={{ padding: "6px 14px", fontSize: "0.85rem" }}
+            title="Scan Filenames, Metadata Tags, and Hidden Files together"
+          >
+            {isScanningAny ? "Scanning..." : "⚡ Scan All Tools"}
+          </button>
+          <button
+            className="btn btn-secondary"
+            disabled={!scanFolder || isScanningFilenames}
+            onClick={() => handleScanFilenames(scanFolder)}
+            style={{ padding: "6px 12px", fontSize: "0.85rem" }}
+          >
+            {isScanningFilenames ? "Scanning..." : "📁 Scan Filenames"}
+          </button>
+          <button
+            className="btn btn-secondary"
+            disabled={!scanFolder || isScanningMetadata}
+            onClick={() => handleScanMetadata(scanFolder)}
+            style={{ padding: "6px 12px", fontSize: "0.85rem" }}
+          >
+            {isScanningMetadata ? "Scanning..." : "🏷️ Scan Metadata Tags"}
+          </button>
+          <button
+            className="btn btn-secondary"
+            disabled={!scanFolder || isScanningHidden}
+            onClick={() => handleScanHidden(scanFolder)}
+            style={{ padding: "6px 12px", fontSize: "0.85rem" }}
+          >
+            {isScanningHidden ? "Scanning..." : "👻 Scan Hidden Files"}
+          </button>
+
         </div>
       </div>
 
@@ -450,7 +489,8 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
         </div>
       </div>
 
-      {scanFolder && !isScanning && (
+      {/* Scanned Results Panel */}
+      {scanFolder && (
         <div className="card" style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
           
           {/* Sub-Tabs selection bar inside card */}
@@ -461,63 +501,64 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
                 onClick={() => setSanitizerSubTab("files")}
                 style={{ padding: "8px 16px", fontSize: "0.85rem" }}
               >
-                📁 Filename Cleaner ({sanitizeItems.length})
+                📁 Filename Cleaner {isScanningFilenames ? "⌛" : `(${sanitizeItems.length})`}
               </button>
               <button
                 className={`btn ${sanitizerSubTab === "metadata" ? "btn-primary" : "btn-secondary"}`}
                 onClick={() => setSanitizerSubTab("metadata")}
                 style={{ padding: "8px 16px", fontSize: "0.85rem" }}
               >
-                🏷️ Metadata Tags Cleaner ({metadataItems.length})
+                🏷️ Metadata Tags Cleaner {isScanningMetadata ? "⌛" : `(${metadataItems.length})`}
               </button>
               <button
                 className={`btn ${sanitizerSubTab === "hidden" ? "btn-primary" : "btn-secondary"}`}
                 onClick={() => setSanitizerSubTab("hidden")}
                 style={{ padding: "8px 16px", fontSize: "0.85rem" }}
               >
-                👻 Hidden Files Cleaner ({hiddenItems.length})
+                👻 Hidden Files Cleaner {isScanningHidden ? "⌛" : `(${hiddenItems.length})`}
               </button>
             </div>
 
-            {/* Action Buttons depending on sub-tab */}
-            {sanitizerSubTab === "files" && sanitizeItems.length > 0 && (
-              <button
-                className="btn btn-primary"
-                onClick={promptExecuteRename}
-                disabled={selectedRenamePaths.size === 0 || isRenaming}
-                style={{ padding: "8px 16px", fontSize: "0.85rem" }}
-              >
-                {isRenaming ? "Renaming..." : `Sanitize Names (${selectedRenamePaths.size})`}
-              </button>
-            )}
+          {sanitizerSubTab === "files" && sanitizeItems.length > 0 && (
+            <button
+              className="btn btn-primary"
+              onClick={promptExecuteRename}
+              disabled={selectedRenamePaths.size === 0 || isRenaming || isScanningFilenames}
+              style={{ padding: "8px 16px", fontSize: "0.85rem" }}
+            >
+              {isRenaming ? "Renaming..." : `Sanitize Names (${selectedRenamePaths.size})`}
+            </button>
+          )}
 
-            {sanitizerSubTab === "metadata" && metadataItems.length > 0 && (
-              <button
-                className="btn btn-primary"
-                onClick={promptExecuteCleanMetadata}
-                disabled={selectedMetadataIndices.size === 0 || isCleaningMetadata}
-                style={{ padding: "8px 16px", fontSize: "0.85rem" }}
-              >
-                {isCleaningMetadata ? "Cleaning..." : `Clean Tags (${selectedMetadataIndices.size})`}
-              </button>
-            )}
+          {sanitizerSubTab === "metadata" && metadataItems.length > 0 && (
+            <button
+              className="btn btn-primary"
+              onClick={promptExecuteCleanMetadata}
+              disabled={selectedMetadataIndices.size === 0 || isCleaningMetadata || isScanningMetadata}
+              style={{ padding: "8px 16px", fontSize: "0.85rem" }}
+            >
+              {isCleaningMetadata ? "Cleaning..." : `Clean Tags (${selectedMetadataIndices.size})`}
+            </button>
+          )}
 
-            {sanitizerSubTab === "hidden" && hiddenItems.length > 0 && (
-              <button
-                className="btn btn-danger"
-                onClick={promptExecuteDelete}
-                disabled={selectedDeletePaths.size === 0 || isDeleting}
-                style={{ padding: "8px 16px", fontSize: "0.85rem" }}
-              >
-                {isDeleting ? "Deleting..." : `Delete Hidden (${selectedDeletePaths.size})`}
-              </button>
-            )}
+          {sanitizerSubTab === "hidden" && hiddenItems.length > 0 && (
+            <button
+              className="btn btn-danger"
+              onClick={promptExecuteDelete}
+              disabled={selectedDeletePaths.size === 0 || isDeleting || isScanningHidden}
+              style={{ padding: "8px 16px", fontSize: "0.85rem" }}
+            >
+              {isDeleting ? "Deleting..." : `Delete Hidden (${selectedDeletePaths.size})`}
+            </button>
+          )}
           </div>
 
           {/* Sub-Tab Panels */}
           {sanitizerSubTab === "files" && (
             <div>
-              {sanitizeItems.length > 0 ? (
+              {isScanningFilenames ? (
+                <div className="no-data">Scanning filenames for web phrases...</div>
+              ) : sanitizeItems.length > 0 ? (
                 <div className="table-container">
                   <table>
                     <thead>
@@ -565,7 +606,9 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
 
           {sanitizerSubTab === "metadata" && (
             <div>
-              {metadataItems.length > 0 ? (
+              {isScanningMetadata ? (
+                <div className="no-data">Scanning audio tags & metadata fields...</div>
+              ) : metadataItems.length > 0 ? (
                 <div className="table-container">
                   <table>
                     <thead>
@@ -623,7 +666,9 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
 
           {sanitizerSubTab === "hidden" && (
             <div>
-              {hiddenItems.length > 0 ? (
+              {isScanningHidden ? (
+                <div className="no-data">Scanning for hidden system junk files...</div>
+              ) : hiddenItems.length > 0 ? (
                 <div className="table-container">
                   <table>
                     <thead>

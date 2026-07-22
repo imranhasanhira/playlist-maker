@@ -9,6 +9,10 @@ type LibraryViewProps = {
   formats: string;
   addBackgroundTask: (id: string, name: string, taskPromise: Promise<any>) => void;
   onPlayTrack?: (track: AudioTrack, queue: AudioTrack[], playlistName: string) => void;
+  fsLibraryVersion?: number;
+  autoReloadEnabled?: boolean;
+  setAutoReloadEnabled?: (enabled: boolean) => void;
+  onManualRefresh?: () => void;
 };
 
 type DirTreeNode = {
@@ -34,6 +38,10 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
   formats,
   addBackgroundTask,
   onPlayTrack,
+  fsLibraryVersion,
+  autoReloadEnabled = true,
+  setAutoReloadEnabled,
+  onManualRefresh,
 }) => {
   const [treeRoot, setTreeRoot] = useState<DirTreeNode | null>(null);
   const [isLoadingTree, setIsLoadingTree] = useState<boolean>(false);
@@ -85,12 +93,15 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
   useEffect(() => {
     if (config?.sourceDir) {
       loadLibraryTree();
+      if (activeFolderPath) {
+        loadMultipleFolderPreviews(activeFolderPath.split("|"), true);
+      }
     } else {
       setTreeRoot(null);
       setDirPreviews([]);
       setActiveFolderPath("");
     }
-  }, [config?.sourceDir, formats]);
+  }, [config?.sourceDir, formats, fsLibraryVersion]);
 
   const loadMultipleFolderPreviews = async (folderPaths: string[], force = false) => {
     if (folderPaths.length === 0) return;
@@ -512,9 +523,43 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
 
   return (
     <div className="view-container" style={{ display: "flex", flexDirection: "column", height: "100%", gap: "20px" }}>
-      <div>
-        <h1>Library Management</h1>
-        <p className="subtitle" style={{ margin: 0 }}>Scan your music directories, view folders, edit tags, cover arts, and apply batch updates.</p>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div>
+          <h1>Library Management</h1>
+          <p className="subtitle" style={{ margin: 0 }}>Scan your music directories, view folders, edit tags, cover arts, and apply batch updates.</p>
+        </div>
+
+        {/* Auto-Sync Toggle & Refresh Controls inside Library Tab */}
+        <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+          {setAutoReloadEnabled && (
+            <button
+              className={`btn ${autoReloadEnabled ? "btn-primary" : "btn-secondary"}`}
+              onClick={() => setAutoReloadEnabled(!autoReloadEnabled)}
+              style={{ padding: "6px 12px", fontSize: "0.8rem", display: "flex", alignItems: "center", gap: "6px" }}
+              title={autoReloadEnabled ? "Auto-Sync is ON (OS file changes auto-update UI). Click to turn OFF." : "Auto-Sync is OFF. Click to turn ON."}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+              </svg>
+              <span>{autoReloadEnabled ? "Auto-Sync ON" : "Auto-Sync OFF"}</span>
+            </button>
+          )}
+
+          {!autoReloadEnabled && onManualRefresh && (
+            <button
+              className="btn btn-secondary"
+              onClick={onManualRefresh}
+              style={{ padding: "6px 12px", fontSize: "0.8rem", display: "flex", alignItems: "center", gap: "6px", color: "var(--accent-purple-hover)" }}
+              title="Manually re-scan Library & Workspace files"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21.5 2v6h-6M2.5 22v-6h6"/>
+                <path d="M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+              </svg>
+              <span>Refresh</span>
+            </button>
+          )}
+        </div>
       </div>
 
       <div style={{ display: "flex", gap: "0", flex: 1, minHeight: 0 }}>
