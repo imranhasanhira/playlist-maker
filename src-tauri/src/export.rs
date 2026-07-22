@@ -2,12 +2,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
 
-use crate::playlist::{self, MainConfig, TrackPreview};
+use crate::playlist::{self, TrackPreview};
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum ExportStatus {
@@ -53,6 +52,8 @@ pub struct ExportDiffReport {
     pub total_bytes_orphans: u64,
 }
 
+use crate::utils::{canonical_path_str, get_file_mtime_and_size};
+
 fn sanitize_playlist_filename(name: &str) -> String {
     let invalid_chars = ['/', '\\', '?', '%', '*', ':', '|', '"', '<', '>'];
     let clean: String = name
@@ -65,25 +66,6 @@ fn sanitize_playlist_filename(name: &str) -> String {
     } else {
         trimmed.to_string()
     }
-}
-
-fn get_file_mtime_and_size(path: &Path) -> Option<(u64, u64)> {
-    let metadata = fs::metadata(path).ok()?;
-    let size = metadata.len();
-    let mtime = metadata
-        .modified()
-        .ok()?
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    Some((mtime, size))
-}
-
-fn canonical_path_str(path: &Path) -> String {
-    fs::canonicalize(path)
-        .unwrap_or_else(|_| path.to_path_buf())
-        .to_string_lossy()
-        .to_string()
 }
 
 #[tauri::command]

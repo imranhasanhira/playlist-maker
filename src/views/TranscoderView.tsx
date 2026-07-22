@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { ProgressBar } from "../components/common/ProgressBar";
 
 type TranscoderViewProps = {
   addBackgroundTask?: (id: string, name: string, taskPromise: Promise<any>) => void;
@@ -266,13 +267,11 @@ export const TranscoderView: React.FC<TranscoderViewProps> = ({ addBackgroundTas
 
         {isProcessing && (
           <div style={{ marginBottom: "20px" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.9rem", fontWeight: 600 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.9rem", fontWeight: 600, marginBottom: "6px" }}>
               <span>{currentProgressText}</span>
               <span>{currentProgress}%</span>
             </div>
-            <div className="progress-bar-container">
-              <div className="progress-bar-fill" style={{ width: `${currentProgress}%` }} />
-            </div>
+            <ProgressBar progress={currentProgress} status="running" height={8} />
           </div>
         )}
 

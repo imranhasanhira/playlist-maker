@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { MainConfig } from "../App";
-import { AudioTrack } from "../components/AudioPlayer";
-import { ResolvedTracksPanel, TrackPreview } from "../components/ResolvedTracksPanel";
+import { MainConfig, AudioTrack, TrackPreview } from "../types";
+import { ResolvedTracksPanel } from "../components/ResolvedTracksPanel";
+import { ConfirmModal } from "../components/common/ConfirmModal";
 
 export type { TrackPreview };
 
@@ -147,12 +147,11 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   };
 
   const handleDeletePlaylist = () => {
-    if (!config || activePlaylist === null || selectedPlaylistIndex === null) return;
-    if (!isConfirmingDelete) {
-      setIsConfirmingDelete(true);
-      return;
-    }
+    setIsConfirmingDelete(true);
+  };
 
+  const executeDeletePlaylist = () => {
+    if (!config || activePlaylist === null || selectedPlaylistIndex === null) return;
     const newPlaylists = config.playlists.filter((_, idx) => idx !== selectedPlaylistIndex);
     setConfig({
       ...config,
@@ -368,11 +367,10 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                   <span>Playlist Configuration</span>
                   <button 
                     className="btn btn-danger" 
-                    onClick={handleDeletePlaylist} 
-                    onMouseLeave={() => setIsConfirmingDelete(false)}
+                    onClick={handleDeletePlaylist}
                     style={{ padding: "6px 12px", fontSize: "0.85rem" }}
                   >
-                    {isConfirmingDelete ? "⚠️ Confirm Delete?" : "Delete Playlist"}
+                    Delete Playlist
                   </button>
                 </div>
 
@@ -550,6 +548,18 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
             </div>
           </div>
         </div>
+      )}
+
+      {/* Delete Playlist Confirmation Modal */}
+      {isConfirmingDelete && activePlaylist && (
+        <ConfirmModal
+          title="⚠️ Confirm Delete Playlist"
+          message={`Are you sure you want to remove playlist "${activePlaylist.name}" from this workspace config?`}
+          confirmText="🗑 Delete Playlist"
+          confirmVariant="danger"
+          onConfirm={executeDeletePlaylist}
+          onCancel={() => setIsConfirmingDelete(false)}
+        />
       )}
     </div>
   );

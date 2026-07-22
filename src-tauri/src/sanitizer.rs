@@ -270,7 +270,7 @@ pub fn scan_hidden_files(
             break;
         }
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if name.starts_with('.') {
+            if crate::utils::is_os_system_junk(name) {
                 let file_path = path.to_string_lossy().to_string();
                 let relative_path = pathdiff::diff_paths(path, folder)
                     .map(|p| p.to_string_lossy().to_string())

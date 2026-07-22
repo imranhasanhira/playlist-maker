@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { MainConfig } from "../App";
-import { AudioTrack } from "../components/AudioPlayer";
-import { ResolvedTracksPanel, TrackPreview } from "../components/ResolvedTracksPanel";
+import { MainConfig, AudioTrack, TrackPreview } from "../types";
+import { ResolvedTracksPanel } from "../components/ResolvedTracksPanel";
+import { ConfirmModal } from "../components/common/ConfirmModal";
 
 type LibraryViewProps = {
   config: MainConfig | null;
@@ -959,86 +959,18 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
         </div>
       </div>
 
-      {/* Batch update confirmation modal */}
+      {/* Batch Tag Confirmation Modal */}
       {showBatchConfirmModal && selectedNode && (
-        <div style={{
-          position: "fixed",
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          backgroundColor: "rgba(0, 0, 0, 0.75)",
-          backdropFilter: "blur(4px)",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          zIndex: 1000
-        }}>
-          <div className="card" style={{ width: "520px", display: "flex", flexDirection: "column", margin: 0, padding: "20px", gap: "14px" }}>
-            <div className="card-title" style={{ borderBottom: "1px solid var(--border-color)", paddingBottom: "10px", margin: 0 }}>
-              <span style={{ color: "var(--warning)", display: "flex", alignItems: "center", gap: "8px", fontSize: "1.05rem" }}>
-                ⚠️ Confirm Batch Tag Update
-              </span>
-            </div>
-
-            <div style={{ fontSize: "0.88rem" }}>
-              <p style={{ marginBottom: "6px" }}>
-                Are you sure you want to batch update metadata tags for all matching tracks in folder:
-              </p>
-              <div style={{ fontWeight: 600, color: "var(--accent-purple)", wordBreak: "break-all", background: "var(--bg-tertiary)", padding: "8px 12px", borderRadius: "6px" }}>
-                📁 {selectedNode.name}
-              </div>
-            </div>
-
-            <div style={{ background: "rgba(234, 179, 8, 0.12)", border: "1px solid var(--warning)", padding: "8px 12px", borderRadius: "6px", fontSize: "0.82rem", color: "var(--text-primary)" }}>
-              <strong>Caution:</strong> This action will recursively overwrite specified metadata tags across all audio tracks in this folder.
-            </div>
-
-            <div style={{ fontSize: "0.85rem", background: "var(--bg-tertiary)", padding: "12px", borderRadius: "6px" }}>
-              <div style={{ fontWeight: 600, marginBottom: "8px", borderBottom: "1px solid var(--border-color)", paddingBottom: "4px" }}>
-                Summary of Changes to Apply:
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "100px 1fr", gap: "6px", fontFamily: "var(--font-mono)", fontSize: "0.8rem" }}>
-                <span className="text-secondary">Artist:</span>
-                <span>{batchArtist ? batchArtist : <em className="text-muted">(Unchanged)</em>}</span>
-                
-                <span className="text-secondary">Album:</span>
-                <span>{batchAlbum ? batchAlbum : <em className="text-muted">(Unchanged)</em>}</span>
-                
-                <span className="text-secondary">Genre:</span>
-                <span>{batchGenre ? batchGenre : <em className="text-muted">(Unchanged)</em>}</span>
-                
-                <span className="text-secondary">Year:</span>
-                <span>{batchYear ? batchYear : <em className="text-muted">(Unchanged)</em>}</span>
-                
-                <span className="text-secondary">Cover Art:</span>
-                <span>
-                  {batchCoverB64 === "REMOVE" 
-                    ? <span className="text-danger">Remove Existing Cover</span> 
-                    : batchCoverB64 
-                      ? <span className="text-success">Set New Cover Image</span> 
-                      : <em className="text-muted">(Unchanged)</em>}
-                </span>
-              </div>
-            </div>
-
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: "10px", marginTop: "6px" }}>
-              <button
-                className="btn btn-secondary"
-                onClick={() => setShowBatchConfirmModal(false)}
-              >
-                Cancel
-              </button>
-              <button
-                className="btn btn-primary"
-                onClick={executeSaveBatchTags}
-                style={{ backgroundColor: "var(--accent-purple)" }}
-              >
-                ⚡ Yes, Apply Batch Updates
-              </button>
-            </div>
-          </div>
-        </div>
+        <ConfirmModal
+          title="⚠️ Confirm Batch Tag Update"
+          message={`Are you sure you want to batch update metadata tags for all matching tracks in folder "${selectedNode.name}"? Caution: This action will recursively overwrite specified metadata tags.`}
+          confirmText="⚡ Apply Batch Updates"
+          confirmVariant="primary"
+          isExecuting={isSavingBatch}
+          executingText="Applying Updates..."
+          onConfirm={executeSaveBatchTags}
+          onCancel={() => setShowBatchConfirmModal(false)}
+        />
       )}
     </div>
   );
