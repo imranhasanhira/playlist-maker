@@ -14,6 +14,8 @@ import "./App.css";
 export type { MainConfig };
 
 const DEFAULT_STRIP_PHRASES = [
+  "Coke Studio Season \\d+", "Coke Studio | Season \\d+ |", "Shironamhin |", "Shironamhin -", "Shironamhin",
+  "Official Audio", "Official Video", "Official Track", "Official Music Video",
   "music.com.bd", "SVF", "Tseries",
   "Full Video", "Full audio", "Full HD", "Full Song",
   "New Video", "New Song", "New audio",

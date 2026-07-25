@@ -46,14 +46,32 @@ pub struct TaskProgress {
 
 // Replicate Python's sanitizeText with customizable strip_phrases
 pub fn sanitize_text(original_text: &str, strip_phrases: &[String]) -> String {
-    let mut new_text = original_text.to_string();
+    // 1. Normalize full-width pipes ｜ (U+FF5C) and unicode bars to standard ASCII pipe |
+    let mut new_text = original_text
+        .replace('｜', "|")
+        .replace('│', "|")
+        .replace('┃', "|")
+        .replace('║', "|");
 
-    // Remove keywords case-insensitively
+    // Remove keywords case-insensitively (supporting both literal strings and regexes like \d+)
     for part in strip_phrases {
-        if let Ok(re) = RegexBuilder::new(&regex::escape(part))
-            .case_insensitive(true)
-            .build()
-        {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let re = if part.contains(r"\d") || part.contains(r"\s") || part.contains(r"\w") {
+            let safe_pattern = part.replace(" | ", r"\s*\|\s*").replace("|", r"\|");
+            RegexBuilder::new(&safe_pattern).case_insensitive(true).build().ok()
+        } else {
+            None
+        };
+
+        let re = re.or_else(|| {
+            RegexBuilder::new(&regex::escape(part)).case_insensitive(true).build().ok()
+        });
+
+        if let Some(re) = re {
             new_text = re.replace_all(&new_text, "").to_string();
         }
     }
@@ -63,7 +81,15 @@ pub fn sanitize_text(original_text: &str, strip_phrases: &[String]) -> String {
         new_text = re.replace_all(&new_text, "I").to_string();
     }
 
-    if let Ok(re) = RegexBuilder::new(r"[(|｜\[\{]+(HQ|HD)[)|｜\]\}]+")
+    // Strip hashtags (e.g. #bangla, #song, #shorts, #trending)
+    if let Ok(re) = RegexBuilder::new(r"#\w+")
+        .case_insensitive(true)
+        .build()
+    {
+        new_text = re.replace_all(&new_text, "").to_string();
+    }
+
+    if let Ok(re) = RegexBuilder::new(r"[(|｜\[\{]+\s*(HQ|HD|Official\s*(Audio|Video|Music\s*Video|Track)?|Audio|Video|Lyrics?|Lyrical)\s*[)|｜\]\}]+")
         .case_insensitive(true)
         .build()
     {

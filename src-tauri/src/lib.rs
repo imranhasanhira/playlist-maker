@@ -227,6 +227,16 @@ async fn select_directory(title: String) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
+async fn select_directories(title: String) -> Result<Vec<String>, String> {
+    let paths = rfd::FileDialog::new()
+        .set_title(&title)
+        .pick_folders();
+    Ok(paths.map_or(Vec::new(), |list| {
+        list.into_iter().map(|p| p.to_string_lossy().to_string()).collect()
+    }))
+}
+
+#[tauri::command]
 async fn scan_flac_files(app: tauri::AppHandle, taskId: String, folder: String) -> Result<Vec<String>, String> {
     tokio::task::spawn_blocking(move || {
         let path = Path::new(&folder);
@@ -409,6 +419,7 @@ pub fn run() {
             start_transcoding_queue,
             select_file,
             select_directory,
+            select_directories,
             scan_flac_files,
             save_file_dialog,
             read_dir_tree,
