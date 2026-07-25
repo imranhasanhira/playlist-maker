@@ -36,6 +36,12 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   const [sidebarWidth, setSidebarWidth] = useState<number>(240);
   const [configWidth, setConfigWidth] = useState<number>(360);
 
+  // Central toggle for item reordering mode (default off to keep UI clean)
+  const [isReordering, setIsReordering] = useState<boolean>(false);
+
+  // In-memory cache for resolved track previews per playlist index
+  const [previewsCache, setPreviewsCache] = useState<Record<number, TrackPreview[]>>({});
+
   // Resizing mouse drag handlers
   const handleSidebarMouseDown = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -94,10 +100,19 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     relativeToConfig,
   }) : "";
 
+  const invalidateCacheFor = (idx: number | null) => {
+    if (idx === null) return;
+    setPreviewsCache((prev) => {
+      const copy = { ...prev };
+      delete copy[idx];
+      return copy;
+    });
+  };
+
   useEffect(() => {
     setIsConfirmingDelete(false);
     if (activePlaylist && selectedPlaylistIndex !== null) {
-      loadPreview();
+      loadPreview(false);
     } else {
       setPreviews([]);
     }
@@ -111,8 +126,15 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     return "…/" + parts.slice(-3).join('/');
   };
 
-  const loadPreview = async () => {
-    if (!configPath || activePlaylist === null) return;
+  const loadPreview = async (forceRefresh = false) => {
+    if (!configPath || activePlaylist === null || selectedPlaylistIndex === null) return;
+
+    if (!forceRefresh && previewsCache[selectedPlaylistIndex]) {
+      setPreviews(previewsCache[selectedPlaylistIndex]);
+      setPreviewError("");
+      return;
+    }
+
     setIsLoadingPreview(true);
     setPreviewError("");
     try {
@@ -123,6 +145,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
         formats,
       });
       setPreviews(result);
+      setPreviewsCache((prev) => ({ ...prev, [selectedPlaylistIndex]: result }));
     } catch (e) {
       setPreviews([]);
       setPreviewError(String(e));
@@ -131,14 +154,38 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     }
   };
 
-  const handleAddPlaylist = () => {
+  const handleAddPlaylist = async () => {
     if (!config) return;
+
+    // Open folder picker first
+    let selectedFolders: string[] = [];
+    try {
+      selectedFolders = await invoke<string[]>("select_directories", {
+        title: "Select Source Folder(s) for New Playlist",
+      });
+    } catch (e) {
+      console.warn("Folder picker closed or failed:", e);
+    }
+
+    // Auto generate sequential playlist name: "New Playlist", "New Playlist - 02", "New Playlist - 03"
+    const existingNames = new Set(config.playlists.map((p) => p.name.trim().toLowerCase()));
+    let baseName = "New Playlist";
+    let playlistName = baseName;
+    let counter = 2;
+
+    while (existingNames.has(playlistName.toLowerCase())) {
+      const pad = counter < 10 ? `0${counter}` : `${counter}`;
+      playlistName = `${baseName} - ${pad}`;
+      counter++;
+    }
+
     const newPlaylists = [...config.playlists];
     newPlaylists.push({
-      name: "New Playlist",
-      sources: ["."],
+      name: playlistName,
+      sources: selectedFolders,
       exclusions: [],
     });
+
     setConfig({
       ...config,
       playlists: newPlaylists,
@@ -152,7 +199,9 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
 
   const executeDeletePlaylist = () => {
     if (!config || activePlaylist === null || selectedPlaylistIndex === null) return;
-    const newPlaylists = config.playlists.filter((_, idx) => idx !== selectedPlaylistIndex);
+    const deletedIndex = selectedPlaylistIndex;
+    const newPlaylists = config.playlists.filter((_, idx) => idx !== deletedIndex);
+    invalidateCacheFor(deletedIndex);
     setConfig({
       ...config,
       playlists: newPlaylists,
@@ -174,18 +223,42 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   const selectAndAddSource = async () => {
     if (!config || activePlaylist === null || selectedPlaylistIndex === null) return;
     try {
-      const selected = await invoke<string | null>("select_directory", {
-        title: "Add Source Folder",
+      const selected = await invoke<string[]>("select_directories", {
+        title: "Add Source Folder(s)",
       });
-      if (selected) {
+      if (selected && selected.length > 0) {
         const newPlaylists = [...config.playlists];
-        const newSources = [...newPlaylists[selectedPlaylistIndex].sources];
-        newSources.push(selected);
-        newPlaylists[selectedPlaylistIndex].sources = newSources;
+        const currentSources = [...newPlaylists[selectedPlaylistIndex].sources];
+        const updatedSources = Array.from(new Set([...currentSources, ...selected]));
+        newPlaylists[selectedPlaylistIndex].sources = updatedSources;
         setConfig({
           ...config,
           playlists: newPlaylists,
         });
+        invalidateCacheFor(selectedPlaylistIndex);
+      }
+    } catch (e) {
+      alert("Error picking folder: " + e);
+    }
+  };
+
+  const handleUpdateSourceOnDoubleClick = async (srcIdx: number) => {
+    if (!config || activePlaylist === null || selectedPlaylistIndex === null) return;
+    try {
+      const selected = await invoke<string[]>("select_directories", {
+        title: "Update Source Folder",
+      });
+      if (selected && selected.length > 0) {
+        const newPlaylists = [...config.playlists];
+        const currentSources = [...newPlaylists[selectedPlaylistIndex].sources];
+        currentSources.splice(srcIdx, 1, ...selected);
+        const updatedSources = Array.from(new Set(currentSources));
+        newPlaylists[selectedPlaylistIndex].sources = updatedSources;
+        setConfig({
+          ...config,
+          playlists: newPlaylists,
+        });
+        invalidateCacheFor(selectedPlaylistIndex);
       }
     } catch (e) {
       alert("Error picking folder: " + e);
@@ -201,23 +274,63 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
       ...config,
       playlists: newPlaylists,
     });
+    invalidateCacheFor(selectedPlaylistIndex);
+  };
+
+  const moveSourceItem = (fromIdx: number, direction: "up" | "down") => {
+    if (!config || selectedPlaylistIndex === null) return;
+    const toIdx = direction === "up" ? fromIdx - 1 : fromIdx + 1;
+    const sources = [...config.playlists[selectedPlaylistIndex].sources];
+    if (toIdx < 0 || toIdx >= sources.length) return;
+
+    const newPlaylists = [...config.playlists];
+    const [moved] = sources.splice(fromIdx, 1);
+    sources.splice(toIdx, 0, moved);
+    newPlaylists[selectedPlaylistIndex].sources = sources;
+
+    setConfig({ ...config, playlists: newPlaylists });
+    invalidateCacheFor(selectedPlaylistIndex);
   };
 
   const selectAndAddExclusion = async () => {
     if (!config || activePlaylist === null || selectedPlaylistIndex === null) return;
     try {
-      const selected = await invoke<string | null>("select_directory", {
-        title: "Add Exclusion Folder",
+      const selected = await invoke<string[]>("select_directories", {
+        title: "Add Exclusion Folder(s)",
       });
-      if (selected) {
+      if (selected && selected.length > 0) {
         const newPlaylists = [...config.playlists];
         const currentExclusions = newPlaylists[selectedPlaylistIndex].exclusions || [];
-        const newExclusions = [...currentExclusions, selected];
-        newPlaylists[selectedPlaylistIndex].exclusions = newExclusions;
+        const updatedExclusions = Array.from(new Set([...currentExclusions, ...selected]));
+        newPlaylists[selectedPlaylistIndex].exclusions = updatedExclusions;
         setConfig({
           ...config,
           playlists: newPlaylists,
         });
+        invalidateCacheFor(selectedPlaylistIndex);
+      }
+    } catch (e) {
+      alert("Error picking folder: " + e);
+    }
+  };
+
+  const handleUpdateExclusionOnDoubleClick = async (exIdx: number) => {
+    if (!config || activePlaylist === null || selectedPlaylistIndex === null) return;
+    try {
+      const selected = await invoke<string[]>("select_directories", {
+        title: "Update Exclusion Folder",
+      });
+      if (selected && selected.length > 0) {
+        const newPlaylists = [...config.playlists];
+        const currentExclusions = [...(newPlaylists[selectedPlaylistIndex].exclusions || [])];
+        currentExclusions.splice(exIdx, 1, ...selected);
+        const updatedExclusions = Array.from(new Set(currentExclusions));
+        newPlaylists[selectedPlaylistIndex].exclusions = updatedExclusions;
+        setConfig({
+          ...config,
+          playlists: newPlaylists,
+        });
+        invalidateCacheFor(selectedPlaylistIndex);
       }
     } catch (e) {
       alert("Error picking folder: " + e);
@@ -234,6 +347,52 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
       ...config,
       playlists: newPlaylists,
     });
+    invalidateCacheFor(selectedPlaylistIndex);
+  };
+
+  const moveExclusionItem = (fromIdx: number, direction: "up" | "down") => {
+    if (!config || selectedPlaylistIndex === null) return;
+    const toIdx = direction === "up" ? fromIdx - 1 : fromIdx + 1;
+    const exclusions = [...(config.playlists[selectedPlaylistIndex].exclusions || [])];
+    if (toIdx < 0 || toIdx >= exclusions.length) return;
+
+    const newPlaylists = [...config.playlists];
+    const [moved] = exclusions.splice(fromIdx, 1);
+    exclusions.splice(toIdx, 0, moved);
+    newPlaylists[selectedPlaylistIndex].exclusions = exclusions;
+
+    setConfig({ ...config, playlists: newPlaylists });
+    invalidateCacheFor(selectedPlaylistIndex);
+  };
+
+  const movePlaylistItem = (fromIdx: number, direction: "up" | "down") => {
+    if (!config) return;
+    const toIdx = direction === "up" ? fromIdx - 1 : fromIdx + 1;
+    if (toIdx < 0 || toIdx >= config.playlists.length) return;
+
+    const newPlaylists = [...config.playlists];
+    const [moved] = newPlaylists.splice(fromIdx, 1);
+    newPlaylists.splice(toIdx, 0, moved);
+
+    let newSelectedIndex: number | null = selectedPlaylistIndex;
+    if (selectedPlaylistIndex === fromIdx) {
+      newSelectedIndex = toIdx;
+    } else if (
+      selectedPlaylistIndex !== null &&
+      selectedPlaylistIndex > fromIdx &&
+      selectedPlaylistIndex <= toIdx
+    ) {
+      newSelectedIndex = selectedPlaylistIndex - 1;
+    } else if (
+      selectedPlaylistIndex !== null &&
+      selectedPlaylistIndex < fromIdx &&
+      selectedPlaylistIndex >= toIdx
+    ) {
+      newSelectedIndex = selectedPlaylistIndex + 1;
+    }
+
+    setConfig({ ...config, playlists: newPlaylists });
+    setSelectedPlaylistIndex(newSelectedIndex);
   };
 
   const handleGeneratePlaylists = async () => {
@@ -273,14 +432,24 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
           <h1 style={{ fontSize: "1.4rem", margin: 0 }}>Playlist Builder</h1>
           <p className="subtitle" style={{ margin: 0, fontSize: "0.82rem" }}>Visually build, customize, and preview your playlist directories.</p>
         </div>
-        <button
-          className="btn btn-primary"
-          onClick={handleGeneratePlaylists}
-          disabled={isGenerating}
-          style={{ padding: "8px 16px", fontSize: "0.85rem" }}
-        >
-          {isGenerating ? "Compiling..." : "⚡ Generate Playlists (.m3u)"}
-        </button>
+        <div style={{ display: "flex", gap: "8px" }}>
+          <button
+            className={`btn ${isReordering ? "btn-primary" : "btn-secondary"}`}
+            onClick={() => setIsReordering(!isReordering)}
+            style={{ padding: "8px 14px", fontSize: "0.85rem" }}
+            title="Toggle item reorder mode"
+          >
+            {isReordering ? "Done Reordering" : "⇅ Reorder Mode"}
+          </button>
+          <button
+            className="btn btn-primary"
+            onClick={handleGeneratePlaylists}
+            disabled={isGenerating}
+            style={{ padding: "8px 16px", fontSize: "0.85rem" }}
+          >
+            {isGenerating ? "Compiling..." : "⚡ Generate Playlists (.m3u)"}
+          </button>
+        </div>
       </div>
 
       <div style={{ display: "flex", gap: "0", flex: 1, minHeight: 0 }}>
@@ -296,15 +465,40 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                   key={idx}
                   onClick={() => setSelectedPlaylistIndex(idx)}
                   style={{
-                    padding: "8px 12px",
+                    padding: "8px 10px",
                     borderRadius: "6px",
                     cursor: "pointer",
                     backgroundColor: selectedPlaylistIndex === idx ? "var(--bg-tertiary)" : "transparent",
                     borderLeft: selectedPlaylistIndex === idx ? "3px solid var(--accent-purple)" : "none",
                     fontWeight: selectedPlaylistIndex === idx ? 600 : 400,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "6px",
                   }}
                 >
-                  {pl.name}
+                  <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{pl.name}</span>
+                  {isReordering && (
+                    <div style={{ display: "flex", gap: "2px" }} onClick={(e) => e.stopPropagation()}>
+                      <button
+                        className="btn btn-secondary"
+                        onClick={() => movePlaylistItem(idx, "up")}
+                        disabled={idx === 0}
+                        style={{ padding: "2px 5px", fontSize: "0.65rem", lineHeight: 1 }}
+                        title="Move playlist up"
+                      >
+                        ▲
+                      </button>
+                      <button
+                        className="btn btn-secondary"
+                        onClick={() => movePlaylistItem(idx, "down")}
+                        disabled={idx === config.playlists.length - 1}
+                        style={{ padding: "2px 5px", fontSize: "0.65rem", lineHeight: 1 }}
+                        title="Move playlist down"
+                      >
+                        ▼
+                      </button>
+                    </div>
+                  )}
                 </li>
               ))}
             </ul>
@@ -393,18 +587,60 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                     </label>
                     <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                        {activePlaylist.sources.map((src, srcIdx) => (
-                         <div className="form-row" key={srcIdx}>
-                           <input 
-                             type="text" 
-                             readOnly 
-                             value={formatPathTail(src)} 
-                             title={src} 
-                             style={{ fontSize: "0.82rem", direction: "rtl", textAlign: "left" }} 
-                           />
+                         <div
+                           className="form-row"
+                           key={srcIdx}
+                           onDoubleClick={() => handleUpdateSourceOnDoubleClick(srcIdx)}
+                           title={`Double-click to edit:\n${src}`}
+                           style={{
+                             display: "flex",
+                             alignItems: "center",
+                             gap: "6px",
+                           }}
+                         >
+                           <div
+                             style={{
+                               flex: 1,
+                               fontSize: "0.82rem",
+                               fontFamily: "var(--font-mono)",
+                               overflow: "hidden",
+                               textOverflow: "ellipsis",
+                               whiteSpace: "nowrap",
+                               padding: "6px 8px",
+                               backgroundColor: "var(--bg-primary)",
+                               borderRadius: "4px",
+                               border: "1px solid var(--border-color)",
+                               cursor: "pointer"
+                             }}
+                           >
+                             {formatPathTail(src)}
+                           </div>
+                           {isReordering && (
+                             <div style={{ display: "flex", gap: "2px" }}>
+                               <button
+                                 className="btn btn-secondary"
+                                 onClick={() => moveSourceItem(srcIdx, "up")}
+                                 disabled={srcIdx === 0}
+                                 style={{ padding: "4px 6px", fontSize: "0.65rem", lineHeight: 1 }}
+                                 title="Move up"
+                               >
+                                 ▲
+                               </button>
+                               <button
+                                 className="btn btn-secondary"
+                                 onClick={() => moveSourceItem(srcIdx, "down")}
+                                 disabled={srcIdx === activePlaylist.sources.length - 1}
+                                 style={{ padding: "4px 6px", fontSize: "0.65rem", lineHeight: 1 }}
+                                 title="Move down"
+                               >
+                                 ▼
+                               </button>
+                             </div>
+                           )}
                            <button 
                              className="btn btn-secondary" 
                              onClick={() => removeSource(srcIdx)} 
-                             style={{ padding: "8px", display: "flex", alignItems: "center", justifyContent: "center" }}
+                             style={{ padding: "6px", display: "flex", alignItems: "center", justifyContent: "center" }}
                              title="Remove Source Folder"
                            >
                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -429,18 +665,60 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                     </label>
                     <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                        {(activePlaylist.exclusions || []).map((ex, exIdx) => (
-                         <div className="form-row" key={exIdx}>
-                           <input 
-                             type="text" 
-                             readOnly 
-                             value={formatPathTail(ex)} 
-                             title={ex} 
-                             style={{ fontSize: "0.82rem", direction: "rtl", textAlign: "left" }} 
-                           />
+                         <div
+                           className="form-row"
+                           key={exIdx}
+                           onDoubleClick={() => handleUpdateExclusionOnDoubleClick(exIdx)}
+                           title={`Double-click to edit:\n${ex}`}
+                           style={{
+                             display: "flex",
+                             alignItems: "center",
+                             gap: "6px",
+                           }}
+                         >
+                           <div
+                             style={{
+                               flex: 1,
+                               fontSize: "0.82rem",
+                               fontFamily: "var(--font-mono)",
+                               overflow: "hidden",
+                               textOverflow: "ellipsis",
+                               whiteSpace: "nowrap",
+                               padding: "6px 8px",
+                               backgroundColor: "var(--bg-primary)",
+                               borderRadius: "4px",
+                               border: "1px solid var(--border-color)",
+                               cursor: "pointer"
+                             }}
+                           >
+                             {formatPathTail(ex)}
+                           </div>
+                           {isReordering && (
+                             <div style={{ display: "flex", gap: "2px" }}>
+                               <button
+                                 className="btn btn-secondary"
+                                 onClick={() => moveExclusionItem(exIdx, "up")}
+                                 disabled={exIdx === 0}
+                                 style={{ padding: "4px 6px", fontSize: "0.65rem", lineHeight: 1 }}
+                                 title="Move up"
+                               >
+                                 ▲
+                               </button>
+                               <button
+                                 className="btn btn-secondary"
+                                 onClick={() => moveExclusionItem(exIdx, "down")}
+                                 disabled={exIdx === (activePlaylist.exclusions || []).length - 1}
+                                 style={{ padding: "4px 6px", fontSize: "0.65rem", lineHeight: 1 }}
+                                 title="Move down"
+                               >
+                                 ▼
+                               </button>
+                             </div>
+                           )}
                            <button 
                              className="btn btn-secondary" 
                              onClick={() => removeExclusion(exIdx)} 
-                             style={{ padding: "8px", display: "flex", alignItems: "center", justifyContent: "center" }}
+                             style={{ padding: "6px", display: "flex", alignItems: "center", justifyContent: "center" }}
                              title="Remove Exclusion Folder"
                            >
                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -489,7 +767,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                 previews={previews}
                 isLoadingPreview={isLoadingPreview}
                 previewError={previewError}
-                loadPreview={loadPreview}
+                loadPreview={() => loadPreview(true)}
                 onPlayTrack={(track, queue, name) => onPlayTrack && onPlayTrack(track, queue, name)}
                 onPlayAll={() => {
                   if (onPlayQueue && previews.length > 0) {
