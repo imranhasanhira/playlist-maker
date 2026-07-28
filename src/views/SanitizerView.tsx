@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { SanitizeItem, HiddenFileItem, MetadataSanitizeItem } from "../types";
+import { SanitizeItem, HiddenFileItem, MetadataSanitizeItem, FontIssueItem } from "../types";
 import { formatSize } from "../utils/formatters";
 import { ConfirmModal } from "../components/common/ConfirmModal";
 
@@ -46,10 +46,18 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
   );
   const [isCleaningMetadata, setIsCleaningMetadata] = useState<boolean>(false);
 
+  // Font Issues state
+  const [fontIssueItems, setFontIssueItems] = useState<FontIssueItem[]>([]);
+  const [selectedFontIssuePaths, setSelectedFontIssuePaths] = useState<Set<string>>(new Set());
+  const [isScanningFontIssues, setIsScanningFontIssues] = useState<boolean>(false);
+  const [isApplyingOption1, setIsApplyingOption1] = useState<boolean>(false);
+  const [isApplyingOption2, setIsApplyingOption2] = useState<boolean>(false);
+
   // Cleaner Tab state
-  const [sanitizerSubTab, setSanitizerSubTab] = useState<"files" | "metadata" | "hidden">("files");
+  const [sanitizerSubTab, setSanitizerSubTab] = useState<"files" | "metadata" | "font_issues" | "hidden">("files");
   
   // Custom phrase state
+  const [isRulesExpanded, setIsRulesExpanded] = useState<boolean>(false);
   const [newPhrase, setNewPhrase] = useState<string>("");
   const [uncheckedPhrases, setUncheckedPhrases] = useState<Set<string>>(new Set());
 
@@ -59,7 +67,7 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
   const [isRenaming, setIsRenaming] = useState<boolean>(false);
   const [isDeleting, setIsDeleting] = useState<boolean>(false);
 
-  const isScanningAny = isScanningFilenames || isScanningHidden || isScanningMetadata;
+  const isScanningAny = isScanningFilenames || isScanningHidden || isScanningMetadata || isScanningFontIssues;
 
   const selectScanFolder = async () => {
     try {
@@ -141,11 +149,70 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
     }
   };
 
+  const handleScanFontIssues = async (folder: string) => {
+    if (!folder) return;
+    setIsScanningFontIssues(true);
+    try {
+      const formatsList = formats.split(",").map((f) => f.trim());
+      const promise = invoke<FontIssueItem[]>("scan_font_issues", {
+        taskId: "font_issues_scan",
+        folder,
+        formats: formatsList,
+      });
+      addBackgroundTask("font_issues_scan", "Scan Font Issues", promise);
+      const result = await promise;
+      setFontIssueItems(result);
+      setSelectedFontIssuePaths(new Set(result.map((i) => i.file_path)));
+      setSanitizerSubTab("font_issues");
+    } catch (e) {
+      alert("Error scanning font issues: " + e);
+    } finally {
+      setIsScanningFontIssues(false);
+    }
+  };
+
+  const handleApplyUtf16Tags = async () => {
+    if (selectedFontIssuePaths.size === 0) return;
+    setIsApplyingOption1(true);
+    try {
+      const count = await invoke<number>("apply_font_issue_option1", {
+        filePaths: Array.from(selectedFontIssuePaths),
+      });
+      alert(`Successfully updated ID3v2.3 UTF-16 tags for ${count} file(s).`);
+      handleScanFontIssues(scanFolder);
+    } catch (e) {
+      alert("Error updating tags: " + e);
+    } finally {
+      setIsApplyingOption1(false);
+    }
+  };
+
+  const handleApplyTransliterate = async (targetType: "tags" | "filenames") => {
+    if (selectedFontIssuePaths.size === 0) return;
+    setIsApplyingOption2(true);
+    try {
+      const count = await invoke<number>("apply_font_issue_option2", {
+        filePaths: Array.from(selectedFontIssuePaths),
+        targetType,
+      });
+      const msg = targetType === "filenames"
+        ? `Successfully transliterated & renamed ${count} file(s) on disk to Romanized Banglish.`
+        : `Successfully transliterated ID3 tags for ${count} file(s) to Romanized Banglish.`;
+      alert(msg);
+      handleScanFontIssues(scanFolder);
+    } catch (e) {
+      alert("Error applying transliteration: " + e);
+    } finally {
+      setIsApplyingOption2(false);
+    }
+  };
+
   const handleScanAll = (folder: string) => {
     if (!folder) return;
     handleScanFilenames(folder);
     handleScanHidden(folder);
     handleScanMetadata(folder);
+    handleScanFontIssues(folder);
   };
 
   const handleToggleRenameSelect = (path: string) => {
@@ -181,6 +248,24 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
       setSelectedDeletePaths(new Set());
     } else {
       setSelectedDeletePaths(new Set(hiddenItems.map((i) => i.file_path)));
+    }
+  };
+
+  const handleToggleFontIssueSelect = (path: string) => {
+    const next = new Set(selectedFontIssuePaths);
+    if (next.has(path)) {
+      next.delete(path);
+    } else {
+      next.add(path);
+    }
+    setSelectedFontIssuePaths(next);
+  };
+
+  const handleToggleAllFontIssues = () => {
+    if (selectedFontIssuePaths.size === fontIssueItems.length) {
+      setSelectedFontIssuePaths(new Set());
+    } else {
+      setSelectedFontIssuePaths(new Set(fontIssueItems.map((i) => i.file_path)));
     }
   };
 
@@ -333,13 +418,12 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
 
       {/* Target directory selector & Scan Buttons */}
       <div className="card">
-        <div className="card-title">Select Directory & Scan Tools</div>
         <div className="form-group" style={{ marginBottom: "14px" }}>
           <div className="form-row">
             <input
               type="text"
-              readOnly
               value={scanFolder}
+              onChange={(e) => setScanFolder(e.target.value)}
               placeholder="Select folder to analyze..."
             />
             <button className="btn btn-secondary" onClick={selectScanFolder}>
@@ -348,16 +432,16 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
           </div>
         </div>
 
-        {/* Scan Action Buttons Bar */}
+        {/* Scan Action Buttons Bar (Line 1) */}
         <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" }}>
           <button
             className="btn btn-primary"
             disabled={!scanFolder || isScanningAny}
             onClick={() => handleScanAll(scanFolder)}
             style={{ padding: "6px 14px", fontSize: "0.85rem" }}
-            title="Scan Filenames, Metadata Tags, and Hidden Files together"
+            title="Scan Filenames, Metadata Tags, Font Issues, and Hidden Files together"
           >
-            {isScanningAny ? "Scanning..." : "⚡ Scan All Tools"}
+            {isScanningAny ? "Scanning..." : "⚡ Scan All"}
           </button>
           <button
             className="btn btn-secondary"
@@ -377,155 +461,263 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
           </button>
           <button
             className="btn btn-secondary"
+            disabled={!scanFolder || isScanningFontIssues}
+            onClick={() => handleScanFontIssues(scanFolder)}
+            style={{ padding: "6px 12px", fontSize: "0.85rem" }}
+          >
+            {isScanningFontIssues ? "Scanning..." : "🔤 Scan Font Issues"}
+          </button>
+          <button
+            className="btn btn-secondary"
             disabled={!scanFolder || isScanningHidden}
             onClick={() => handleScanHidden(scanFolder)}
             style={{ padding: "6px 12px", fontSize: "0.85rem" }}
           >
             {isScanningHidden ? "Scanning..." : "👻 Scan Hidden Files"}
           </button>
-
         </div>
       </div>
 
       {/* Customizable Strip rules checklist */}
-      <div className="card">
-        <div className="card-title">Editable Sanitization Rules</div>
-        <p className="text-secondary" style={{ fontSize: "0.85rem", marginBottom: "12px" }}>
-          Check or uncheck which words/phrases should be stripped from filenames and metadata, or add your own custom words to strip.
-        </p>
-
-        {/* Custom Input */}
-        <div className="form-row" style={{ marginBottom: "16px", maxWidth: "450px" }}>
-          <input
-            type="text"
-            value={newPhrase}
-            onChange={(e) => setNewPhrase(e.target.value)}
-            placeholder="Add new word or phrase to strip..."
-          />
-          <button className="btn btn-secondary" onClick={addCustomPhrase}>
-            + Add Word
-          </button>
-        </div>
-
-        {/* Phrases wrap container */}
+      <div className="card" style={{ padding: isRulesExpanded ? "16px 20px" : "12px 20px" }}>
         <div
+          className="card-title"
+          onClick={() => setIsRulesExpanded(!isRulesExpanded)}
           style={{
+            cursor: "pointer",
             display: "flex",
-            flexWrap: "wrap",
-            gap: "8px",
-            maxHeight: "150px",
-            overflowY: "auto",
-            border: "1px solid var(--border-color)",
-            borderRadius: "8px",
-            padding: "12px",
-            backgroundColor: "var(--bg-tertiary)",
+            alignItems: "center",
+            justifyContent: "space-between",
+            margin: 0,
+            userSelect: "none",
           }}
         >
-          {stripPhrases.map((phrase) => {
-            const isChecked = !uncheckedPhrases.has(phrase);
-            return (
-              <div
-                key={phrase}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: "6px",
-                  padding: "4px 8px",
-                  borderRadius: "6px",
-                  backgroundColor: "var(--bg-surface)",
-                  border: "1px solid var(--border-color)",
-                  fontSize: "0.8rem",
-                  cursor: "pointer",
-                }}
-                onClick={() => togglePhrase(phrase)}
-              >
-                <input
-                  type="checkbox"
-                  checked={isChecked}
-                  onChange={() => {}} // handled by click on parent div
-                  style={{ cursor: "pointer", width: "auto" }}
-                />
-                <span style={{ color: isChecked ? "var(--text-primary)" : "var(--text-muted)" }}>
-                  {phrase}
-                </span>
-                <span
-                  style={{ marginLeft: "4px", color: "var(--danger)", fontWeight: 700 }}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    removeCustomPhrase(phrase);
-                  }}
-                  title="Remove from rules"
-                >
-                  ×
-                </span>
-              </div>
-            );
-          })}
+          <span>⚙️ Editable Sanitization Rules ({stripPhrases.length - uncheckedPhrases.size} active phrases)</span>
+          <span style={{ fontSize: "0.82rem", color: "var(--accent-purple)", fontWeight: 600 }}>
+            {isRulesExpanded ? "▾ Hide Rules" : "▸ Expand Rules"}
+          </span>
         </div>
+
+        {isRulesExpanded && (
+          <div style={{ marginTop: "14px" }}>
+            <p className="text-secondary" style={{ fontSize: "0.85rem", marginBottom: "12px" }}>
+              Check or uncheck which words/phrases should be stripped from filenames and metadata, or add your own custom words to strip.
+            </p>
+
+            {/* Custom Input */}
+            <div className="form-row" style={{ marginBottom: "16px", maxWidth: "450px" }}>
+              <input
+                type="text"
+                value={newPhrase}
+                onChange={(e) => setNewPhrase(e.target.value)}
+                placeholder="Add new word or phrase to strip..."
+              />
+              <button className="btn btn-secondary" onClick={addCustomPhrase}>
+                + Add Word
+              </button>
+            </div>
+
+            {/* Phrases wrap container */}
+            <div
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                gap: "8px",
+                maxHeight: "150px",
+                overflowY: "auto",
+                border: "1px solid var(--border-color)",
+                borderRadius: "8px",
+                padding: "12px",
+                backgroundColor: "var(--bg-tertiary)",
+              }}
+            >
+              {stripPhrases.map((phrase) => {
+                const isChecked = !uncheckedPhrases.has(phrase);
+                return (
+                  <div
+                    key={phrase}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: "6px",
+                      padding: "4px 8px",
+                      borderRadius: "6px",
+                      backgroundColor: "var(--bg-surface)",
+                      border: "1px solid var(--border-color)",
+                      fontSize: "0.8rem",
+                      cursor: "pointer",
+                    }}
+                    onClick={() => togglePhrase(phrase)}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={isChecked}
+                      onChange={() => {}} // handled by click on parent div
+                      style={{ cursor: "pointer", width: "auto" }}
+                    />
+                    <span style={{ color: isChecked ? "var(--text-primary)" : "var(--text-muted)" }}>
+                      {phrase}
+                    </span>
+                    <span
+                      style={{ marginLeft: "4px", color: "var(--danger)", fontWeight: 700 }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeCustomPhrase(phrase);
+                      }}
+                      title="Remove from rules"
+                    >
+                      ×
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Scanned Results Panel */}
       {scanFolder && (
         <div className="card" style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
           
-          {/* Sub-Tabs selection bar inside card */}
-          <div style={{ display: "flex", borderBottom: "1px solid var(--border-color)", paddingBottom: "12px", gap: "12px", alignItems: "center", justifyContent: "space-between" }}>
-            <div style={{ display: "flex", gap: "8px" }}>
-              <button
-                className={`btn ${sanitizerSubTab === "files" ? "btn-primary" : "btn-secondary"}`}
-                onClick={() => setSanitizerSubTab("files")}
-                style={{ padding: "8px 16px", fontSize: "0.85rem" }}
-              >
-                📁 Filename Cleaner {isScanningFilenames ? "⌛" : `(${sanitizeItems.length})`}
-              </button>
-              <button
-                className={`btn ${sanitizerSubTab === "metadata" ? "btn-primary" : "btn-secondary"}`}
-                onClick={() => setSanitizerSubTab("metadata")}
-                style={{ padding: "8px 16px", fontSize: "0.85rem" }}
-              >
-                🏷️ Metadata Tags Cleaner {isScanningMetadata ? "⌛" : `(${metadataItems.length})`}
-              </button>
-              <button
-                className={`btn ${sanitizerSubTab === "hidden" ? "btn-primary" : "btn-secondary"}`}
-                onClick={() => setSanitizerSubTab("hidden")}
-                style={{ padding: "8px 16px", fontSize: "0.85rem" }}
-              >
-                👻 Hidden Files Cleaner {isScanningHidden ? "⌛" : `(${hiddenItems.length})`}
-              </button>
-            </div>
-
-          {sanitizerSubTab === "files" && sanitizeItems.length > 0 && (
+          {/* Issue Tabs (Line 2) */}
+          <div style={{ display: "flex", borderBottom: "2px solid var(--border-color)", gap: "4px" }}>
             <button
-              className="btn btn-primary"
-              onClick={promptExecuteRename}
-              disabled={selectedRenamePaths.size === 0 || isRenaming || isScanningFilenames}
-              style={{ padding: "8px 16px", fontSize: "0.85rem" }}
+              onClick={() => setSanitizerSubTab("files")}
+              style={{
+                padding: "8px 16px",
+                fontSize: "0.85rem",
+                fontWeight: sanitizerSubTab === "files" ? 600 : 400,
+                borderBottom: sanitizerSubTab === "files" ? "2px solid var(--accent-purple)" : "2px solid transparent",
+                marginBottom: "-2px",
+                backgroundColor: "transparent",
+                color: sanitizerSubTab === "files" ? "var(--text-primary)" : "var(--text-secondary)",
+                border: "none",
+                cursor: "pointer",
+                transition: "all 0.15s ease",
+              }}
             >
-              {isRenaming ? "Renaming..." : `Sanitize Names (${selectedRenamePaths.size})`}
+              📁 Filenames {isScanningFilenames ? "⌛" : `(${sanitizeItems.length})`}
             </button>
-          )}
-
-          {sanitizerSubTab === "metadata" && metadataItems.length > 0 && (
             <button
-              className="btn btn-primary"
-              onClick={promptExecuteCleanMetadata}
-              disabled={selectedMetadataIndices.size === 0 || isCleaningMetadata || isScanningMetadata}
-              style={{ padding: "8px 16px", fontSize: "0.85rem" }}
+              onClick={() => setSanitizerSubTab("metadata")}
+              style={{
+                padding: "8px 16px",
+                fontSize: "0.85rem",
+                fontWeight: sanitizerSubTab === "metadata" ? 600 : 400,
+                borderBottom: sanitizerSubTab === "metadata" ? "2px solid var(--accent-purple)" : "2px solid transparent",
+                marginBottom: "-2px",
+                backgroundColor: "transparent",
+                color: sanitizerSubTab === "metadata" ? "var(--text-primary)" : "var(--text-secondary)",
+                border: "none",
+                cursor: "pointer",
+                transition: "all 0.15s ease",
+              }}
             >
-              {isCleaningMetadata ? "Cleaning..." : `Clean Tags (${selectedMetadataIndices.size})`}
+              🏷️ Metadata Tags {isScanningMetadata ? "⌛" : `(${metadataItems.length})`}
             </button>
-          )}
-
-          {sanitizerSubTab === "hidden" && hiddenItems.length > 0 && (
             <button
-              className="btn btn-danger"
-              onClick={promptExecuteDelete}
-              disabled={selectedDeletePaths.size === 0 || isDeleting || isScanningHidden}
-              style={{ padding: "8px 16px", fontSize: "0.85rem" }}
+              onClick={() => setSanitizerSubTab("font_issues")}
+              style={{
+                padding: "8px 16px",
+                fontSize: "0.85rem",
+                fontWeight: sanitizerSubTab === "font_issues" ? 600 : 400,
+                borderBottom: sanitizerSubTab === "font_issues" ? "2px solid var(--accent-purple)" : "2px solid transparent",
+                marginBottom: "-2px",
+                backgroundColor: "transparent",
+                color: sanitizerSubTab === "font_issues" ? "var(--text-primary)" : "var(--text-secondary)",
+                border: "none",
+                cursor: "pointer",
+                transition: "all 0.15s ease",
+              }}
             >
-              {isDeleting ? "Deleting..." : `Delete Hidden (${selectedDeletePaths.size})`}
+              🔤 Font Issues {isScanningFontIssues ? "⌛" : `(${fontIssueItems.length})`}
             </button>
-          )}
+            <button
+              onClick={() => setSanitizerSubTab("hidden")}
+              style={{
+                padding: "8px 16px",
+                fontSize: "0.85rem",
+                fontWeight: sanitizerSubTab === "hidden" ? 600 : 400,
+                borderBottom: sanitizerSubTab === "hidden" ? "2px solid var(--accent-purple)" : "2px solid transparent",
+                marginBottom: "-2px",
+                backgroundColor: "transparent",
+                color: sanitizerSubTab === "hidden" ? "var(--text-primary)" : "var(--text-secondary)",
+                border: "none",
+                cursor: "pointer",
+                transition: "all 0.15s ease",
+              }}
+            >
+              👻 Hidden Files {isScanningHidden ? "⌛" : `(${hiddenItems.length})`}
+            </button>
+          </div>
+
+          {/* Issue Action Buttons Bar (Line 3) */}
+          <div style={{ display: "flex", gap: "8px", alignItems: "center", minHeight: "34px" }}>
+            {sanitizerSubTab === "files" && sanitizeItems.length > 0 && (
+              <button
+                className="btn btn-primary"
+                onClick={promptExecuteRename}
+                disabled={selectedRenamePaths.size === 0 || isRenaming || isScanningFilenames}
+                style={{ padding: "6px 14px", fontSize: "0.82rem" }}
+              >
+                {isRenaming ? "Renaming..." : `Sanitize Names (${selectedRenamePaths.size})`}
+              </button>
+            )}
+
+            {sanitizerSubTab === "metadata" && metadataItems.length > 0 && (
+              <button
+                className="btn btn-primary"
+                onClick={promptExecuteCleanMetadata}
+                disabled={selectedMetadataIndices.size === 0 || isCleaningMetadata || isScanningMetadata}
+                style={{ padding: "6px 14px", fontSize: "0.82rem" }}
+              >
+                {isCleaningMetadata ? "Cleaning..." : `Clean Tags (${selectedMetadataIndices.size})`}
+              </button>
+            )}
+
+            {sanitizerSubTab === "font_issues" && fontIssueItems.length > 0 && (
+              <>
+                <button
+                  className="btn btn-secondary"
+                  onClick={handleApplyUtf16Tags}
+                  disabled={selectedFontIssuePaths.size === 0 || isApplyingOption1 || isScanningFontIssues}
+                  style={{ padding: "6px 12px", fontSize: "0.82rem" }}
+                  title="Preserves real Bangla text in Title & Artist tags, but forces ID3v2.3 UTF-16 LE encoding with BOM for car displays"
+                >
+                  {isApplyingOption1 ? "Applying..." : "Rewrite ID3v2.3 UTF-16 Tags"}
+                </button>
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => handleApplyTransliterate("tags")}
+                  disabled={selectedFontIssuePaths.size === 0 || isApplyingOption2 || isScanningFontIssues}
+                  style={{ padding: "6px 12px", fontSize: "0.82rem" }}
+                  title="Transliterates Bangla script in Title & Artist metadata tags to clean phonetic Romanized Banglish (ASCII), keeping files on disk unchanged"
+                >
+                  {isApplyingOption2 ? "Applying..." : "Transliterate Tags to Banglish"}
+                </button>
+                <button
+                  className="btn btn-primary"
+                  onClick={() => handleApplyTransliterate("filenames")}
+                  disabled={selectedFontIssuePaths.size === 0 || isApplyingOption2 || isScanningFontIssues}
+                  style={{ padding: "6px 12px", fontSize: "0.82rem" }}
+                  title="Transliterates Bangla script in physical file names on disk to clean phonetic Romanized Banglish (ASCII)"
+                >
+                  {isApplyingOption2 ? "Applying..." : "Transliterate Filenames to Banglish"}
+                </button>
+              </>
+            )}
+
+            {sanitizerSubTab === "hidden" && hiddenItems.length > 0 && (
+              <button
+                className="btn btn-danger"
+                onClick={promptExecuteDelete}
+                disabled={selectedDeletePaths.size === 0 || isDeleting || isScanningHidden}
+                style={{ padding: "6px 14px", fontSize: "0.82rem" }}
+              >
+                {isDeleting ? "Deleting..." : `Delete Hidden (${selectedDeletePaths.size})`}
+              </button>
+            )}
           </div>
 
           {/* Sub-Tab Panels */}
@@ -635,6 +827,68 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
                 </div>
               ) : (
                 <p className="no-data">All audio tags and descriptions are clean! No changes needed.</p>
+              )}
+            </div>
+          )}
+
+          {sanitizerSubTab === "font_issues" && (
+            <div>
+              {isScanningFontIssues ? (
+                <div className="no-data">Scanning for font & Unicode script issues...</div>
+              ) : fontIssueItems.length > 0 ? (
+                <div className="table-container">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th style={{ width: "40px", textAlign: "center" }}>
+                          <input
+                            type="checkbox"
+                            checked={selectedFontIssuePaths.size === fontIssueItems.length}
+                            onChange={handleToggleAllFontIssues}
+                          />
+                        </th>
+                        <th style={{ width: "260px" }}>File Path / Location</th>
+                        <th style={{ width: "160px" }}>Detected Issue</th>
+                        <th style={{ width: "220px" }}>ID3v2.3 UTF-16 Target</th>
+                        <th>Banglish Transliteration Preview</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {fontIssueItems.map((item, idx) => (
+                        <tr key={idx}>
+                          <td style={{ textAlign: "center" }}>
+                            <input
+                              type="checkbox"
+                              checked={selectedFontIssuePaths.has(item.file_path)}
+                              onChange={() => handleToggleFontIssueSelect(item.file_path)}
+                            />
+                          </td>
+                          <td>
+                            <div style={{ fontWeight: 600, color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={item.relative_path}>
+                              {item.relative_path.split("/").pop()}
+                            </div>
+                            <div className="text-secondary" style={{ fontSize: "0.75rem", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={item.file_path}>
+                              {item.relative_path}
+                            </div>
+                          </td>
+                          <td>
+                            <span className="badge" style={{ backgroundColor: "rgba(234, 179, 8, 0.15)", color: "var(--warning)", border: "1px solid var(--warning)", padding: "2px 6px", borderRadius: "4px", fontSize: "0.72rem" }}>
+                              {item.detected_issue}
+                            </span>
+                          </td>
+                          <td style={{ fontSize: "0.8rem", color: "var(--text-secondary)" }}>
+                            {item.option1_preview}
+                          </td>
+                          <td style={{ color: "var(--success)", fontWeight: 600, fontFamily: "var(--font-mono)", fontSize: "0.82rem" }}>
+                            {item.option2_preview}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="no-data">No font or character encoding issues detected! No changes needed.</p>
               )}
             </div>
           )}

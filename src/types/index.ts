@@ -62,12 +62,30 @@ export interface ExportPlaylistItem {
   track_count: number;
 }
 
+export interface ExportWarningItem {
+  scope: "directory" | "track_group" | "system";
+  target_path: string;
+  warning_type: string;
+  message: string;
+  affected_count: number;
+  sample_files?: string[];
+}
+
+export interface FontIssueItem {
+  file_path: string;
+  relative_path: string;
+  detected_issue: string;
+  option1_preview: string;
+  option2_preview: string;
+}
+
 export interface ExportDiffReport {
   destination: string;
   new_files: ExportTrackItem[];
   up_to_date_files: ExportTrackItem[];
   orphan_files: ExportOrphanItem[];
   playlists: ExportPlaylistItem[];
+  warnings?: ExportWarningItem[];
   total_bytes_to_copy: number;
   total_bytes_up_to_date: number;
   total_bytes_orphans: number;
