@@ -42,6 +42,47 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
   const [jobs, setJobs] = useState<DownloadJob[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
 
+  // Reset Archive State
+  const [isResettingArchive, setIsResettingArchive] = useState<boolean>(false);
+
+  const handleClearArchiveFile = async () => {
+    if (!confirm("Are you sure you want to clear/reset the entire archive.txt file? All recorded download history in this folder will be erased.")) {
+      return;
+    }
+    setIsResettingArchive(true);
+    try {
+      await invoke("reset_archive_file", {
+        archivePath,
+        outputDir,
+      });
+      alert("Archive file cleared successfully!");
+    } catch (e) {
+      alert("Error clearing archive file: " + e);
+    } finally {
+      setIsResettingArchive(false);
+    }
+  };
+
+  const handleResetPlaylistIds = async () => {
+    if (!urlInput.trim()) {
+      alert("Please enter a YouTube playlist URL to reset its IDs from the archive.");
+      return;
+    }
+    setIsResettingArchive(true);
+    try {
+      const removedCount = await invoke<number>("reset_playlist_archive_ids", {
+        url: urlInput.trim(),
+        archivePath,
+        outputDir,
+      });
+      alert(`Successfully removed ${removedCount} video ID(s) for this playlist from archive.txt!`);
+    } catch (e) {
+      alert("Error resetting playlist IDs from archive: " + e);
+    } finally {
+      setIsResettingArchive(false);
+    }
+  };
+
   const selectedJob = jobs.find((j) => j.id === selectedJobId) || jobs[jobs.length - 1] || null;
   const logBoxRef = useRef<HTMLDivElement | null>(null);
 
@@ -324,13 +365,33 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
           </label>
 
           {useArchive && (
-            <input
-              type="text"
-              placeholder="Custom archive path (optional)..."
-              value={archivePath}
-              onChange={(e) => setArchivePath(e.target.value)}
-              style={{ width: "220px", padding: "3px 8px", fontSize: "0.78rem" }}
-            />
+            <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+              <input
+                type="text"
+                placeholder="Custom archive path (optional)..."
+                value={archivePath}
+                onChange={(e) => setArchivePath(e.target.value)}
+                style={{ width: "200px", padding: "3px 8px", fontSize: "0.78rem" }}
+              />
+              <button
+                className="btn btn-secondary"
+                onClick={handleResetPlaylistIds}
+                disabled={isResettingArchive || !urlInput.trim()}
+                style={{ padding: "3px 8px", fontSize: "0.76rem" }}
+                title="Fetches playlist video IDs and removes them from archive.txt so this playlist can be re-downloaded"
+              >
+                {isResettingArchive ? "Resetting..." : "🔄 Reset Playlist IDs"}
+              </button>
+              <button
+                className="btn btn-secondary"
+                onClick={handleClearArchiveFile}
+                disabled={isResettingArchive}
+                style={{ padding: "3px 8px", fontSize: "0.76rem" }}
+                title="Clears archive.txt completely"
+              >
+                🗑️ Clear Archive
+              </button>
+            </div>
           )}
 
           <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.85rem", cursor: "pointer" }}>

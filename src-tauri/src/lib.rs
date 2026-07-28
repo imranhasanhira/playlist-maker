@@ -440,6 +440,8 @@ pub fn run() {
             watcher::stop_fs_watcher,
             downloader::start_download_job,
             downloader::cancel_download_job,
+            downloader::reset_archive_file,
+            downloader::reset_playlist_archive_ids,
             font_issues::scan_font_issues,
             font_issues::apply_font_issue_option1,
             font_issues::apply_font_issue_option2,

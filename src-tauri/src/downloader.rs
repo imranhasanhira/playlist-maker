@@ -253,3 +253,95 @@ pub async fn cancel_download_job(job_id: String) -> Result<(), String> {
         Ok(())
     }
 }
+
+fn resolve_archive_path(archive_path: &str, output_dir: &str) -> String {
+    if archive_path.trim().is_empty() {
+        format!("{}/archive.txt", output_dir)
+    } else {
+        archive_path.to_string()
+    }
+}
+
+#[tauri::command]
+pub async fn reset_archive_file(archive_path: String, output_dir: String) -> Result<(), String> {
+    let resolved = resolve_archive_path(&archive_path, &output_dir);
+    let path = std::path::Path::new(&resolved);
+    if path.exists() {
+        std::fs::write(path, "")
+            .map_err(|e| format!("Failed to clear archive file: {}", e))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn reset_playlist_archive_ids(
+    url: String,
+    archive_path: String,
+    output_dir: String,
+) -> Result<usize, String> {
+    if url.trim().is_empty() {
+        return Err("Please enter a valid YouTube playlist URL".to_string());
+    }
+
+    let resolved = resolve_archive_path(&archive_path, &output_dir);
+    let archive_file_path = std::path::Path::new(&resolved);
+
+    if !archive_file_path.exists() {
+        return Err(format!("Archive file not found at: {}", resolved));
+    }
+
+    // 1. Fetch video IDs from playlist using yt-dlp --flat-playlist --print id <url>
+    let output = Command::new("yt-dlp")
+        .args(&["--flat-playlist", "--print", "id", &url])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to execute yt-dlp to query playlist video IDs: {}", e))?;
+
+    if !output.status.success() {
+        let err_msg = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("yt-dlp error fetching playlist IDs: {}", err_msg));
+    }
+
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+    let video_ids: std::collections::HashSet<String> = stdout_str
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect();
+
+    if video_ids.is_empty() {
+        return Err("No video IDs found for the specified playlist URL".to_string());
+    }
+
+    // 2. Filter archive file content
+    let content = std::fs::read_to_string(archive_file_path)
+        .map_err(|e| format!("Failed to read archive file: {}", e))?;
+
+    let mut remaining_lines = Vec::new();
+    let mut removed_count = 0;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        let is_match = video_ids.iter().any(|id| {
+            trimmed.ends_with(id) || trimmed.contains(id)
+        });
+
+        if is_match {
+            removed_count += 1;
+        } else {
+            remaining_lines.push(line);
+        }
+    }
+
+    // 3. Write back filtered lines
+    let new_content = if remaining_lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", remaining_lines.join("\n"))
+    };
+
+    std::fs::write(archive_file_path, new_content)
+        .map_err(|e| format!("Failed to update archive file: {}", e))?;
+
+    Ok(removed_count)
+}
