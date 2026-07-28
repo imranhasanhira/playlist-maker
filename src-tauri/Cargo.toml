@@ -33,4 +33,5 @@ tokio = { version = "1", features = ["full"] }
 rfd = "0.14"
 base64 = "0.22"
 notify = "6.1.1"
+any_ascii = "0.3"
 

@@ -41,12 +41,23 @@ pub struct ExportPlaylistItem {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ExportWarningItem {
+    pub scope: String,
+    pub target_path: String,
+    pub warning_type: String,
+    pub message: String,
+    pub affected_count: usize,
+    pub sample_files: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ExportDiffReport {
     pub destination: String,
     pub new_files: Vec<ExportTrackItem>,
     pub up_to_date_files: Vec<ExportTrackItem>,
     pub orphan_files: Vec<ExportOrphanItem>,
     pub playlists: Vec<ExportPlaylistItem>,
+    pub warnings: Vec<ExportWarningItem>,
     pub total_bytes_to_copy: u64,
     pub total_bytes_up_to_date: u64,
     pub total_bytes_orphans: u64,
@@ -246,6 +257,95 @@ fn is_os_system_junk(filename: &str) -> bool {
         }
     }
 
+    let regex_pua = regex::Regex::new(r"[\uF000-\uFFFF]").unwrap_or_else(|_| regex::Regex::new(r"$^").unwrap());
+    let regex_bangla = regex::Regex::new(r"[\u0980-\u09FF]").unwrap_or_else(|_| regex::Regex::new(r"$^").unwrap());
+
+    let mut dir_invalid_symbols: HashMap<String, (usize, Vec<String>)> = HashMap::new();
+    let mut group_warnings: HashMap<(String, String), Vec<String>> = HashMap::new();
+
+    for (rel_path, (_src_abs_path, _track)) in &required_tracks {
+        let dest_full_path = dest_music_dir.join(rel_path);
+        let dest_str = dest_full_path.to_string_lossy().to_string();
+
+        let parent_dir = Path::new(rel_path)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Root".to_string());
+
+        if regex_pua.is_match(&parent_dir) {
+            let entry = dir_invalid_symbols.entry(parent_dir.clone()).or_insert((0, Vec::new()));
+            entry.0 += 1;
+            if entry.1.len() < 5 {
+                entry.1.push(rel_path.clone());
+            }
+        }
+
+        if dest_str.len() > 255 {
+            let key = (parent_dir.clone(), "path_too_long".to_string());
+            group_warnings.entry(key).or_default().push(rel_path.clone());
+        }
+
+        if regex_bangla.is_match(rel_path) {
+            let key = (parent_dir.clone(), "non_ascii".to_string());
+            group_warnings.entry(key).or_default().push(rel_path.clone());
+        }
+    }
+
+    let mut warnings: Vec<ExportWarningItem> = Vec::new();
+
+    for (dir_path, (count, samples)) in dir_invalid_symbols {
+        warnings.push(ExportWarningItem {
+            scope: "directory".to_string(),
+            target_path: dir_path,
+            warning_type: "invalid_symbol".to_string(),
+            message: "Folder path contains Private Use Area symbol ('') which causes FAT32 directory errors on car media players".to_string(),
+            affected_count: count,
+            sample_files: samples,
+        });
+    }
+
+    for ((dir_path, w_type), tracks) in group_warnings {
+        let msg = if w_type == "path_too_long" {
+            "Path lengths in this folder exceed 255 characters (FAT32 limit for car players)".to_string()
+        } else {
+            "Filenames in this folder contain Bangla script. Ensure ID3v2.3 UTF-16 tags are written so BMW iDrive can render text".to_string()
+        };
+
+        warnings.push(ExportWarningItem {
+            scope: "track_group".to_string(),
+            target_path: dir_path,
+            warning_type: w_type,
+            message: msg,
+            affected_count: tracks.len(),
+            sample_files: tracks.into_iter().take(10).collect(),
+        });
+    }
+
+    if dest_path.exists() {
+        let mut apple_double_count = 0;
+        let mut apple_double_samples = Vec::new();
+        for entry in WalkDir::new(dest_path).into_iter().filter_map(|e| e.ok()) {
+            let filename = entry.file_name().to_string_lossy();
+            if filename.starts_with("._") {
+                apple_double_count += 1;
+                if apple_double_samples.len() < 5 {
+                    apple_double_samples.push(filename.to_string());
+                }
+            }
+        }
+
+        if apple_double_count > 0 {
+            warnings.push(ExportWarningItem {
+                scope: "system".to_string(),
+                target_path: destination.to_string(),
+                warning_type: "apple_double".to_string(),
+                message: "Found hidden macOS resource fork files ('._*') in destination which crash car media indexers".to_string(),
+                affected_count: apple_double_count,
+                sample_files: apple_double_samples,
+            });
+        }
+    }
+
     new_files.sort_by(|a, b| a.relative_path.to_lowercase().cmp(&b.relative_path.to_lowercase()));
     up_to_date_files.sort_by(|a, b| a.relative_path.to_lowercase().cmp(&b.relative_path.to_lowercase()));
     orphan_files.sort_by(|a, b| a.relative_path.to_lowercase().cmp(&b.relative_path.to_lowercase()));
@@ -257,6 +357,7 @@ fn is_os_system_junk(filename: &str) -> bool {
         up_to_date_files,
         orphan_files,
         playlists: playlist_items,
+        warnings,
         total_bytes_to_copy,
         total_bytes_up_to_date,
         total_bytes_orphans,

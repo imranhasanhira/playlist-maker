@@ -8,6 +8,7 @@ mod export;
 mod watcher;
 pub mod utils;
 mod downloader;
+mod font_issues;
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -439,6 +440,9 @@ pub fn run() {
             watcher::stop_fs_watcher,
             downloader::start_download_job,
             downloader::cancel_download_job,
+            font_issues::scan_font_issues,
+            font_issues::apply_font_issue_option1,
+            font_issues::apply_font_issue_option2,
             utils::check_system_binaries
         ])
         .run(tauri::generate_context!())

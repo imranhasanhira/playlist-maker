@@ -53,6 +53,11 @@ pub fn sanitize_text(original_text: &str, strip_phrases: &[String]) -> String {
         .replace('┃', "|")
         .replace('║', "|");
 
+    // 2. Remove private use area / invalid control characters (e.g. \u{F027} )
+    if let Ok(re) = Regex::new(r"[\uF000-\uFFFF]+") {
+        new_text = re.replace_all(&new_text, "").to_string();
+    }
+
     // Remove keywords case-insensitively (supporting both literal strings and regexes like \d+)
     for part in strip_phrases {
         let trimmed = part.trim();
@@ -76,11 +81,6 @@ pub fn sanitize_text(original_text: &str, strip_phrases: &[String]) -> String {
         }
     }
 
-    // Run regex replacements
-    if let Ok(re) = Regex::new(r"I+") {
-        new_text = re.replace_all(&new_text, "I").to_string();
-    }
-
     // Strip hashtags (e.g. #bangla, #song, #shorts, #trending)
     if let Ok(re) = RegexBuilder::new(r"#\w+")
         .case_insensitive(true)
@@ -89,7 +89,7 @@ pub fn sanitize_text(original_text: &str, strip_phrases: &[String]) -> String {
         new_text = re.replace_all(&new_text, "").to_string();
     }
 
-    if let Ok(re) = RegexBuilder::new(r"[(|｜\[\{]+\s*(HQ|HD|Official\s*(Audio|Video|Music\s*Video|Track)?|Audio|Video|Lyrics?|Lyrical)\s*[)|｜\]\}]+")
+    if let Ok(re) = RegexBuilder::new(r"[(|｜\[\{]+\s*(HQ|HD|Official\s*(Audio|Video|Music\s*Video|Track)?|Audio|Video|Lyrics?|Lyrical|Sound\s*Track|Soundtrack)\s*[)|｜\]\}]+")
         .case_insensitive(true)
         .build()
     {

@@ -15,7 +15,7 @@ export type { MainConfig };
 
 const DEFAULT_STRIP_PHRASES = [
   "Coke Studio Season \\d+", "Coke Studio | Season \\d+ |", "Shironamhin |", "Shironamhin -", "Shironamhin",
-  "Official Audio", "Official Video", "Official Track", "Official Music Video",
+  "Official Audio", "Official Video", "Official Track", "Official Music Video", "Sound Track", "Soundtrack", "Audio Track",
   "music.com.bd", "SVF", "Tseries",
   "Full Video", "Full audio", "Full HD", "Full Song",
   "New Video", "New Song", "New audio",
@@ -53,8 +53,25 @@ function App() {
   const [exportDiffReport, setExportDiffReport] = useState<ExportDiffReport | null>(null);
   const [isExportDiffStale, setIsExportDiffStale] = useState<boolean>(false);
 
-  // In-memory sanitizer scan state across tab switches
-  const [sanitizerScanFolder, setSanitizerScanFolder] = useState<string>("");
+  // In-memory sanitizer scan state across tab switches & app restarts
+  const [sanitizerScanFolder, setSanitizerScanFolder] = useState<string>(() => {
+    try {
+      return localStorage.getItem("sanitizer_scan_folder") || "";
+    } catch (e) {
+      return "";
+    }
+  });
+
+  useEffect(() => {
+    try {
+      if (sanitizerScanFolder) {
+        localStorage.setItem("sanitizer_scan_folder", sanitizerScanFolder);
+      } else {
+        localStorage.removeItem("sanitizer_scan_folder");
+      }
+    } catch (e) {}
+  }, [sanitizerScanFolder]);
+
   const [sanitizerItems, setSanitizerItems] = useState<any[]>([]);
   const [sanitizerHiddenItems, setSanitizerHiddenItems] = useState<any[]>([]);
   const [sanitizerMetadataItems, setSanitizerMetadataItems] = useState<any[]>([]);

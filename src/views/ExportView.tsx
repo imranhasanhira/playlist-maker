@@ -50,10 +50,11 @@ export const ExportView: React.FC<ExportViewProps> = ({
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [exportLogs, setExportLogs] = useState<string[]>([]);
   const [showLogsModal, setShowLogsModal] = useState<boolean>(false);
-  const [activeTab, setActiveTab] = useState<"new" | "uptodate" | "orphans">("new");
+  const [activeTab, setActiveTab] = useState<"new" | "uptodate" | "orphans" | "warnings">("new");
   const [searchQuery, setSearchQuery] = useState<string>("");
   const debouncedSearchQuery = useDebounce(searchQuery, 250);
   const [visibleLimit, setVisibleLimit] = useState<number>(100);
+  const [expandedWarningIndex, setExpandedWarningIndex] = useState<number | null>(null);
 
   useEffect(() => {
     setVisibleLimit(100);
@@ -67,14 +68,16 @@ export const ExportView: React.FC<ExportViewProps> = ({
   };
 
   const filteredItems = useMemo(() => {
-    if (!diffReport) return { newFiles: [], upToDateFiles: [], orphanFiles: [] };
+    if (!diffReport) return { newFiles: [], upToDateFiles: [], orphanFiles: [], warningItems: [] };
     const q = debouncedSearchQuery.trim().toLowerCase();
+    const warnings = diffReport.warnings || [];
     
     if (!q) {
       return {
         newFiles: diffReport.new_files,
         upToDateFiles: diffReport.up_to_date_files,
         orphanFiles: diffReport.orphan_files,
+        warningItems: warnings,
       };
     }
 
@@ -87,6 +90,9 @@ export const ExportView: React.FC<ExportViewProps> = ({
       ),
       orphanFiles: diffReport.orphan_files.filter(
         (item) => item.relative_path.toLowerCase().includes(q)
+      ),
+      warningItems: warnings.filter(
+        (item) => item.target_path.toLowerCase().includes(q) || item.message.toLowerCase().includes(q)
       ),
     };
   }, [diffReport, debouncedSearchQuery]);
@@ -553,6 +559,18 @@ export const ExportView: React.FC<ExportViewProps> = ({
               >
                 🔴 Orphan Files ({filteredItems.orphanFiles.length})
               </button>
+              <button
+                className={`btn ${activeTab === "warnings" ? "btn-primary" : "btn-secondary"}`}
+                onClick={() => setActiveTab("warnings")}
+                style={{
+                  padding: "4px 12px",
+                  fontSize: "0.8rem",
+                  borderColor: filteredItems.warningItems.length > 0 ? "var(--warning)" : undefined,
+                  color: filteredItems.warningItems.length > 0 && activeTab !== "warnings" ? "var(--warning)" : undefined,
+                }}
+              >
+                ⚠️ Warnings ({filteredItems.warningItems.length})
+              </button>
 
               {/* Action Panel right of Orphan Files tab */}
               {selectedItemPaths.size > 0 && (
@@ -813,6 +831,92 @@ export const ExportView: React.FC<ExportViewProps> = ({
               ) : (
                 <div className="no-data">
                   {searchQuery ? "No matching files found." : "No orphan files found in target destination!"}
+                </div>
+              )
+            )}
+
+            {activeTab === "warnings" && (
+              filteredItems.warningItems.length > 0 ? (
+                <>
+                  <table style={{ tableLayout: "fixed", width: "100%" }}>
+                    <thead>
+                      <tr>
+                        <th style={{ width: "120px" }}>Scope</th>
+                        <th style={{ width: "260px" }}>Target Folder / Directory</th>
+                        <th style={{ width: "90px", textAlign: "center" }}>Affected</th>
+                        <th>Compatibility Issue & Details</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredItems.warningItems.slice(0, visibleLimit).map((warn, idx) => {
+                        const isExpanded = expandedWarningIndex === idx;
+                        return (
+                          <React.Fragment key={idx}>
+                            <tr>
+                              <td>
+                                <span className="badge" style={{
+                                  backgroundColor: warn.scope === "directory" ? "rgba(239, 68, 68, 0.15)" : warn.scope === "system" ? "rgba(234, 179, 8, 0.15)" : "var(--bg-tertiary)",
+                                  color: warn.scope === "directory" ? "var(--danger)" : warn.scope === "system" ? "var(--warning)" : "var(--text-primary)",
+                                  border: "1px solid var(--border-color)",
+                                  padding: "2px 6px",
+                                  borderRadius: "4px",
+                                  fontSize: "0.72rem",
+                                  fontWeight: 600,
+                                }}>
+                                  {warn.warning_type === "invalid_symbol" && "🚨 "}
+                                  {warn.warning_type === "path_too_long" && "📏 "}
+                                  {warn.warning_type === "non_ascii" && "🇧🇩 "}
+                                  {warn.warning_type === "apple_double" && "🍏 "}
+                                  {warn.scope.toUpperCase()}
+                                </span>
+                              </td>
+                              <td style={{ fontFamily: "var(--font-mono)", fontSize: "0.8rem", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={warn.target_path}>
+                                {warn.target_path}
+                              </td>
+                              <td style={{ textAlign: "center", fontFamily: "var(--font-mono)", fontSize: "0.8rem", fontWeight: 600 }}>
+                                {warn.affected_count} {warn.affected_count === 1 ? "item" : "items"}
+                              </td>
+                              <td style={{ fontSize: "0.82rem" }}>
+                                <div style={{ color: "var(--warning)", fontWeight: 500 }}>{warn.message}</div>
+                                {warn.sample_files && warn.sample_files.length > 0 && (
+                                  <button
+                                    className="btn btn-secondary"
+                                    onClick={() => setExpandedWarningIndex(isExpanded ? null : idx)}
+                                    style={{ marginTop: "4px", padding: "2px 8px", fontSize: "0.72rem" }}
+                                  >
+                                    {isExpanded ? "▾ Hide sample files" : `▸ Show sample files (${warn.sample_files.length})`}
+                                  </button>
+                                )}
+                              </td>
+                            </tr>
+                            {isExpanded && warn.sample_files && warn.sample_files.length > 0 && (
+                              <tr style={{ backgroundColor: "var(--bg-tertiary)" }}>
+                                <td colSpan={4} style={{ padding: "8px 16px" }}>
+                                  <div style={{ fontSize: "0.76rem", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "4px" }}>
+                                    Sample Affected Track Paths ({warn.sample_files.length}):
+                                  </div>
+                                  <ul style={{ margin: 0, paddingLeft: "18px", fontSize: "0.76rem", fontFamily: "var(--font-mono)", color: "var(--text-primary)" }}>
+                                    {warn.sample_files.map((file, fIdx) => (
+                                      <li key={fIdx} style={{ marginBottom: "2px" }}>{file}</li>
+                                    ))}
+                                  </ul>
+                                </td>
+                              </tr>
+                            )}
+                          </React.Fragment>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                  {filteredItems.warningItems.length > visibleLimit && (
+                    <div className="text-secondary" style={{ textAlign: "center", padding: "8px", fontSize: "0.75rem", fontFamily: "var(--font-mono)" }}>
+                      Showing {visibleLimit} of {filteredItems.warningItems.length} warning groups (Scroll down to load more)
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="no-data">
+                  {searchQuery ? "No matching warnings found." : "No compatibility warnings detected for this export configuration."}
                 </div>
               )
             )}
