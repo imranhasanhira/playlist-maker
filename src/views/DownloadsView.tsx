@@ -17,26 +17,58 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
       .then(setBinaries)
       .catch((e) => console.error("Error checking system binaries:", e));
   }, []);
-  // Input Configuration State
-  const [urlInput, setUrlInput] = useState<string>("");
-  const [format, setFormat] = useState<string>("m4a/mp3");
-  const [useArchive, setUseArchive] = useState<boolean>(true);
-  const [archivePath, setArchivePath] = useState<string>("");
-  const [ignoreErrors, setIgnoreErrors] = useState<boolean>(true);
-  
-  // Default destination
+  // Default destination calculation
   const defaultDest = config?.workspaceDir 
-    ? `${config.workspaceDir.replace(/\\/g, "/")}/Downloads` 
+    ? `${config.workspaceDir.replace(/\\/g, "/")}/Youtube` 
     : config?.sourceDir 
-      ? `${config.sourceDir.replace(/\\/g, "/")}/Downloads`
+      ? `${config.sourceDir.replace(/\\/g, "/")}/Youtube`
       : "";
-  const [outputDir, setOutputDir] = useState<string>(defaultDest);
+
+  // Input Configuration State (Persisted in localStorage across app restarts)
+  const [urlInput, setUrlInput] = useState<string>(() => {
+    try { return localStorage.getItem("dl_url_input") || ""; } catch (e) { return ""; }
+  });
+  const [format, setFormat] = useState<string>(() => {
+    try { return localStorage.getItem("dl_format") || "m4a/mp3"; } catch (e) { return "m4a/mp3"; }
+  });
+  const [useArchive, setUseArchive] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem("dl_use_archive");
+      return saved !== null ? JSON.parse(saved) : true;
+    } catch (e) { return true; }
+  });
+  const [archivePath, setArchivePath] = useState<string>(() => {
+    try { return localStorage.getItem("dl_archive_path") || ""; } catch (e) { return ""; }
+  });
+  const [ignoreErrors, setIgnoreErrors] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem("dl_ignore_errors");
+      return saved !== null ? JSON.parse(saved) : true;
+    } catch (e) { return true; }
+  });
+  const [outputDir, setOutputDir] = useState<string>(() => {
+    try { return localStorage.getItem("dl_output_dir") || defaultDest; } catch (e) { return defaultDest; }
+  });
 
   useEffect(() => {
     if (!outputDir && defaultDest) {
       setOutputDir(defaultDest);
     }
   }, [config, defaultDest]);
+
+  // Sync state changes to localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem("dl_url_input", urlInput);
+      localStorage.setItem("dl_format", format);
+      localStorage.setItem("dl_use_archive", JSON.stringify(useArchive));
+      localStorage.setItem("dl_archive_path", archivePath);
+      localStorage.setItem("dl_ignore_errors", JSON.stringify(ignoreErrors));
+      if (outputDir) {
+        localStorage.setItem("dl_output_dir", outputDir);
+      }
+    } catch (e) {}
+  }, [urlInput, format, useArchive, archivePath, ignoreErrors, outputDir]);
 
   // Jobs & Selection State
   const [jobs, setJobs] = useState<DownloadJob[]>([]);
@@ -325,7 +357,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
                 type="text"
                 value={outputDir}
                 onChange={(e) => setOutputDir(e.target.value)}
-                placeholder="workspace/Downloads/"
+                placeholder="workspace/Youtube/"
               />
               <button className="btn btn-secondary" onClick={handlePickDirectory}>
                 Folder
