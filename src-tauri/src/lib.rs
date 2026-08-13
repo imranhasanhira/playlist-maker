@@ -9,13 +9,17 @@ mod watcher;
 pub mod utils;
 mod downloader;
 mod font_issues;
+mod download_store;
 
 use std::collections::HashSet;
 use std::path::Path;
-use tauri::Emitter;
+use std::sync::Mutex;
+use tauri::{Emitter, Manager};
+
 
 #[tauri::command]
 async fn load_workspace(configPath: String) -> Result<playlist::MainConfig, String> {
+
     let path = Path::new(&configPath);
     let config = playlist::read_config_file(path)?;
     Ok(playlist::make_paths_absolute(config, path))
@@ -406,6 +410,11 @@ async fn preview_directory_tracks(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            let conn = download_store::init_db(app.handle())?;
+            app.manage(download_store::DbState(Mutex::new(conn)));
+            Ok(())
+        })
         .manage(watcher::WatcherState::default())
         .invoke_handler(tauri::generate_handler![
             load_workspace,
@@ -442,6 +451,15 @@ pub fn run() {
             downloader::cancel_download_job,
             downloader::reset_archive_file,
             downloader::reset_playlist_archive_ids,
+            downloader::dl_fetch_playlist_metadata,
+            downloader::dl_count_songs_on_disk,
+            downloader::dl_get_delete_files_report,
+            downloader::dl_execute_delete_files,
+            download_store::dl_store_get_all_entries,
+            download_store::dl_store_save_entry,
+            download_store::dl_store_delete_entry,
+            download_store::dl_store_get_global_settings,
+            download_store::dl_store_save_global_settings,
             font_issues::scan_font_issues,
             font_issues::apply_font_issue_option1,
             font_issues::apply_font_issue_option2,
@@ -450,3 +468,4 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+

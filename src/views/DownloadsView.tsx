@@ -1,8 +1,26 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
+
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { MainConfig, DownloadJob, DownloadLogPayload, DownloadProgressPayload, SystemBinariesStatus } from "../types";
-import { ProgressBar } from "../components/common/ProgressBar";
+import {
+  MainConfig,
+  DownloadEntry,
+  DownloadGlobalSettings,
+  DownloadJob,
+  DownloadLogPayload,
+  DownloadProgressPayload,
+  SystemBinariesStatus,
+  PlaylistMetadata,
+} from "../types";
+
+
+import { EntryCard } from "../components/downloads/EntryCard";
+import { LabelFilter } from "../components/downloads/LabelFilter";
+import { EntryDetail } from "../components/downloads/EntryDetail";
+import { JobConsole } from "../components/downloads/JobConsole";
+import { AddEntryModal } from "../components/downloads/AddEntryModal";
+import { GlobalSettingsPanel } from "../components/downloads/GlobalSettingsPanel";
+import { ConfirmModal } from "../components/common/ConfirmModal";
 
 type DownloadsViewProps = {
   config: MainConfig | null;
@@ -17,113 +35,115 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
       .then(setBinaries)
       .catch((e) => console.error("Error checking system binaries:", e));
   }, []);
-  // Default destination calculation
-  const defaultDest = config?.workspaceDir 
-    ? `${config.workspaceDir.replace(/\\/g, "/")}/Youtube` 
-    : config?.sourceDir 
-      ? `${config.sourceDir.replace(/\\/g, "/")}/Youtube`
-      : "";
 
-  // Input Configuration State (Persisted in localStorage across app restarts)
-  const [urlInput, setUrlInput] = useState<string>(() => {
-    try { return localStorage.getItem("dl_url_input") || ""; } catch (e) { return ""; }
-  });
-  const [format, setFormat] = useState<string>(() => {
-    try { return localStorage.getItem("dl_format") || "m4a/mp3"; } catch (e) { return "m4a/mp3"; }
-  });
-  const [useArchive, setUseArchive] = useState<boolean>(() => {
-    try {
-      const saved = localStorage.getItem("dl_use_archive");
-      return saved !== null ? JSON.parse(saved) : true;
-    } catch (e) { return true; }
-  });
-  const [archivePath, setArchivePath] = useState<string>(() => {
-    try { return localStorage.getItem("dl_archive_path") || ""; } catch (e) { return ""; }
-  });
-  const [ignoreErrors, setIgnoreErrors] = useState<boolean>(() => {
-    try {
-      const saved = localStorage.getItem("dl_ignore_errors");
-      return saved !== null ? JSON.parse(saved) : true;
-    } catch (e) { return true; }
-  });
-  const [outputDir, setOutputDir] = useState<string>(() => {
-    try { return localStorage.getItem("dl_output_dir") || defaultDest; } catch (e) { return defaultDest; }
-  });
+  // Default destination calculation from active workspace
+  const defaultDest = config?.workspaceDir
+    ? `${config.workspaceDir.replace(/\\/g, "/")}/Youtube`
+    : config?.sourceDir
+    ? `${config.sourceDir.replace(/\\/g, "/")}/Youtube`
+    : "";
 
-  useEffect(() => {
-    if (!outputDir && defaultDest) {
-      setOutputDir(defaultDest);
+  // Global Settings state
+  const [globalSettings, setGlobalSettings] = useState<DownloadGlobalSettings>({
+    default_output_dir: defaultDest,
+    default_audio_format: "m4a/mp3",
+    default_use_archive: true,
+    archive_path: "",
+    default_ignore_errors: true,
+    max_parallel_jobs: 2,
+  });
+  const [showGlobalSettings, setShowGlobalSettings] = useState(false);
+
+  // Entries State
+  const [entries, setEntries] = useState<DownloadEntry[]>([]);
+  const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null);
+  // Delete confirmation modal
+  const [deleteConfirmEntryId, setDeleteConfirmEntryId] = useState<string | null>(null);
+  const [isDeletingEntry, setIsDeletingEntry] = useState(false);
+
+  // Background Metadata Refreshing state per entry ID
+  const [refreshingEntryIds, setRefreshingEntryIds] = useState<string[]>([]);
+
+  // Sorting state for entries
+  type SortByOption = "name" | "created" | "updated";
+  type SortOrder = "asc" | "desc";
+  const [sortBy, setSortBy] = useState<SortByOption>("updated");
+  const [sortOrder, setSortOrder] = useState<SortOrder>("desc");
+
+
+  // Resizable panel width state (Persisted in localStorage)
+  const [leftWidth, setLeftWidth] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem("dl_left_panel_width");
+      return saved ? parseInt(saved, 10) : 420;
+    } catch (e) {
+      return 420;
     }
-  }, [config, defaultDest]);
+  });
 
-  // Sync state changes to localStorage
   useEffect(() => {
     try {
-      localStorage.setItem("dl_url_input", urlInput);
-      localStorage.setItem("dl_format", format);
-      localStorage.setItem("dl_use_archive", JSON.stringify(useArchive));
-      localStorage.setItem("dl_archive_path", archivePath);
-      localStorage.setItem("dl_ignore_errors", JSON.stringify(ignoreErrors));
-      if (outputDir) {
-        localStorage.setItem("dl_output_dir", outputDir);
-      }
+      localStorage.setItem("dl_left_panel_width", leftWidth.toString());
     } catch (e) {}
-  }, [urlInput, format, useArchive, archivePath, ignoreErrors, outputDir]);
+  }, [leftWidth]);
 
-  // Jobs & Selection State
+  const handleMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = leftWidth;
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const deltaX = moveEvent.clientX - startX;
+      const newWidth = startWidth + deltaX;
+      if (newWidth > 240 && newWidth < 800) {
+        setLeftWidth(newWidth);
+      }
+    };
+
+    const handleMouseUp = () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+  };
+
+  // Label Filtering State
+  const [selectedLabels, setSelectedLabels] = useState<string[]>([]);
+  const [filterMode, setFilterMode] = useState<"and" | "or">("or");
+
+  // Add Entry Modal State
+  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+
+  // Jobs & Execution State (Transient, keyed by jobId)
   const [jobs, setJobs] = useState<DownloadJob[]>([]);
-  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
 
-  // Reset Archive State
-  const [isResettingArchive, setIsResettingArchive] = useState<boolean>(false);
+  // Batch Queue Engine State
+  const [batchSummary, setBatchSummary] = useState<{ total: number; done: number; failed: number } | null>(null);
+  const [consoleTab, setConsoleTab] = useState<"logs" | "queue">("logs");
 
-  const handleClearArchiveFile = async () => {
-    if (!confirm("Are you sure you want to clear/reset the entire archive.txt file? All recorded download history in this folder will be erased.")) {
-      return;
-    }
-    setIsResettingArchive(true);
-    try {
-      await invoke("reset_archive_file", {
-        archivePath,
-        outputDir,
-      });
-      alert("Archive file cleared successfully!");
-    } catch (e) {
-      alert("Error clearing archive file: " + e);
-    } finally {
-      setIsResettingArchive(false);
-    }
-  };
-
-  const handleResetPlaylistIds = async () => {
-    if (!urlInput.trim()) {
-      alert("Please enter a YouTube playlist URL to reset its IDs from the archive.");
-      return;
-    }
-    setIsResettingArchive(true);
-    try {
-      const removedCount = await invoke<number>("reset_playlist_archive_ids", {
-        url: urlInput.trim(),
-        archivePath,
-        outputDir,
-      });
-      alert(`Successfully removed ${removedCount} video ID(s) for this playlist from archive.txt!`);
-    } catch (e) {
-      alert("Error resetting playlist IDs from archive: " + e);
-    } finally {
-      setIsResettingArchive(false);
-    }
-  };
-
-  const selectedJob = jobs.find((j) => j.id === selectedJobId) || jobs[jobs.length - 1] || null;
-  const logBoxRef = useRef<HTMLDivElement | null>(null);
-
-  // Scroll terminal logs to bottom automatically
+  // Load Global Settings & Entries from SQLite on mount
   useEffect(() => {
-    if (logBoxRef.current) {
-      logBoxRef.current.scrollTop = logBoxRef.current.scrollHeight;
-    }
-  }, [selectedJob?.logs]);
+    const loadStore = async () => {
+      try {
+        const settings = await invoke<DownloadGlobalSettings>("dl_store_get_global_settings");
+        if (!settings.default_output_dir && defaultDest) {
+          settings.default_output_dir = defaultDest;
+        }
+        setGlobalSettings(settings);
+
+        const loadedEntries = await invoke<DownloadEntry[]>("dl_store_get_all_entries");
+        setEntries(loadedEntries);
+        if (loadedEntries.length > 0 && !selectedEntryId) {
+          setSelectedEntryId(loadedEntries[0].id);
+        }
+      } catch (e) {
+        console.error("Error loading download store:", e);
+      }
+    };
+    loadStore();
+  }, []);
 
   // Listen to background Tauri IPC events from yt-dlp
   useEffect(() => {
@@ -136,10 +156,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
         setJobs((prevJobs) =>
           prevJobs.map((j) => {
             if (j.id === job_id) {
-              return {
-                ...j,
-                logs: [...j.logs, line],
-              };
+              return { ...j, logs: [...j.logs, line] };
             }
             return j;
           })
@@ -174,47 +191,276 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
     };
   }, []);
 
-  const handlePickDirectory = async () => {
-    try {
-      const selected = await invoke<string | null>("select_directory", {
-        title: "Select Output Destination Directory for Downloads",
-      });
-      if (selected) {
-        setOutputDir(selected);
+  // Extract all unique labels across entries
+  const allExistingLabels = useMemo(() => {
+    const set = new Set<string>();
+    entries.forEach((e) => {
+      if (e.labels) {
+        e.labels.split(",").forEach((l) => {
+          const trimmed = l.trim();
+          if (trimmed) set.add(trimmed);
+        });
       }
-    } catch (e) {
-      alert("Error selecting directory: " + e);
+    });
+    return Array.from(set);
+  }, [entries]);
+
+
+
+  // Filter and sort entries according to active label filter, mode, and sort option
+  const filteredEntries = useMemo(() => {
+    let list = entries;
+    if (selectedLabels.length > 0) {
+      list = entries.filter((e) => {
+        const entryLabels = e.labels
+          ? e.labels.split(",").map((l) => l.trim()).filter(Boolean)
+          : [];
+        if (filterMode === "and") {
+          return selectedLabels.every((sl) => entryLabels.includes(sl));
+        } else {
+          return selectedLabels.some((sl) => entryLabels.includes(sl));
+        }
+      });
+    }
+
+    return [...list].sort((a, b) => {
+      let result = 0;
+      if (sortBy === "name") {
+        const nameA = (a.name || a.playlist_title || a.url).toLowerCase();
+        const nameB = (b.name || b.playlist_title || b.url).toLowerCase();
+        result = nameA.localeCompare(nameB);
+      } else if (sortBy === "created") {
+        result = (a.created_at || 0) - (b.created_at || 0);
+      } else if (sortBy === "updated") {
+        result = (a.updated_at || 0) - (b.updated_at || 0);
+      }
+      return sortOrder === "asc" ? result : -result;
+    });
+  }, [entries, selectedLabels, filterMode, sortBy, sortOrder]);
+
+  const selectedEntry = entries.find((e) => e.id === selectedEntryId) || null;
+  const selectedEntryJob = useMemo(() => {
+    if (!selectedEntryId) return undefined;
+    return jobs.slice().reverse().find((j) => j.id.startsWith(`dl_${selectedEntryId}`));
+  }, [jobs, selectedEntryId]);
+
+  // Label filter handlers
+  const handleToggleLabel = (label: string, isMulti: boolean) => {
+    if (isMulti) {
+      setSelectedLabels((prev) =>
+        prev.includes(label) ? prev.filter((l) => l !== label) : [...prev, label]
+      );
+    } else {
+      setSelectedLabels((prev) =>
+        prev.length === 1 && prev[0] === label ? [] : [label]
+      );
     }
   };
 
-  const handleStartDownload = async () => {
-    if (!urlInput.trim()) {
-      alert("Please enter a valid playlist or media URL.");
-      return;
-    }
-    if (!outputDir.trim()) {
-      alert("Please specify an output destination folder.");
-      return;
-    }
+  const handleClearLabels = () => {
+    setSelectedLabels([]);
+  };
 
-    const jobId = `dl_${Date.now()}`;
+  // Global Settings Saver
+  const handleSaveGlobalSettings = async (updated: DownloadGlobalSettings) => {
+    try {
+      await invoke("dl_store_save_global_settings", { settings: updated });
+      setGlobalSettings(updated);
+    } catch (e) {
+      alert("Error saving global settings: " + e);
+    }
+  };
+
+  // Entry CRUD Operations
+  const handleSaveEntry = async (updated: DownloadEntry) => {
+    try {
+      await invoke("dl_store_save_entry", { entry: updated });
+      setEntries((prev) => prev.map((e) => (e.id === updated.id ? updated : e)));
+    } catch (e) {
+      alert("Error saving entry: " + e);
+    }
+  };
+
+  const handleDeleteEntry = (entryId: string) => {
+    setDeleteConfirmEntryId(entryId);
+  };
+
+  const handleConfirmDeleteEntry = async () => {
+    if (!deleteConfirmEntryId) return;
+    const entryId = deleteConfirmEntryId;
+    setIsDeletingEntry(true);
+    try {
+      await invoke("dl_store_delete_entry", { id: entryId });
+      setEntries((prevEntries) => {
+        const remaining = prevEntries.filter((e) => e.id !== entryId);
+        if (selectedEntryId === entryId) {
+          setSelectedEntryId(remaining.length > 0 ? remaining[0].id : null);
+        }
+        return remaining;
+      });
+      setDeleteConfirmEntryId(null);
+    } catch (e) {
+      alert("Error deleting entry: " + e);
+    } finally {
+      setIsDeletingEntry(false);
+    }
+  };
+
+  const handleDeleteFilesExecuted = async (entryId: string) => {
+    // Refresh song count after deletion
+    const entryToUpdate = entries.find((e) => e.id === entryId);
+    if (!entryToUpdate) return;
+
+    const count = await invoke<number>("dl_count_songs_on_disk", {
+      outputDir: entryToUpdate.output_dir,
+      playlistTitle: entryToUpdate.playlist_title || entryToUpdate.name,
+      formats: [],
+    });
+
+    const updated = {
+      ...entryToUpdate,
+      songs_on_disk: count,
+      status: count === 0 ? ("new" as const) : count >= entryToUpdate.total_songs ? ("complete" as const) : ("partial" as const),
+      updated_at: Date.now(),
+    };
+    await handleSaveEntry(updated);
+  };
+
+  const handleRefreshMetadata = async (entry: DownloadEntry) => {
+    setRefreshingEntryIds((prev) => [...prev, entry.id]);
+    try {
+      const meta = await invoke<PlaylistMetadata>("dl_fetch_playlist_metadata", {
+        url: entry.url,
+      });
+
+      const count = await invoke<number>("dl_count_songs_on_disk", {
+        outputDir: entry.output_dir,
+        playlistTitle: meta.title || entry.playlist_title || entry.name,
+        formats: [],
+      });
+
+      const updatedStatus =
+        meta.total_songs > 0 && count >= meta.total_songs
+          ? "complete"
+          : count > 0
+          ? "partial"
+          : entry.status;
+
+      const updated: DownloadEntry = {
+        ...entry,
+        name: entry.name || meta.title,
+        playlist_title: meta.title || entry.playlist_title,
+        artist: meta.artist || entry.artist,
+        album: meta.album || entry.album,
+        total_songs: meta.total_songs,
+        songs_on_disk: count,
+        status: updatedStatus as any,
+        updated_at: Date.now(),
+      };
+
+      await handleSaveEntry(updated);
+    } catch (e) {
+      alert(`Error parsing playlist info: ${e}\n(The playlist might be private or unavailable)`);
+      // Fallback: just count disk files
+      const count = await invoke<number>("dl_count_songs_on_disk", {
+        outputDir: entry.output_dir,
+        playlistTitle: entry.playlist_title || entry.name,
+        formats: [],
+      });
+
+      const updated: DownloadEntry = {
+        ...entry,
+        songs_on_disk: count,
+        updated_at: Date.now(),
+      };
+      await handleSaveEntry(updated);
+    } finally {
+      setRefreshingEntryIds((prev) => prev.filter((id) => id !== entry.id));
+    }
+  };
+
+
+  // Add Entry handler
+  const handleAddEntrySubmit = async (data: {
+    url: string;
+    name: string;
+    labels: string;
+    output_dir: string;
+    audio_format: string | null;
+    use_archive: boolean | null;
+    metadata?: PlaylistMetadata;
+    startDownloadImmediately?: boolean;
+  }) => {
+    const id = `entry_${Date.now()}`;
+    const totalSongs = data.metadata?.total_songs || 0;
+
+    const count = await invoke<number>("dl_count_songs_on_disk", {
+      outputDir: data.output_dir,
+      playlistTitle: data.metadata?.title || data.name,
+      formats: [],
+    });
+
+    const newEntry: DownloadEntry = {
+      id,
+      url: data.url,
+      name: data.name,
+      labels: data.labels,
+      output_dir: data.output_dir,
+      audio_format: data.audio_format,
+      use_archive: data.use_archive,
+      ignore_errors: null,
+      total_songs: totalSongs,
+      songs_on_disk: count,
+      playlist_title: data.metadata?.title || data.name,
+      artist: data.metadata?.artist || "",
+      album: data.metadata?.album || "",
+      status: count > 0 && totalSongs > 0 && count >= totalSongs ? "complete" : count > 0 ? "partial" : "new",
+      last_download_at: null,
+      last_error: "",
+      created_at: Date.now(),
+      updated_at: Date.now(),
+    };
+
+    await invoke("dl_store_save_entry", { entry: newEntry });
+    setEntries((prev) => [newEntry, ...prev]);
+    setSelectedEntryId(id);
+
+    if (data.startDownloadImmediately) {
+      await handleStartSingleDownload(newEntry);
+    }
+  };
+
+  // Single Entry Download Trigger
+  const handleStartSingleDownload = async (targetEntry: DownloadEntry) => {
+    // 1. Refresh metadata & count first
+    await handleRefreshMetadata(targetEntry);
+
+    const jobId = `dl_${targetEntry.id}_${Date.now()}`;
+    const audioFormat = targetEntry.audio_format || globalSettings.default_audio_format;
+    const useArchive = targetEntry.use_archive !== null ? targetEntry.use_archive : globalSettings.default_use_archive;
+    const ignoreErrors = targetEntry.ignore_errors !== null ? targetEntry.ignore_errors : globalSettings.default_ignore_errors;
+
     const newJob: DownloadJob = {
       id: jobId,
-      url: urlInput.trim(),
-      output_dir: outputDir.trim(),
-      audio_format: format,
+      url: targetEntry.url,
+      output_dir: targetEntry.output_dir,
+      audio_format: audioFormat,
       use_archive: useArchive,
-      archive_path: archivePath.trim(),
+      archive_path: globalSettings.archive_path,
       ignore_errors: ignoreErrors,
       status: "running",
       progress: 0,
-      logs: [`🚀 Initializing yt-dlp download job for: ${urlInput.trim()}`],
+      logs: [`🚀 Initializing yt-dlp download job for: ${targetEntry.name || targetEntry.url}`],
       start_time: Date.now(),
+      title: targetEntry.name,
     };
 
     setJobs((prev) => [...prev, newJob]);
-    setSelectedJobId(jobId);
-    setUrlInput(""); // Clear URL input for convenient next entry
+
+    // Update entry status to downloading
+    const downloadingEntry = { ...targetEntry, status: "downloading" as const };
+    setEntries((prev) => prev.map((e) => (e.id === targetEntry.id ? downloadingEntry : e)));
+    await invoke("dl_store_save_entry", { entry: downloadingEntry });
 
     try {
       await invoke("start_download_job", {
@@ -226,49 +472,167 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
         archivePath: newJob.archive_path,
         ignoreErrors: newJob.ignore_errors,
       });
+
+      await monitorJobCompletion(jobId, targetEntry);
     } catch (e) {
-      alert("Error starting download: " + e);
+      console.error("Error starting download:", e);
       setJobs((prev) =>
         prev.map((j) => (j.id === jobId ? { ...j, status: "failed", logs: [...j.logs, `❌ Error: ${e}`] } : j))
       );
+      const failedEntry = { ...targetEntry, status: "error" as const, last_error: String(e) };
+      setEntries((prev) => prev.map((e) => (e.id === targetEntry.id ? failedEntry : e)));
+      await invoke("dl_store_save_entry", { entry: failedEntry });
     }
   };
 
-  const handleCancelJob = async (jobId: string, e?: React.MouseEvent) => {
-    if (e) e.stopPropagation();
+  const monitorJobCompletion = (targetJobId: string, targetEntry: DownloadEntry): Promise<"completed" | "cancelled" | "failed"> => {
+    return new Promise((resolve) => {
+      const checkInterval = setInterval(async () => {
+        setJobs((latestJobs) => {
+          const currentJob = latestJobs.find((j) => j.id === targetJobId);
+          if (currentJob && currentJob.status !== "running") {
+            clearInterval(checkInterval);
+
+            (async () => {
+              const count = await invoke<number>("dl_count_songs_on_disk", {
+                outputDir: targetEntry.output_dir,
+                playlistTitle: targetEntry.playlist_title || targetEntry.name,
+                formats: [],
+              });
+
+              const outcome: "completed" | "cancelled" | "failed" =
+                currentJob.status === "completed"
+                  ? "completed"
+                  : currentJob.status === "cancelled"
+                  ? "cancelled"
+                  : "failed";
+
+              const newStatus =
+                outcome === "completed"
+                  ? "complete"
+                  : outcome === "cancelled"
+                  ? (count > 0 ? "partial" : "stale")
+                  : (count > 0 ? "partial" : "error");
+
+              const updated: DownloadEntry = {
+                ...targetEntry,
+                songs_on_disk: count,
+                status: newStatus as any,
+                last_download_at: Date.now(),
+                last_error: outcome === "failed" ? "yt-dlp process returned non-zero status" : outcome === "cancelled" ? "Cancelled by user" : "",
+                updated_at: Date.now(),
+              };
+
+              setEntries((prev) => prev.map((e) => (e.id === targetEntry.id ? updated : e)));
+              await invoke("dl_store_save_entry", { entry: updated });
+              resolve(outcome);
+            })();
+          }
+          return latestJobs;
+        });
+      }, 500);
+    });
+  };
+
+  const handleCancelJob = async (jobId: string) => {
     try {
       await invoke("cancel_download_job", { jobId });
       setJobs((prev) =>
-        prev.map((j) =>
-          j.id === jobId
-            ? { ...j, status: "cancelled", logs: [...j.logs, "🛑 Download task cancelled by user."] }
-            : j
-        )
+        prev.map((j) => (j.id === jobId ? { ...j, status: "cancelled", logs: [...j.logs, "🛑 Task cancelled by user."] } : j))
       );
     } catch (e) {
       console.error("Error cancelling job:", e);
     }
   };
 
-  const handleRetryJob = async (jobToRetry: DownloadJob, e?: React.MouseEvent) => {
-    if (e) e.stopPropagation();
-    const jobId = `dl_${Date.now()}`;
+  // Batch "Download All" Queue Engine
+  const [batchQueueEntries, setBatchQueueEntries] = useState<DownloadEntry[]>([]);
+  const isBatchCancelledRef = useRef(false);
+
+  const handleCancelAllBatchJobs = async () => {
+    isBatchCancelledRef.current = true;
+    // Kill all running jobs in parallel
+    const runningJobs = jobs.filter((j) => j.status === "running");
+    for (const job of runningJobs) {
+      await handleCancelJob(job.id);
+    }
+  };
+
+  const handleStartBatchDownload = async () => {
+    const queueEntries = filteredEntries.filter((e) => e.status !== "complete");
+    if (queueEntries.length === 0) {
+      alert("All visible entries in this filter are already complete!");
+      return;
+    }
+
+    isBatchCancelledRef.current = false;
+    setBatchQueueEntries(queueEntries);
+    setBatchSummary({ total: queueEntries.length, done: 0, failed: 0 });
+    setConsoleTab("queue");
+
+    const maxParallel = globalSettings.max_parallel_jobs || 2;
+    const remainingQueue = [...queueEntries];
+
+    const runNextBatchItem = async (): Promise<void> => {
+      if (remainingQueue.length === 0 || isBatchCancelledRef.current) return;
+      const nextEntry = remainingQueue.shift()!;
+
+      // Try single run
+      let outcome = await runSingleJobInBatch(nextEntry);
+
+      // DO NOT retry if manually cancelled by user!
+      if (outcome === "failed" && !isBatchCancelledRef.current) {
+        // Retry ONCE for transient network error
+        outcome = await runSingleJobInBatch(nextEntry);
+      }
+
+      const isSuccess = outcome === "completed";
+      setBatchSummary((prev) => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          done: prev.done + (isSuccess ? 1 : 0),
+          failed: prev.failed + (isSuccess ? 0 : 1),
+        };
+      });
+
+      if (remainingQueue.length > 0 && !isBatchCancelledRef.current) {
+        await runNextBatchItem();
+      }
+    };
+
+    const initialWorkers = [];
+    for (let i = 0; i < Math.min(maxParallel, queueEntries.length); i++) {
+      initialWorkers.push(runNextBatchItem());
+    }
+
+    await Promise.all(initialWorkers);
+  };
+
+  const runSingleJobInBatch = async (entry: DownloadEntry): Promise<"completed" | "cancelled" | "failed"> => {
+    if (isBatchCancelledRef.current) return "cancelled";
+
+    const jobId = `dl_${entry.id}_${Date.now()}`;
+    const audioFormat = entry.audio_format || globalSettings.default_audio_format;
+    const useArchive = entry.use_archive !== null ? entry.use_archive : globalSettings.default_use_archive;
+    const ignoreErrors = entry.ignore_errors !== null ? entry.ignore_errors : globalSettings.default_ignore_errors;
+
     const newJob: DownloadJob = {
       id: jobId,
-      url: jobToRetry.url,
-      output_dir: jobToRetry.output_dir,
-      audio_format: jobToRetry.audio_format,
-      use_archive: jobToRetry.use_archive,
-      archive_path: jobToRetry.archive_path,
-      ignore_errors: jobToRetry.ignore_errors ?? true,
+      url: entry.url,
+      output_dir: entry.output_dir,
+      audio_format: audioFormat,
+      use_archive: useArchive,
+      archive_path: globalSettings.archive_path,
+      ignore_errors: ignoreErrors,
       status: "running",
       progress: 0,
-      logs: [`🔄 Retrying download job for: ${jobToRetry.url}`],
+      logs: [`🚀 Initializing batch job for: ${entry.name}`],
       start_time: Date.now(),
+      title: entry.name,
     };
 
     setJobs((prev) => [...prev, newJob]);
-    setSelectedJobId(jobId);
 
     try {
       await invoke("start_download_job", {
@@ -280,351 +644,324 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
         archivePath: newJob.archive_path,
         ignoreErrors: newJob.ignore_errors,
       });
+
+      return await monitorJobCompletion(jobId, entry);
     } catch (e) {
-      alert("Error retrying download: " + e);
       setJobs((prev) =>
         prev.map((j) => (j.id === jobId ? { ...j, status: "failed", logs: [...j.logs, `❌ Error: ${e}`] } : j))
       );
+      return "failed";
     }
   };
 
-  const handleClearCompleted = () => {
-    setJobs((prev) => prev.filter((j) => j.status === "running"));
-  };
+  // Map ALL queued entries to BatchQueueItems for JobConsole Queue tab
+  const batchQueueItems = useMemo(() => {
+    if (batchQueueEntries.length === 0) return [];
+    return batchQueueEntries.map((entry) => {
+      const job = jobs.slice().reverse().find((j) => j.id.startsWith(`dl_${entry.id}`));
+      let status: "pending" | "running" | "completed" | "failed" | "cancelled" = "pending";
+      if (job) {
+        if (job.status === "running") status = "running";
+        else if (job.status === "completed") status = "completed";
+        else if (job.status === "cancelled") status = "cancelled";
+        else if (job.status === "failed") status = "failed";
+      }
+      return { entry, job, status };
+    });
+  }, [batchQueueEntries, jobs]);
+
+  // Sticky progress calculations
+  const isBatchRunning = batchSummary && batchSummary.done + batchSummary.failed < batchSummary.total;
 
   return (
-    <div className="view-container" style={{ display: "flex", flexDirection: "column", height: "100%", flex: 1, minHeight: 0, gap: "16px", overflow: "hidden" }}>
-      <div>
-        <h1>Media & Playlist Downloader</h1>
-        <p className="subtitle" style={{ margin: 0 }}>
-          Download audio from online playlists or media URLs using <code style={{ fontFamily: "var(--font-mono)" }}>yt-dlp</code> with real-time log tracking and download archives.
-        </p>
-      </div>
+    <div className="view-container" style={{ display: "flex", flexDirection: "column", height: "100%", flex: 1, minHeight: 0, gap: "12px", overflow: "hidden" }}>
+      {/* Top Header Row */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0 }}>
+        <div>
+          <h1 style={{ fontSize: "1.3rem", margin: 0 }}>Downloads Management</h1>
+          <p className="subtitle" style={{ margin: "2px 0 0 0", fontSize: "0.82rem" }}>
+            Persistent, taggable download entries with serial/parallel queue automation and download archives.
+          </p>
+        </div>
 
-      {/* Configuration Card */}
-      <div className="card" style={{ margin: 0, display: "flex", flexDirection: "column", gap: "12px", padding: "16px 20px" }}>
-        <div className="card-title" style={{ fontSize: "0.95rem", margin: 0, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <span>Download Setup</span>
+        <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
           {binaries && (
-            <div style={{ display: "flex", gap: "8px", fontSize: "0.75rem", fontFamily: "var(--font-mono)" }}>
+            <div style={{ display: "flex", gap: "6px", fontSize: "0.75rem", fontFamily: "var(--font-mono)" }}>
               <span
                 style={{
-                  padding: "3px 8px",
+                  padding: "2px 8px",
                   borderRadius: "4px",
                   backgroundColor: binaries.ytdlp_installed ? "rgba(34, 197, 94, 0.15)" : "rgba(239, 68, 68, 0.15)",
                   color: binaries.ytdlp_installed ? "var(--success)" : "var(--danger)",
                   border: `1px solid ${binaries.ytdlp_installed ? "var(--success)" : "var(--danger)"}`,
                 }}
-                title={binaries.ytdlp_installed ? `yt-dlp version: ${binaries.ytdlp_version}` : "yt-dlp binary is NOT found in system PATH"}
+                title={binaries.ytdlp_installed ? `yt-dlp version: ${binaries.ytdlp_version}` : "yt-dlp missing"}
               >
                 {binaries.ytdlp_installed ? `✓ yt-dlp ${binaries.ytdlp_version || "ready"}` : "✗ yt-dlp missing"}
               </span>
-
-              <span
-                style={{
-                  padding: "3px 8px",
-                  borderRadius: "4px",
-                  backgroundColor: binaries.ffmpeg_installed ? "rgba(34, 197, 94, 0.15)" : "rgba(234, 179, 8, 0.15)",
-                  color: binaries.ffmpeg_installed ? "var(--success)" : "var(--warning)",
-                  border: `1px solid ${binaries.ffmpeg_installed ? "var(--success)" : "var(--warning)"}`,
-                }}
-                title={binaries.ffmpeg_installed ? `ffmpeg version: ${binaries.ffmpeg_version}` : "ffmpeg binary is recommended for audio conversion/thumbnails"}
-              >
-                {binaries.ffmpeg_installed ? "✓ ffmpeg ready" : "⚠️ ffmpeg missing"}
-              </span>
             </div>
           )}
-        </div>
 
-        <div style={{ display: "flex", gap: "12px", flexWrap: "wrap", alignItems: "flex-end" }}>
-          {/* Playlist URL Input */}
-          <div className="form-group" style={{ flex: 2, minWidth: "300px", margin: 0 }}>
-            <label className="form-label">Playlist / Media URL</label>
-            <input
-              type="text"
-              placeholder="https://..."
-              value={urlInput}
-              onChange={(e) => setUrlInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleStartDownload()}
-            />
-          </div>
-
-          {/* Output Directory Picker */}
-          <div className="form-group" style={{ flex: 2, minWidth: "260px", margin: 0 }}>
-            <label className="form-label">Output Directory</label>
-            <div className="form-row">
-              <input
-                type="text"
-                value={outputDir}
-                onChange={(e) => setOutputDir(e.target.value)}
-                placeholder="workspace/Youtube/"
-              />
-              <button className="btn btn-secondary" onClick={handlePickDirectory}>
-                Folder
-              </button>
-            </div>
-          </div>
-
-          {/* Audio Format Select */}
-          <div className="form-group" style={{ width: "160px", margin: 0 }}>
-            <label className="form-label">Audio Format</label>
-            <select value={format} onChange={(e) => setFormat(e.target.value)}>
-              <option value="m4a/mp3">m4a/mp3 (Best)</option>
-              <option value="m4a">m4a (Lossless Audio)</option>
-              <option value="mp3">mp3 (Audio Only)</option>
-            </select>
-          </div>
-
-          {/* Action Button */}
           <button
-            className="btn btn-primary"
-            onClick={handleStartDownload}
-            style={{ padding: "8px 20px", fontSize: "0.9rem", height: "38px" }}
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => setShowGlobalSettings(!showGlobalSettings)}
+            style={{ padding: "4px 10px", fontSize: "0.8rem" }}
           >
-            🚀 Start Download
+            ⚙ Global Settings
           </button>
         </div>
-
-        {/* Download Options (Archive & Ignore Errors) */}
-        <div style={{ display: "flex", gap: "24px", alignItems: "center", flexWrap: "wrap", paddingTop: "4px" }}>
-          <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.85rem", cursor: "pointer" }}>
-            <input
-              type="checkbox"
-              checked={useArchive}
-              onChange={(e) => setUseArchive(e.target.checked)}
-            />
-            <span>Use Download Archive (<code style={{ fontFamily: "var(--font-mono)", fontSize: "0.8rem" }}>archive.txt</code>) to skip previously downloaded videos</span>
-          </label>
-
-          {useArchive && (
-            <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-              <input
-                type="text"
-                placeholder="Custom archive path (optional)..."
-                value={archivePath}
-                onChange={(e) => setArchivePath(e.target.value)}
-                style={{ width: "200px", padding: "3px 8px", fontSize: "0.78rem" }}
-              />
-              <button
-                className="btn btn-secondary"
-                onClick={handleResetPlaylistIds}
-                disabled={isResettingArchive || !urlInput.trim()}
-                style={{ padding: "3px 8px", fontSize: "0.76rem" }}
-                title="Fetches playlist video IDs and removes them from archive.txt so this playlist can be re-downloaded"
-              >
-                {isResettingArchive ? "Resetting..." : "🔄 Reset Playlist IDs"}
-              </button>
-              <button
-                className="btn btn-secondary"
-                onClick={handleClearArchiveFile}
-                disabled={isResettingArchive}
-                style={{ padding: "3px 8px", fontSize: "0.76rem" }}
-                title="Clears archive.txt completely"
-              >
-                🗑️ Clear Archive
-              </button>
-            </div>
-          )}
-
-          <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.85rem", cursor: "pointer" }}>
-            <input
-              type="checkbox"
-              checked={ignoreErrors}
-              onChange={(e) => setIgnoreErrors(e.target.checked)}
-            />
-            <span>Ignore errors for missing/unavailable videos (<code style={{ fontFamily: "var(--font-mono)", fontSize: "0.8rem" }}>--ignore-errors</code>)</span>
-          </label>
-        </div>
       </div>
 
-      {/* Two-Panel Split Layout */}
-      <div style={{ display: "flex", gap: "16px", flex: 1, minHeight: 0 }}>
-        {/* Left Panel: Download Jobs */}
-        <div className="card" style={{ width: "380px", flexShrink: 0, margin: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
-          <div className="card-title" style={{ borderBottom: "1px solid var(--border-color)", paddingBottom: "10px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span>Download Jobs ({jobs.length})</span>
-            {jobs.some((j) => j.status !== "running") && (
-              <button
-                className="btn btn-secondary"
-                onClick={handleClearCompleted}
-                style={{ padding: "3px 8px", fontSize: "0.75rem" }}
-              >
-                Clear Finished
-              </button>
-            )}
-          </div>
+      {/* Global Settings Panel (Collapsible) */}
+      <GlobalSettingsPanel
+        isOpen={showGlobalSettings}
+        settings={globalSettings}
+        onSaveSettings={handleSaveGlobalSettings}
+        onClose={() => setShowGlobalSettings(false)}
+      />
 
-          <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: "8px", marginTop: "10px" }}>
-            {jobs.length === 0 ? (
-              <div className="no-data" style={{ padding: "40px 10px", textAlign: "center" }}>
-                No download jobs created yet. Enter a playlist URL above to begin.
+      {/* Main Two-Panel Layout */}
+      <div style={{ display: "flex", gap: "0px", flex: 1, minHeight: 0 }}>
+        {/* LEFT PANEL: Label Filters & Entry Grid (Takes dynamic leftWidth) */}
+        <div className="card" style={{ width: `${leftWidth}px`, flexShrink: 0, margin: 0, display: "flex", flexDirection: "column", minHeight: 0, gap: "10px" }}>
+          {/* Label Filter Header with Embedded Sort Cue */}
+          <LabelFilter
+            allLabels={allExistingLabels}
+            selectedLabels={selectedLabels}
+            filterMode={filterMode}
+            sortBy={sortBy}
+            sortOrder={sortOrder}
+            onToggleLabel={handleToggleLabel}
+            onClearFilter={handleClearLabels}
+            onToggleMode={setFilterMode}
+            onSortChange={(newSortBy, newSortOrder) => {
+              setSortBy(newSortBy);
+              setSortOrder(newSortOrder);
+            }}
+          />
+
+          {/* Entry Grid Container */}
+          <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden", minHeight: 0, marginTop: "4px" }}>
+            {filteredEntries.length === 0 ? (
+              <div className="no-data" style={{ padding: "40px 10px", textAlign: "center", fontSize: "0.82rem" }}>
+                {entries.length === 0
+                  ? "No download entries created yet. Click '+ Add Entry' below to begin."
+                  : "No download entries match the selected label filter."}
               </div>
             ) : (
-              jobs.map((job) => {
-                const isSelected = selectedJobId === job.id;
-                const statusColor =
-                  job.status === "completed"
-                    ? "var(--success)"
-                    : job.status === "failed" || job.status === "cancelled"
-                    ? "var(--danger)"
-                    : "var(--accent-purple-hover)";
-
-                return (
-                  <div
-                    key={job.id}
-                    onClick={() => setSelectedJobId(job.id)}
-                    style={{
-                      padding: "10px 12px",
-                      borderRadius: "8px",
-                      border: isSelected ? "1px solid var(--accent-purple)" : "1px solid var(--border-color)",
-                      backgroundColor: isSelected ? "rgba(138, 92, 246, 0.12)" : "var(--bg-tertiary)",
-                      cursor: "pointer",
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: "6px",
-                      transition: "all 0.15s ease",
-                    }}
-                  >
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <span style={{ fontWeight: 600, fontSize: "0.85rem", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "220px" }} title={job.title || job.url}>
-                        {job.title || job.url}
-                      </span>
-                      
-                      {/* Status badge & Cross / Retry buttons */}
-                      <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                        <span style={{ fontSize: "0.72rem", color: statusColor, fontWeight: 600, fontFamily: "var(--font-mono)" }}>
-                          {job.status === "running" ? `${Math.round(job.progress)}%` : job.status}
-                        </span>
-
-                        {job.status === "running" ? (
-                          <button
-                            onClick={(e) => handleCancelJob(job.id, e)}
-                            style={{
-                              background: "rgba(239, 68, 68, 0.15)",
-                              border: "1px solid var(--danger)",
-                              color: "var(--danger)",
-                              borderRadius: "4px",
-                              cursor: "pointer",
-                              padding: "1px 5px",
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              fontSize: "0.7rem",
-                            }}
-                            title="Stop Download Job"
-                          >
-                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-                              <line x1="18" y1="6" x2="6" y2="18"></line>
-                              <line x1="6" y1="6" x2="18" y2="18"></line>
-                            </svg>
-                          </button>
-                        ) : (
-                          <button
-                            onClick={(e) => handleRetryJob(job, e)}
-                            style={{
-                              background: "rgba(138, 92, 246, 0.15)",
-                              border: "1px solid var(--accent-purple)",
-                              color: "var(--accent-purple-hover)",
-                              borderRadius: "4px",
-                              cursor: "pointer",
-                              padding: "1px 5px",
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              fontSize: "0.7rem",
-                            }}
-                            title="Retry Download Job"
-                          >
-                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                              <path d="M21.5 2v6h-6M2.5 22v-6h6"/>
-                              <path d="M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
-                            </svg>
-                          </button>
-                        )}
-                      </div>
-                    </div>
-
-                    <ProgressBar progress={job.progress} status={job.status === "cancelled" ? "failed" : job.status} height={4} />
-
-                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.72rem", color: "var(--text-secondary)" }}>
-                      <span>
-                        {job.current_item && job.total_items
-                          ? `Track ${job.current_item}/${job.total_items} (${job.audio_format})`
-                          : `Format: ${job.audio_format}`}
-                      </span>
-                      <span>{new Date(job.start_time).toLocaleTimeString()}</span>
-                    </div>
-                  </div>
-                );
-              })
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))", gap: "8px" }}>
+                {filteredEntries.map((entry) => {
+                  const activeJob = jobs.slice().reverse().find((j) => j.id.startsWith(`dl_${entry.id}`));
+                  return (
+                    <EntryCard
+                      key={entry.id}
+                      entry={entry}
+                      isSelected={selectedEntryId === entry.id}
+                      activeJob={activeJob}
+                      isRefreshing={refreshingEntryIds.includes(entry.id)}
+                      onSelect={() => setSelectedEntryId(entry.id)}
+                    />
+                  );
+                })}
+              </div>
             )}
+          </div>
+
+          {/* Left Panel Bottom Action Bar */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid var(--border-color)", paddingTop: "8px" }}>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => setIsAddModalOpen(true)}
+              style={{ padding: "6px 12px", fontSize: "0.82rem" }}
+            >
+              + Add Entry
+            </button>
+
+            <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+              <select
+                value={globalSettings.max_parallel_jobs}
+                onChange={(e) =>
+                  handleSaveGlobalSettings({
+                    ...globalSettings,
+                    max_parallel_jobs: parseInt(e.target.value) || 2,
+                  })
+                }
+                style={{ padding: "3px 6px", fontSize: "0.75rem", borderRadius: "4px", height: "30px" }}
+                title="Max parallel download jobs"
+              >
+                <option value={1}>1 Job</option>
+                <option value={2}>2 Parallel</option>
+                <option value={3}>3 Parallel</option>
+                <option value={4}>4 Parallel</option>
+              </select>
+
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={handleStartBatchDownload}
+                disabled={isBatchRunning || filteredEntries.length === 0}
+                style={{ padding: "6px 12px", fontSize: "0.82rem", color: "var(--accent-purple-hover)" }}
+              >
+                ▶ Download All
+              </button>
+            </div>
           </div>
         </div>
 
-        {/* Right Panel: Job Details & Real-Time Console Logs */}
-        <div className="card" style={{ flex: 1, margin: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
-          {selectedJob ? (
-            <>
-              <div className="card-title" style={{ borderBottom: "1px solid var(--border-color)", paddingBottom: "10px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <span>Job Details & Execution Logs</span>
-                {selectedJob.status === "running" ? (
-                  <button className="btn btn-danger" onClick={() => handleCancelJob(selectedJob.id)} style={{ padding: "4px 10px", fontSize: "0.78rem" }}>
-                    🛑 Stop Job
-                  </button>
-                ) : (
-                  <button className="btn btn-secondary" onClick={() => handleRetryJob(selectedJob)} style={{ padding: "4px 10px", fontSize: "0.78rem", color: "var(--accent-purple-hover)" }}>
-                    🔄 Retry Job
-                  </button>
-                )}
-              </div>
+        {/* Resizable separator handle */}
+        <div
+          onMouseDown={handleMouseDown}
+          style={{
+            width: "12px",
+            cursor: "col-resize",
+            backgroundColor: "transparent",
+            alignSelf: "stretch",
+            position: "relative",
+            zIndex: 10,
+            display: "flex",
+            justifyContent: "center",
+            alignItems: "center",
+          }}
+          className="resizable-separator"
+          title="Drag to resize entries panel"
+        >
+          <div
+            style={{
+              width: "2px",
+              height: "40px",
+              borderRadius: "1px",
+              backgroundColor: "var(--border-color)",
+              transition: "background-color 0.2s",
+            }}
+            className="resizable-indicator"
+          />
+        </div>
 
-              {/* Selected Job Metadata */}
-              <div style={{ display: "grid", gridTemplateColumns: "100px 1fr", gap: "6px", fontSize: "0.82rem", backgroundColor: "var(--bg-tertiary)", padding: "10px 14px", borderRadius: "8px", marginTop: "10px", flexShrink: 0 }}>
-                <span className="text-secondary">Progress:</span>
-                <span style={{ fontWeight: 600, color: "var(--accent-purple-hover)" }}>
-                  {selectedJob.current_item && selectedJob.total_items
-                    ? `Item ${selectedJob.current_item} of ${selectedJob.total_items} (${Math.round(selectedJob.progress)}%)`
-                    : `${Math.round(selectedJob.progress)}% (${selectedJob.status})`}
-                </span>
+        {/* RIGHT PANEL: Top Half Entry Detail, Bottom Half Job Console */}
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "12px", minHeight: 0 }}>
+          {/* Top Half: Selected Entry Configuration */}
+          <div className="card" style={{ margin: 0, padding: "14px 16px", flexShrink: 0 }}>
+            <EntryDetail
+              entry={selectedEntry}
+              globalSettings={globalSettings}
+              allExistingLabels={allExistingLabels}
+              activeJob={selectedEntryJob}
+              isRefreshingEntry={selectedEntry ? refreshingEntryIds.includes(selectedEntry.id) : false}
+              onSaveEntry={handleSaveEntry}
+              onRefreshMetadata={handleRefreshMetadata}
+              onStartDownload={handleStartSingleDownload}
+              onCancelDownload={handleCancelJob}
+              onDeleteEntry={handleDeleteEntry}
+              onDeleteFilesExecuted={handleDeleteFilesExecuted}
+            />
+          </div>
 
-                <span className="text-secondary">URL:</span>
-                <span style={{ wordBreak: "break-all", fontFamily: "var(--font-mono)" }}>{selectedJob.url}</span>
-                
-                <span className="text-secondary">Destination:</span>
-                <span style={{ wordBreak: "break-all", fontFamily: "var(--font-mono)" }}>{selectedJob.output_dir}</span>
-                
-                <span className="text-secondary">Format:</span>
-                <span>{selectedJob.audio_format} (Quality: 0)</span>
-                
-                <span className="text-secondary">Archive File:</span>
-                <span>{selectedJob.use_archive ? (selectedJob.archive_path || `${selectedJob.output_dir}/archive.txt`) : "Disabled"}</span>
-              </div>
+          {/* Bottom Half: Job Console (Logs & Queue Tabs) */}
+          <div className="card" style={{ flex: 1, margin: 0, padding: "12px 16px", display: "flex", flexDirection: "column", minHeight: 0 }}>
+            <JobConsole
+              activeTab={consoleTab}
+              onTabChange={setConsoleTab}
+              selectedJobLogs={selectedEntryJob?.logs || []}
+              selectedJobTitle={selectedEntry?.name}
+              batchQueueItems={batchQueueItems}
+              isBatchRunning={!!isBatchRunning}
+              onCancelJob={handleCancelJob}
+              onCancelAllBatchJobs={handleCancelAllBatchJobs}
+            />
+          </div>
 
-              {/* Console Log Output Window (Takes Full Remaining Height) */}
-              <div
-                ref={logBoxRef}
-                className="console-log"
-                style={{
-                  flex: 1,
-                  minHeight: 0,
-                  height: "100%",
-                  overflowY: "auto",
-                  marginTop: "12px",
-                  fontSize: "0.78rem",
-                  fontFamily: "var(--font-mono)",
-                  lineHeight: 1.4,
-                }}
-              >
-                {selectedJob.logs.length === 0 ? "Awaiting log output..." : selectedJob.logs.join("\n")}
-              </div>
-            </>
-          ) : (
-            <div className="no-data" style={{ margin: "auto" }}>
-              Select a download job on the left panel to inspect details and live terminal output.
-            </div>
-          )}
         </div>
       </div>
+
+      {/* STICKY DOWNLOAD ALL PROGRESS BAR */}
+      {batchSummary && (
+        <div
+          onClick={() => setConsoleTab("queue")}
+          style={{
+            position: "sticky",
+            bottom: 0,
+            left: 0,
+            right: 0,
+            backgroundColor: "var(--bg-tertiary)",
+            border: "1.5px solid var(--accent-purple)",
+            borderRadius: "8px",
+            padding: "10px 16px",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+
+            boxShadow: "0 -4px 15px rgba(0, 0, 0, 0.4)",
+            cursor: "pointer",
+            zIndex: 100,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "12px", flex: 1 }}>
+            <span style={{ fontWeight: 600, fontSize: "0.85rem", color: "var(--accent-purple-hover)" }}>
+              {isBatchRunning ? "⚡ Batch Downloading:" : "✅ Batch Finished:"} {batchSummary.done + batchSummary.failed} / {batchSummary.total} entries
+            </span>
+
+            <div style={{ flex: 1, maxWidth: "300px" }}>
+              <div
+                style={{
+                  height: "6px",
+                  backgroundColor: "var(--bg-surface)",
+                  borderRadius: "3px",
+                  overflow: "hidden",
+                }}
+              >
+                <div
+                  style={{
+                    height: "100%",
+                    width: `${Math.round(((batchSummary.done + batchSummary.failed) / batchSummary.total) * 100)}%`,
+                    backgroundColor: "var(--accent-purple)",
+                    transition: "width 0.2s ease",
+                  }}
+                />
+              </div>
+            </div>
+
+            <span style={{ fontSize: "0.78rem", color: "var(--text-secondary)" }}>
+              ({Math.round(((batchSummary.done + batchSummary.failed) / batchSummary.total) * 100)}%)
+            </span>
+          </div>
+
+          <div style={{ display: "flex", gap: "12px", alignItems: "center" }}>
+            <span style={{ fontSize: "0.78rem", color: "var(--success)" }}>🟢 {batchSummary.done} complete</span>
+            {batchSummary.failed > 0 && <span style={{ fontSize: "0.78rem", color: "var(--danger)" }}>🔴 {batchSummary.failed} failed</span>}
+            <span style={{ fontSize: "0.75rem", color: "var(--text-muted)", textDecoration: "underline" }}>View Queue ➔</span>
+          </div>
+        </div>
+      )}
+
+      {/* Add Entry Modal */}
+      <AddEntryModal
+        isOpen={isAddModalOpen}
+        globalSettings={globalSettings}
+        allExistingLabels={allExistingLabels}
+        existingEntries={entries}
+        onClose={() => setIsAddModalOpen(false)}
+        onAddEntry={handleAddEntrySubmit}
+      />
+
+      {/* Delete Entry Confirmation Modal */}
+      {deleteConfirmEntryId && (() => {
+        const entryToDelete = entries.find(e => e.id === deleteConfirmEntryId);
+        const entryName = entryToDelete?.playlist_title || entryToDelete?.name || entryToDelete?.url || "this entry";
+        return (
+          <ConfirmModal
+            title="🗑️ Delete Entry"
+            message={`Remove "${entryName}" from the downloads list?\n\nFiles already on disk will NOT be deleted.`}
+            confirmText="Delete Entry"
+            confirmVariant="danger"
+            isExecuting={isDeletingEntry}
+            executingText="Deleting..."
+            onConfirm={handleConfirmDeleteEntry}
+            onCancel={() => setDeleteConfirmEntryId(null)}
+          />
+        );
+      })()}
     </div>
   );
 };
