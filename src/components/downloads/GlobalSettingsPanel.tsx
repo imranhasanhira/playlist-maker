@@ -24,13 +24,19 @@ export const GlobalSettingsPanel: React.FC<GlobalSettingsPanelProps> = ({
 
   if (!isOpen) return null;
 
+  const updateSetting = (changes: Partial<DownloadGlobalSettings>) => {
+    const updated = { ...formState, ...changes };
+    setFormState(updated);
+    onSaveSettings(updated);
+  };
+
   const handlePickDir = async () => {
     try {
       const selected = await invoke<string | null>("select_directory", {
         title: "Select Global Default Output Folder",
       });
       if (selected) {
-        setFormState((prev) => ({ ...prev, default_output_dir: selected }));
+        updateSetting({ default_output_dir: selected });
       }
     } catch (e) {
       alert("Error picking directory: " + e);
@@ -55,12 +61,6 @@ export const GlobalSettingsPanel: React.FC<GlobalSettingsPanelProps> = ({
     }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    await onSaveSettings(formState);
-    onClose();
-  };
-
   return (
     <div
       style={{
@@ -82,13 +82,13 @@ export const GlobalSettingsPanel: React.FC<GlobalSettingsPanelProps> = ({
         <button
           type="button"
           onClick={onClose}
-          style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer" }}
+          style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: "1rem" }}
         >
           ✕
         </button>
       </div>
 
-      <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
         {/* Default Output Directory */}
         <div className="form-group" style={{ margin: 0 }}>
           <label className="form-label">Global Default Output Folder</label>
@@ -97,6 +97,7 @@ export const GlobalSettingsPanel: React.FC<GlobalSettingsPanelProps> = ({
               type="text"
               value={formState.default_output_dir}
               onChange={(e) => setFormState({ ...formState, default_output_dir: e.target.value })}
+              onBlur={() => onSaveSettings(formState)}
               placeholder="e.g. /Users/name/Music/Youtube"
             />
             <button className="btn btn-secondary" type="button" onClick={handlePickDir}>
@@ -111,7 +112,7 @@ export const GlobalSettingsPanel: React.FC<GlobalSettingsPanelProps> = ({
             <label className="form-label">Default Audio Format</label>
             <select
               value={formState.default_audio_format}
-              onChange={(e) => setFormState({ ...formState, default_audio_format: e.target.value })}
+              onChange={(e) => updateSetting({ default_audio_format: e.target.value })}
             >
               <option value="m4a/mp3">m4a/mp3 (Best Quality)</option>
               <option value="m4a">m4a (Lossless)</option>
@@ -124,7 +125,7 @@ export const GlobalSettingsPanel: React.FC<GlobalSettingsPanelProps> = ({
             <label className="form-label">Max Parallel Downloads</label>
             <select
               value={formState.max_parallel_jobs}
-              onChange={(e) => setFormState({ ...formState, max_parallel_jobs: parseInt(e.target.value) || 2 })}
+              onChange={(e) => updateSetting({ max_parallel_jobs: parseInt(e.target.value) || 2 })}
             >
               <option value={1}>1 Job (Serial)</option>
               <option value={2}>2 Jobs (Recommended)</option>
@@ -140,7 +141,7 @@ export const GlobalSettingsPanel: React.FC<GlobalSettingsPanelProps> = ({
               <input
                 type="checkbox"
                 checked={formState.default_ignore_errors}
-                onChange={(e) => setFormState({ ...formState, default_ignore_errors: e.target.checked })}
+                onChange={(e) => updateSetting({ default_ignore_errors: e.target.checked })}
               />
               <span>Ignore unavailable video errors (--ignore-errors)</span>
             </label>
@@ -153,7 +154,7 @@ export const GlobalSettingsPanel: React.FC<GlobalSettingsPanelProps> = ({
             <input
               type="checkbox"
               checked={formState.default_use_archive}
-              onChange={(e) => setFormState({ ...formState, default_use_archive: e.target.checked })}
+              onChange={(e) => updateSetting({ default_use_archive: e.target.checked })}
             />
             <span>Enable Single Global Download Archive (archive.txt)</span>
           </label>
@@ -165,6 +166,7 @@ export const GlobalSettingsPanel: React.FC<GlobalSettingsPanelProps> = ({
                 placeholder="Global archive file path (optional)..."
                 value={formState.archive_path}
                 onChange={(e) => setFormState({ ...formState, archive_path: e.target.value })}
+                onBlur={() => onSaveSettings(formState)}
                 style={{ fontSize: "0.8rem" }}
               />
               <button
@@ -179,14 +181,7 @@ export const GlobalSettingsPanel: React.FC<GlobalSettingsPanelProps> = ({
             </div>
           )}
         </div>
-
-        {/* Action button */}
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
-          <button className="btn btn-primary" type="submit" style={{ padding: "6px 16px", fontSize: "0.85rem" }}>
-            💾 Save Global Settings
-          </button>
-        </div>
-      </form>
+      </div>
     </div>
   );
 };

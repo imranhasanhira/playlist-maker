@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { MainConfig, AudioTrack, TrackPreview } from "../types";
 import { ResolvedTracksPanel } from "../components/ResolvedTracksPanel";
@@ -33,14 +33,53 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
   const [showLogsModal, setShowLogsModal] = useState<boolean>(false);
   const [isConfirmingDelete, setIsConfirmingDelete] = useState<boolean>(false);
-  const [sidebarWidth, setSidebarWidth] = useState<number>(240);
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem("pl_sidebar_width");
+      return saved ? parseInt(saved, 10) : 380;
+    } catch (e) {
+      return 380;
+    }
+  });
   const [configWidth, setConfigWidth] = useState<number>(360);
-
-  // Central toggle for item reordering mode (default off to keep UI clean)
   const [isReordering, setIsReordering] = useState<boolean>(false);
-
-  // In-memory cache for resolved track previews per playlist index
   const [previewsCache, setPreviewsCache] = useState<Record<number, TrackPreview[]>>({});
+
+  // Sorting state for playlist tiles (Config Order vs Name display sort)
+  type PlSortBy = "config" | "name";
+  type PlSortOrder = "asc" | "desc";
+  const [plSortBy, setPlSortBy] = useState<PlSortBy>("config");
+  const [plSortOrder, setPlSortOrder] = useState<PlSortOrder>("asc");
+  const [showPlSortMenu, setShowPlSortMenu] = useState<boolean>(false);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("pl_sidebar_width", sidebarWidth.toString());
+    } catch (e) {}
+  }, [sidebarWidth]);
+
+  const sortedPlaylistsWithIndex = useMemo(() => {
+    if (!config) return [];
+    const indexed = config.playlists.map((pl, originalIdx) => ({ pl, originalIdx }));
+    if (plSortBy === "config") {
+      return indexed;
+    }
+    return indexed.sort((a, b) => {
+      const result = a.pl.name.toLowerCase().localeCompare(b.pl.name.toLowerCase());
+      return plSortOrder === "asc" ? result : -result;
+    });
+  }, [config, plSortBy, plSortOrder]);
+
+  const handleSaveSortedOrderToConfig = () => {
+    if (!config) return;
+    const newPlaylists = sortedPlaylistsWithIndex.map(({ pl }) => pl);
+    setConfig({
+      ...config,
+      playlists: newPlaylists,
+    });
+    setPlSortBy("config");
+    setShowPlSortMenu(false);
+  };
 
   // Resizing mouse drag handlers
   const handleSidebarMouseDown = (e: React.MouseEvent) => {
@@ -51,7 +90,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     const handleMouseMove = (moveEvent: MouseEvent) => {
       const deltaX = moveEvent.clientX - startX;
       const newWidth = startWidth + deltaX;
-      if (newWidth > 150 && newWidth < 500) {
+      if (newWidth > 180 && newWidth < 800) {
         setSidebarWidth(newWidth);
       }
     };
@@ -435,7 +474,13 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
         <div style={{ display: "flex", gap: "8px" }}>
           <button
             className={`btn ${isReordering ? "btn-primary" : "btn-secondary"}`}
-            onClick={() => setIsReordering(!isReordering)}
+            onClick={() => {
+              if (!isReordering) {
+                // When enabling reorder mode -> reset sorting to config order
+                setPlSortBy("config");
+              }
+              setIsReordering(!isReordering);
+            }}
             style={{ padding: "8px 14px", fontSize: "0.85rem" }}
             title="Toggle item reorder mode"
           >
@@ -454,55 +499,286 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
 
       <div style={{ display: "flex", gap: "0", flex: 1, minHeight: 0 }}>
         {/* Playlist selection sidebar */}
-        <div className="card" style={{ width: `${sidebarWidth}px`, flexShrink: 0, margin: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-          <div className="card-title" style={{ fontSize: "1rem", borderBottom: "1px solid var(--border-color)", paddingBottom: "12px" }}>
-            Playlists
+        <div className="card" style={{ width: `${sidebarWidth}px`, flexShrink: 0, margin: 0, display: "flex", flexDirection: "column", minHeight: 0, gap: "10px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid var(--border-color)", paddingBottom: "10px" }}>
+            <div style={{ fontSize: "1rem", fontWeight: 700, color: "var(--text-primary)" }}>
+              Playlists {config ? `(${config.playlists.length})` : ""}
+            </div>
+
+            {/* Small sort button right top */}
+            <div style={{ position: "relative" }}>
+              <button
+                type="button"
+                onClick={() => setShowPlSortMenu(!showPlSortMenu)}
+                style={{
+                  padding: "1px 7px",
+                  fontSize: "0.68rem",
+                  fontWeight: 600,
+                  borderRadius: "10px",
+                  border: "1px solid var(--border-color)",
+                  backgroundColor: showPlSortMenu ? "var(--bg-surface)" : "var(--bg-tertiary)",
+                  color: "var(--accent-purple-hover)",
+                  cursor: "pointer",
+                  transition: "all 0.15s ease",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "3px",
+                  userSelect: "none",
+                }}
+                title="Sort playlists display"
+              >
+                <span>
+                  {plSortBy === "config"
+                    ? "Order"
+                    : `Name ${plSortOrder === "asc" ? "↑" : "↓"}`}
+                </span>
+                <span style={{ fontSize: "0.55rem", opacity: 0.7 }}>▼</span>
+              </button>
+
+              {showPlSortMenu && (
+                <>
+                  <div
+                    style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 999 }}
+                    onClick={() => setShowPlSortMenu(false)}
+                  />
+                  <div
+                    style={{
+                      position: "absolute",
+                      top: "calc(100% + 4px)",
+                      right: 0,
+                      zIndex: 1000,
+                      backgroundColor: "var(--bg-secondary)",
+                      border: "1px solid var(--border-color)",
+                      borderRadius: "8px",
+                      boxShadow: "var(--shadow-md)",
+                      padding: "4px",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "2px",
+                      minWidth: "105px",
+                    }}
+                  >
+                    {/* Item 1: Config Order */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPlSortBy("config");
+                        setShowPlSortMenu(false);
+                      }}
+                      style={{
+                        padding: "4px 8px",
+                        fontSize: "0.72rem",
+                        borderRadius: "6px",
+                        border: "none",
+                        backgroundColor: plSortBy === "config" ? "rgba(138, 92, 246, 0.15)" : "transparent",
+                        color: plSortBy === "config" ? "var(--accent-purple-hover)" : "var(--text-primary)",
+                        fontWeight: plSortBy === "config" ? 600 : 400,
+                        cursor: "pointer",
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        gap: "8px",
+                      }}
+                    >
+                      <span>Config Order</span>
+                      <span>{plSortBy === "config" ? "✓" : ""}</span>
+                    </button>
+
+                    {/* Item 2: Name */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (plSortBy === "name") {
+                          setPlSortOrder((prev) => (prev === "asc" ? "desc" : "asc"));
+                        } else {
+                          setPlSortBy("name");
+                          setPlSortOrder("asc");
+                        }
+                        setShowPlSortMenu(false);
+                      }}
+                      style={{
+                        padding: "4px 8px",
+                        fontSize: "0.72rem",
+                        borderRadius: "6px",
+                        border: "none",
+                        backgroundColor: plSortBy === "name" ? "rgba(138, 92, 246, 0.15)" : "transparent",
+                        color: plSortBy === "name" ? "var(--accent-purple-hover)" : "var(--text-primary)",
+                        fontWeight: plSortBy === "name" ? 600 : 400,
+                        cursor: "pointer",
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        gap: "8px",
+                      }}
+                    >
+                      <span>Name</span>
+                      <span>{plSortBy === "name" ? (plSortOrder === "asc" ? "↑" : "↓") : "↑"}</span>
+                    </button>
+
+                    {/* Action: Save current named order to config */}
+                    {plSortBy === "name" && (
+                      <>
+                        <div style={{ height: "1px", backgroundColor: "var(--border-color)", margin: "3px 0" }} />
+                        <button
+                          type="button"
+                          onClick={handleSaveSortedOrderToConfig}
+                          style={{
+                            padding: "4px 8px",
+                            fontSize: "0.7rem",
+                            borderRadius: "6px",
+                            border: "1px solid var(--accent-purple)",
+                            backgroundColor: "rgba(138, 92, 246, 0.18)",
+                            color: "var(--accent-purple-hover)",
+                            fontWeight: 600,
+                            cursor: "pointer",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            gap: "4px",
+                            whiteSpace: "nowrap",
+                          }}
+                          title="Save this sorted order permanently into the configuration file"
+                        >
+                          💾 Save Order to Config
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
           </div>
-          <div style={{ flex: 1, overflowY: "auto", margin: "12px 0", paddingRight: "4px" }}>
-            <ul style={{ listStyle: "none", display: "flex", flexDirection: "column", gap: "4px" }}>
-              {config.playlists.map((pl, idx) => (
-                <li
-                  key={idx}
-                  onClick={() => setSelectedPlaylistIndex(idx)}
-                  style={{
-                    padding: "8px 10px",
-                    borderRadius: "6px",
-                    cursor: "pointer",
-                    backgroundColor: selectedPlaylistIndex === idx ? "var(--bg-tertiary)" : "transparent",
-                    borderLeft: selectedPlaylistIndex === idx ? "3px solid var(--accent-purple)" : "none",
-                    fontWeight: selectedPlaylistIndex === idx ? 600 : 400,
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "6px",
-                  }}
-                >
-                  <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{pl.name}</span>
-                  {isReordering && (
-                    <div style={{ display: "flex", gap: "2px" }} onClick={(e) => e.stopPropagation()}>
-                      <button
-                        className="btn btn-secondary"
-                        onClick={() => movePlaylistItem(idx, "up")}
-                        disabled={idx === 0}
-                        style={{ padding: "2px 5px", fontSize: "0.65rem", lineHeight: 1 }}
-                        title="Move playlist up"
+
+          <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden", margin: "2px 0 6px 0", minHeight: 0 }}>
+            {!config || config.playlists.length === 0 ? (
+              <div className="no-data" style={{ padding: "30px 10px", textAlign: "center", fontSize: "0.82rem" }}>
+                No playlists created yet. Click '+ Add Playlist' below to begin.
+              </div>
+            ) : (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: "8px" }}>
+                {sortedPlaylistsWithIndex.map(({ pl, originalIdx }) => {
+                  const idx = originalIdx;
+                  const isSelected = selectedPlaylistIndex === idx;
+                  const trackCount = previewsCache[idx]?.length;
+                  return (
+                    <div
+                      key={idx}
+                      onClick={() => setSelectedPlaylistIndex(idx)}
+                      style={{
+                        padding: "10px 12px",
+                        borderRadius: "8px",
+                        border: isSelected ? "1.5px solid var(--accent-purple)" : "1px solid var(--border-color)",
+                        backgroundColor: isSelected ? "rgba(138, 92, 246, 0.12)" : "var(--bg-tertiary)",
+                        boxShadow: isSelected ? "0 0 8px rgba(138, 92, 246, 0.2)" : "none",
+                        cursor: "pointer",
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "6px",
+                        transition: "all 0.15s ease",
+                        userSelect: "none",
+                        width: "100%",
+                        boxSizing: "border-box",
+                      }}
+                    >
+                      {/* Row 1: Playlist Name FULL WIDTH */}
+                      <div
+                        style={{
+                          fontWeight: 600,
+                          fontSize: "0.88rem",
+                          color: "var(--text-primary)",
+                          width: "100%",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                          lineHeight: 1.3,
+                        }}
+                        title={pl.name}
                       >
-                        ▲
-                      </button>
-                      <button
-                        className="btn btn-secondary"
-                        onClick={() => movePlaylistItem(idx, "down")}
-                        disabled={idx === config.playlists.length - 1}
-                        style={{ padding: "2px 5px", fontSize: "0.65rem", lineHeight: 1 }}
-                        title="Move playlist down"
-                      >
-                        ▼
-                      </button>
+                        {pl.name}
+                      </div>
+
+                      {/* Row 2: Source pills / Exclusion badges */}
+                      <div style={{ display: "flex", gap: "4px", flexWrap: "wrap", alignItems: "center" }}>
+                        <span
+                          style={{
+                            fontSize: "0.66rem",
+                            padding: "1px 6px",
+                            borderRadius: "4px",
+                            backgroundColor: "var(--bg-surface)",
+                            color: "var(--text-secondary)",
+                            border: "1px solid var(--border-color)",
+                          }}
+                        >
+                          📁 {pl.sources.length} {pl.sources.length === 1 ? "source" : "sources"}
+                        </span>
+
+                        {pl.exclusions && pl.exclusions.length > 0 && (
+                          <span
+                            style={{
+                              fontSize: "0.66rem",
+                              padding: "1px 6px",
+                              borderRadius: "4px",
+                              backgroundColor: "rgba(239, 68, 68, 0.12)",
+                              color: "var(--danger)",
+                              border: "1px solid rgba(239, 68, 68, 0.25)",
+                            }}
+                          >
+                            🚫 {pl.exclusions.length} excls
+                          </span>
+                        )}
+
+                        {pl.limit && (
+                          <span
+                            style={{
+                              fontSize: "0.66rem",
+                              padding: "1px 6px",
+                              borderRadius: "4px",
+                              backgroundColor: "rgba(245, 158, 11, 0.12)",
+                              color: "var(--warning)",
+                              border: "1px solid rgba(245, 158, 11, 0.25)",
+                            }}
+                          >
+                            🔢 Limit: {pl.limit}
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Row 3: Track Count or Reorder Buttons */}
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", marginTop: "2px" }}>
+                        <span style={{ fontSize: "0.74rem", color: "var(--text-secondary)" }}>
+                          {trackCount !== undefined ? `🎵 ${trackCount} tracks` : "🎵 —"}
+                        </span>
+
+                        {isReordering && (
+                          <div style={{ display: "flex", gap: "2px" }} onClick={(e) => e.stopPropagation()}>
+                            <button
+                              className="btn btn-secondary"
+                              onClick={() => movePlaylistItem(idx, "up")}
+                              disabled={idx === 0}
+                              style={{ padding: "2px 5px", fontSize: "0.65rem", lineHeight: 1 }}
+                              title="Move playlist up"
+                            >
+                              ▲
+                            </button>
+                            <button
+                              className="btn btn-secondary"
+                              onClick={() => movePlaylistItem(idx, "down")}
+                              disabled={idx === config.playlists.length - 1}
+                              style={{ padding: "2px 5px", fontSize: "0.65rem", lineHeight: 1 }}
+                              title="Move playlist down"
+                            >
+                              ▼
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     </div>
-                  )}
-                </li>
-              ))}
-            </ul>
+                  );
+                })}
+              </div>
+            )}
           </div>
+
           <button 
             className="btn btn-secondary" 
             onClick={handleAddPlaylist} 
@@ -510,7 +786,8 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
               width: "100%", 
               marginTop: "auto", 
               flexShrink: 0,
-              padding: "10px 12px",
+              padding: "8px 12px",
+              fontSize: "0.82rem",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",

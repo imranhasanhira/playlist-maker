@@ -30,7 +30,6 @@ export const EntryDetail: React.FC<EntryDetailProps> = ({
   onDeleteFilesExecuted,
 }) => {
   const [formData, setFormData] = useState<DownloadEntry | null>(entry);
-  const [isSaving, setIsSaving] = useState(false);
   const [localIsRefreshing, setLocalIsRefreshing] = useState(false);
   const isRefreshing = isRefreshingEntry || localIsRefreshing;
 
@@ -55,13 +54,24 @@ export const EntryDetail: React.FC<EntryDetailProps> = ({
   const PREDEFINED_TAGS = ["Bangla", "Hindi", "English"];
   const combinedSuggestions = Array.from(new Set([...PREDEFINED_TAGS, ...allExistingLabels]));
 
+  const updateField = (changes: Partial<DownloadEntry>) => {
+    if (!formData) return;
+    const updated = {
+      ...formData,
+      ...changes,
+      updated_at: Date.now(),
+    };
+    setFormData(updated);
+    onSaveEntry(updated);
+  };
+
   const handlePickDir = async () => {
     try {
       const selected = await invoke<string | null>("select_directory", {
         title: "Select Output Folder for Entry",
       });
-      if (selected) {
-        setFormData({ ...formData, output_dir: selected });
+      if (selected && formData) {
+        updateField({ output_dir: selected });
       }
     } catch (e) {
       alert("Error picking directory: " + e);
@@ -69,24 +79,11 @@ export const EntryDetail: React.FC<EntryDetailProps> = ({
   };
 
   const handleAddChip = (chip: string) => {
+    if (!formData) return;
     const current = formData.labels.split(",").map((l) => l.trim()).filter(Boolean);
     if (!current.includes(chip)) {
       current.push(chip);
-      setFormData({ ...formData, labels: current.join(", ") });
-    }
-  };
-
-  const handleSave = async () => {
-    setIsSaving(true);
-    try {
-      await onSaveEntry({
-        ...formData,
-        updated_at: Date.now(),
-      });
-    } catch (e) {
-      alert("Error saving entry: " + e);
-    } finally {
-      setIsSaving(false);
+      updateField({ labels: current.join(", ") });
     }
   };
 
@@ -199,6 +196,7 @@ export const EntryDetail: React.FC<EntryDetailProps> = ({
             type="text"
             value={formData.name}
             onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+            onBlur={() => onSaveEntry(formData)}
             placeholder="Entry display name..."
           />
         </div>
@@ -210,6 +208,7 @@ export const EntryDetail: React.FC<EntryDetailProps> = ({
             type="text"
             value={formData.url}
             onChange={(e) => setFormData({ ...formData, url: e.target.value })}
+            onBlur={() => onSaveEntry(formData)}
             placeholder="https://..."
             style={{ fontFamily: "var(--font-mono)", fontSize: "0.8rem" }}
           />
@@ -244,6 +243,7 @@ export const EntryDetail: React.FC<EntryDetailProps> = ({
             type="text"
             value={formData.labels}
             onChange={(e) => setFormData({ ...formData, labels: e.target.value })}
+            onBlur={() => onSaveEntry(formData)}
             placeholder="e.g. Bangla, Classics, Coke Studio"
           />
         </div>
@@ -256,6 +256,7 @@ export const EntryDetail: React.FC<EntryDetailProps> = ({
               type="text"
               value={formData.output_dir}
               onChange={(e) => setFormData({ ...formData, output_dir: e.target.value })}
+              onBlur={() => onSaveEntry(formData)}
               placeholder="e.g. /Music/Youtube"
             />
             <button className="btn btn-secondary" type="button" onClick={handlePickDir}>
@@ -270,8 +271,7 @@ export const EntryDetail: React.FC<EntryDetailProps> = ({
           <select
             value={formData.audio_format || "default"}
             onChange={(e) =>
-              setFormData({
-                ...formData,
+              updateField({
                 audio_format: e.target.value === "default" ? null : e.target.value,
               })
             }
@@ -288,8 +288,7 @@ export const EntryDetail: React.FC<EntryDetailProps> = ({
           <select
             value={formData.use_archive === null ? "default" : formData.use_archive ? "true" : "false"}
             onChange={(e) =>
-              setFormData({
-                ...formData,
+              updateField({
                 use_archive: e.target.value === "default" ? null : e.target.value === "true",
               })
             }
@@ -352,17 +351,7 @@ export const EntryDetail: React.FC<EntryDetailProps> = ({
       </div>
 
       {/* Bottom Actions Row */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "4px" }}>
-        <button
-          type="button"
-          className="btn btn-secondary"
-          onClick={handleSave}
-          disabled={isSaving}
-          style={{ padding: "6px 16px", fontSize: "0.82rem" }}
-        >
-          {isSaving ? "Saving..." : "💾 Save Changes"}
-        </button>
-
+      <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", marginTop: "4px" }}>
         <div style={{ display: "flex", gap: "8px" }}>
           <button
             type="button"
