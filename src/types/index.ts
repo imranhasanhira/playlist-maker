@@ -170,3 +170,49 @@ export interface SystemBinariesStatus {
   ffmpeg_installed: boolean;
   ffmpeg_version?: string;
 }
+
+export type DownloadEntryStatus = 'new' | 'complete' | 'partial' | 'downloading' | 'error' | 'stale';
+
+export interface DownloadEntry {
+  id: string;
+  url: string;
+  name: string;
+  labels: string;
+  output_dir: string;
+  audio_format: string | null;
+  use_archive: boolean | null;
+  ignore_errors: boolean | null;
+  total_songs: number;
+  songs_on_disk: number;
+  playlist_title: string;
+  artist: string;
+  album: string;
+  status: DownloadEntryStatus;
+  last_download_at: number | null;
+  last_error: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface DownloadGlobalSettings {
+  default_output_dir: string;
+  default_audio_format: string;
+  default_use_archive: boolean;
+  archive_path: string;
+  default_ignore_errors: boolean;
+  max_parallel_jobs: number;
+}
+
+export interface PlaylistMetadata {
+  title: string;
+  artist: string;
+  album: string;
+  total_songs: number;
+  video_ids: string[];
+}
+
+export interface DeleteFilesReport {
+  files: string[];
+  total_bytes: number;
+}
+

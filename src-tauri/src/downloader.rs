@@ -154,7 +154,16 @@ pub async fn start_download_job(
                         let prefix = &line[..percent_idx];
                         if let Some(num_str) = prefix.split_whitespace().last() {
                             if let Ok(p) = num_str.parse::<f64>() {
-                                last_progress = p;
+                                let overall_progress = match (current_item, total_items) {
+                                    (Some(curr), Some(tot)) if tot > 0 => {
+                                        let completed_items = if curr > 0 { curr - 1 } else { 0 };
+                                        let item_fraction = (p.min(100.0) / 100.0).max(0.0);
+                                        ((completed_items as f64 + item_fraction) / tot as f64 * 100.0).min(99.9)
+                                    }
+                                    _ => p.min(99.0),
+                                };
+
+                                last_progress = overall_progress;
                                 let _ = app_clone.emit(
                                     "download-progress",
                                     DownloadProgressPayload {
@@ -171,6 +180,7 @@ pub async fn start_download_job(
                         }
                     }
                 }
+
 
                 // Extract playlist or video title if available
                 if line.contains("[download] Downloading playlist:") || line.contains("Extracting URL:") {
@@ -345,3 +355,224 @@ pub async fn reset_playlist_archive_ids(
 
     Ok(removed_count)
 }
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PlaylistMetadata {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub total_songs: u32,
+    pub video_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DeleteFilesReport {
+    pub files: Vec<String>,
+    pub total_bytes: u64,
+}
+
+#[tauri::command]
+pub async fn dl_fetch_playlist_metadata(url: String) -> Result<PlaylistMetadata, String> {
+    if url.trim().is_empty() {
+        return Err("URL cannot be empty".to_string());
+    }
+
+    let output = Command::new("yt-dlp")
+        .args(&["--flat-playlist", "--dump-single-json", &url])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to execute yt-dlp: {}", e))?;
+
+    if !output.status.success() {
+        let err_msg = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("yt-dlp failed: {}", err_msg));
+    }
+
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout_str)
+        .map_err(|e| format!("Failed to parse metadata JSON: {}", e))?;
+
+    let mut video_ids = Vec::new();
+
+    let _type = json.get("_type").and_then(|v| v.as_str()).unwrap_or("");
+
+    let (title, artist, album) = if _type == "playlist" || json.get("entries").is_some() {
+        let t = json.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let art = json.get("uploader").or_else(|| json.get("channel")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let alb = json.get("album").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+        if let Some(entries) = json.get("entries").and_then(|v| v.as_array()) {
+            for entry in entries {
+                if let Some(id) = entry.get("id").and_then(|v| v.as_str()) {
+                    video_ids.push(id.to_string());
+                }
+            }
+        }
+        (t, art, alb)
+    } else {
+        // Single video
+        let t = json.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let art = json.get("uploader").or_else(|| json.get("artist")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let alb = json.get("album").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if let Some(id) = json.get("id").and_then(|v| v.as_str()) {
+            video_ids.push(id.to_string());
+        }
+        (t, art, alb)
+    };
+
+
+    let total_songs = video_ids.len() as u32;
+
+    Ok(PlaylistMetadata {
+        title,
+        artist,
+        album,
+        total_songs,
+        video_ids,
+    })
+}
+
+#[tauri::command]
+pub async fn dl_count_songs_on_disk(
+    output_dir: String,
+    playlist_title: String,
+    formats: Vec<String>,
+) -> Result<u32, String> {
+    tokio::task::spawn_blocking(move || {
+        let base_path = std::path::Path::new(&output_dir);
+        let target_dir = if !playlist_title.trim().is_empty() {
+            base_path.join(playlist_title.trim())
+        } else {
+            base_path.to_path_buf()
+        };
+
+        if !target_dir.exists() {
+            return Ok(0);
+        }
+
+        let formats_set: std::collections::HashSet<String> = if formats.is_empty() {
+            vec!["mp3", "m4a", "wav", "flac", "ogg", "aac", "wma", "alac", "opus"]
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect()
+        } else {
+            formats.into_iter().map(|s| s.to_lowercase()).collect()
+        };
+
+        let mut count = 0;
+        for entry in walkdir::WalkDir::new(&target_dir).into_iter().filter_map(|e| e.ok()) {
+            if entry.file_type().is_file() {
+                if let Some(ext) = entry.path().extension().and_then(|s| s.to_str()) {
+                    if formats_set.contains(&ext.to_lowercase()) {
+                        count += 1;
+                    }
+                }
+            }
+        }
+
+        Ok(count)
+    })
+    .await
+    .map_err(|e| format!("Thread execution error: {}", e))?
+}
+
+#[tauri::command]
+pub async fn dl_get_delete_files_report(
+    output_dir: String,
+    playlist_title: String,
+) -> Result<DeleteFilesReport, String> {
+    tokio::task::spawn_blocking(move || {
+        let base_path = std::path::Path::new(&output_dir);
+        let target_dir = if !playlist_title.trim().is_empty() {
+            base_path.join(playlist_title.trim())
+        } else {
+            base_path.to_path_buf()
+        };
+
+        if !target_dir.exists() {
+            return Ok(DeleteFilesReport {
+                files: Vec::new(),
+                total_bytes: 0,
+            });
+        }
+
+        let mut files = Vec::new();
+        let mut total_bytes: u64 = 0;
+
+        for entry in walkdir::WalkDir::new(&target_dir).into_iter().filter_map(|e| e.ok()) {
+            if entry.file_type().is_file() {
+                if let Ok(meta) = entry.metadata() {
+                    total_bytes += meta.len();
+                }
+                files.push(entry.path().to_string_lossy().to_string());
+            }
+        }
+
+        files.sort();
+
+        Ok(DeleteFilesReport { files, total_bytes })
+    })
+    .await
+    .map_err(|e| format!("Thread execution error: {}", e))?
+}
+
+#[tauri::command]
+pub async fn dl_execute_delete_files(
+    output_dir: String,
+    playlist_title: String,
+    archive_path: String,
+    video_ids: Vec<String>,
+) -> Result<u32, String> {
+    tokio::task::spawn_blocking(move || {
+        let base_path = std::path::Path::new(&output_dir);
+        let target_dir = if !playlist_title.trim().is_empty() {
+            base_path.join(playlist_title.trim())
+        } else {
+            base_path.to_path_buf()
+        };
+
+        let mut deleted_count = 0;
+        if target_dir.exists() {
+            // Delete all files inside target_dir
+            for entry in walkdir::WalkDir::new(&target_dir).into_iter().filter_map(|e| e.ok()) {
+                if entry.file_type().is_file() {
+                    if std::fs::remove_file(entry.path()).is_ok() {
+                        deleted_count += 1;
+                    }
+                }
+            }
+            // Remove target directory if empty or remove directory tree
+            let _ = std::fs::remove_dir_all(&target_dir);
+        }
+
+        // Clean up archive file if specified
+        if !video_ids.is_empty() {
+            let resolved_archive = resolve_archive_path(&archive_path, &output_dir);
+            let archive_file_path = std::path::Path::new(&resolved_archive);
+            if archive_file_path.exists() {
+                if let Ok(content) = std::fs::read_to_string(archive_file_path) {
+                    let id_set: std::collections::HashSet<String> = video_ids.into_iter().collect();
+                    let remaining_lines: Vec<&str> = content
+                        .lines()
+                        .filter(|line| {
+                            let trimmed = line.trim();
+                            !id_set.iter().any(|id| trimmed.ends_with(id) || trimmed.contains(id))
+                        })
+                        .collect();
+
+                    let new_content = if remaining_lines.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{}\n", remaining_lines.join("\n"))
+                    };
+                    let _ = std::fs::write(archive_file_path, new_content);
+                }
+            }
+        }
+
+        Ok(deleted_count)
+    })
+    .await
+    .map_err(|e| format!("Thread execution error: {}", e))?
+}
+
