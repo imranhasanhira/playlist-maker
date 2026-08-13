@@ -110,42 +110,46 @@ export const AddEntryModal: React.FC<AddEntryModalProps> = ({
   };
 
   const handleSubmit = async (downloadImmediately: boolean) => {
-    if (!url.trim()) {
-      alert("Please provide a valid YouTube / media URL.");
+    const trimmedUrl = url.trim();
+    if (!trimmedUrl) {
+      setFetchError("Please enter a valid playlist or video URL.");
       return;
     }
     if (duplicateEntry) {
       alert(`An entry for this playlist URL already exists: "${duplicateEntry.name}"`);
       return;
     }
-    if (!outputDir.trim()) {
-      alert("Please specify an output folder.");
-      return;
+
+    let targetDir = outputDir.trim();
+    if (!targetDir) {
+      try {
+        const selected = await invoke<string | null>("select_directory", {
+          title: "Select Output Destination Folder for Downloads",
+        });
+        if (selected) {
+          targetDir = selected;
+          setOutputDir(selected);
+        } else {
+          return; // User cancelled folder selection
+        }
+      } catch (e) {
+        alert("Please specify an output folder for downloads.");
+        return;
+      }
     }
 
     setIsSubmitting(true);
     try {
-      let meta = fetchedMetadata;
-      if (!meta && !fetchError) {
-        try {
-          meta = await invoke<PlaylistMetadata>("dl_fetch_playlist_metadata", {
-            url: url.trim(),
-          });
-        } catch (e) {
-          setFetchError(String(e));
-        }
-      }
-
-      const finalName = name.trim() || meta?.title || "Playlist Entry";
+      const finalName = name.trim() || fetchedMetadata?.title || "Playlist Entry";
 
       await onAddEntry({
-        url: url.trim(),
+        url: trimmedUrl,
         name: finalName,
         labels: labels.trim(),
-        output_dir: outputDir.trim(),
+        output_dir: targetDir,
         audio_format: audioFormat === "default" ? null : audioFormat,
         use_archive: useArchive === "default" ? null : useArchive === "true",
-        metadata: meta || undefined,
+        metadata: fetchedMetadata || undefined,
         startDownloadImmediately: downloadImmediately,
       });
 
@@ -329,17 +333,17 @@ export const AddEntryModal: React.FC<AddEntryModalProps> = ({
             className="btn btn-secondary"
             type="button"
             onClick={() => handleSubmit(false)}
-            disabled={isSubmitting}
+            disabled={isSubmitting || !url.trim() || !!duplicateEntry}
           >
-            💾 Add Entry
+            {isSubmitting ? "⏳ Adding Entry..." : "💾 Add Entry"}
           </button>
           <button
             className="btn btn-primary"
             type="button"
             onClick={() => handleSubmit(true)}
-            disabled={isSubmitting}
+            disabled={isSubmitting || !url.trim() || !!duplicateEntry}
           >
-            🚀 Add & Download Now
+            {isSubmitting ? "⏳ Adding & Downloading..." : "🚀 Add & Download Now"}
           </button>
         </div>
       </div>

@@ -346,10 +346,18 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
           ? "partial"
           : entry.status;
 
+      // Update name if entry.name is empty, equal to default placeholder, or equal to raw URL
+      const isDefaultName =
+        !entry.name ||
+        entry.name === "Playlist Entry" ||
+        entry.name === entry.url ||
+        entry.name.trim() === "";
+      const finalName = isDefaultName && meta.title ? meta.title : entry.name || meta.title || "Playlist Entry";
+
       const updated: DownloadEntry = {
         ...entry,
-        name: entry.name || meta.title,
-        playlist_title: meta.title || entry.playlist_title,
+        name: finalName,
+        playlist_title: meta.title || entry.playlist_title || finalName,
         artist: meta.artist || entry.artist,
         album: meta.album || entry.album,
         total_songs: meta.total_songs,
@@ -398,12 +406,14 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
       outputDir: data.output_dir,
       playlistTitle: data.metadata?.title || data.name,
       formats: [],
-    });
+    }).catch(() => 0);
+
+    const initialName = data.name.trim();
 
     const newEntry: DownloadEntry = {
       id,
       url: data.url,
-      name: data.name,
+      name: initialName || data.metadata?.title || "",
       labels: data.labels,
       output_dir: data.output_dir,
       audio_format: data.audio_format,
@@ -411,7 +421,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
       ignore_errors: null,
       total_songs: totalSongs,
       songs_on_disk: count,
-      playlist_title: data.metadata?.title || data.name,
+      playlist_title: data.metadata?.title || initialName || "",
       artist: data.metadata?.artist || "",
       album: data.metadata?.album || "",
       status: count > 0 && totalSongs > 0 && count >= totalSongs ? "complete" : count > 0 ? "partial" : "new",
@@ -421,12 +431,20 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
       updated_at: Date.now(),
     };
 
-    await invoke("dl_store_save_entry", { entry: newEntry });
+    try {
+      await invoke("dl_store_save_entry", { entry: newEntry });
+    } catch (e) {
+      console.error("Error saving entry to SQLite:", e);
+    }
+
     setEntries((prev) => [newEntry, ...prev]);
     setSelectedEntryId(id);
 
+    // Trigger metadata refresh to update name, title, artist, total_songs once fetch completes
+    handleRefreshMetadata(newEntry);
+
     if (data.startDownloadImmediately) {
-      await handleStartSingleDownload(newEntry);
+      handleStartSingleDownload(newEntry);
     }
   };
 
