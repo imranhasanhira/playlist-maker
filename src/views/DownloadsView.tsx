@@ -450,6 +450,15 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
 
   // Single Entry Download Trigger
   const handleStartSingleDownload = async (targetEntry: DownloadEntry) => {
+    // Prevent duplicate download if entry is already downloading
+    const isAlreadyRunning = jobs.some(
+      (j) => (j.url === targetEntry.url || j.id.startsWith(`dl_${targetEntry.id}_`)) && j.status === "running"
+    );
+    if (isAlreadyRunning) {
+      alert(`A download for "${targetEntry.name || targetEntry.url}" is already in progress.`);
+      return;
+    }
+
     // 1. Refresh metadata & count first
     await handleRefreshMetadata(targetEntry);
 
@@ -577,9 +586,22 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
   };
 
   const handleStartBatchDownload = async () => {
-    const queueEntries = filteredEntries.filter((e) => e.status !== "complete");
+    // Find URLs of entries that are ALREADY running
+    const activeJobUrls = new Set(
+      jobs.filter((j) => j.status === "running").map((j) => j.url)
+    );
+
+    // Exclude complete entries AND entries that are currently downloading
+    const queueEntries = filteredEntries.filter(
+      (e) => e.status !== "complete" && !activeJobUrls.has(e.url)
+    );
+
     if (queueEntries.length === 0) {
-      alert("All visible entries in this filter are already complete!");
+      if (activeJobUrls.size > 0) {
+        alert("All remaining incomplete entries are already downloading!");
+      } else {
+        alert("All visible entries in this filter are already complete!");
+      }
       return;
     }
 
@@ -629,6 +651,14 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
 
   const runSingleJobInBatch = async (entry: DownloadEntry): Promise<"completed" | "cancelled" | "failed"> => {
     if (isBatchCancelledRef.current) return "cancelled";
+
+    // Guard against duplicate execution if entry started running concurrently
+    const isAlreadyRunning = jobs.some(
+      (j) => (j.url === entry.url || j.id.startsWith(`dl_${entry.id}_`)) && j.status === "running"
+    );
+    if (isAlreadyRunning) {
+      return "completed";
+    }
 
     const jobId = `dl_${entry.id}_${Date.now()}`;
     const audioFormat = entry.audio_format || globalSettings.default_audio_format;
