@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef, useLayoutEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   MainConfig,
@@ -282,9 +282,27 @@ export const ExportView: React.FC<ExportViewProps> = ({
   };
 
   const logContainerRef = useRef<HTMLDivElement | null>(null);
+  const isExportAutoScrollRef = useRef<boolean>(true);
+  const [isExportAutoScroll, setIsExportAutoScroll] = useState<boolean>(true);
 
-  useEffect(() => {
+  const handleExportLogsScroll = () => {
+    if (!logContainerRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = logContainerRef.current;
+    const isAtBottom = scrollHeight - scrollTop - clientHeight <= 45;
+    isExportAutoScrollRef.current = isAtBottom;
+    setIsExportAutoScroll((prev) => (prev !== isAtBottom ? isAtBottom : prev));
+  };
+
+  const handleExportScrollToLatest = () => {
     if (logContainerRef.current) {
+      logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+      isExportAutoScrollRef.current = true;
+      setIsExportAutoScroll(true);
+    }
+  };
+
+  useLayoutEffect(() => {
+    if (logContainerRef.current && isExportAutoScrollRef.current) {
       logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
     }
   }, [exportLogs]);
@@ -296,7 +314,10 @@ export const ExportView: React.FC<ExportViewProps> = ({
     }
     setIsExporting(true);
     setShowLogsModal(true);
-    setExportLogs(["Initializing smart sync export..."]);
+    isExportAutoScrollRef.current = true;
+    setIsExportAutoScroll(true);
+    const cmdStr = `$ sync-export --config "${configPath}" --destination "${exportDir}" --formats "${formats || "all"}"${deleteOrphans ? " --delete-orphans" : ""}`;
+    setExportLogs([cmdStr, "Initializing smart sync export..."]);
     setExportProgress(null);
 
     const taskId = `export_${Date.now()}`;
@@ -306,7 +327,12 @@ export const ExportView: React.FC<ExportViewProps> = ({
     try {
       const { listen } = await import("@tauri-apps/api/event");
       unlistenLog = await listen<string>("export-log", (event) => {
-        setExportLogs((prev) => [...prev, event.payload]);
+        setExportLogs((prev) => {
+          if (event.payload.startsWith("$ sync-export ") && prev.some((l) => l.startsWith("$ sync-export "))) {
+            return prev;
+          }
+          return [...prev, event.payload];
+        });
       });
 
       unlistenProgress = await listen<any>("export-progress", (event) => {
@@ -967,7 +993,32 @@ export const ExportView: React.FC<ExportViewProps> = ({
           }}>
             <div className="card" style={{ width: "720px", maxHeight: "85%", display: "flex", flexDirection: "column", margin: 0, padding: "20px" }}>
               <div className="card-title" style={{ borderBottom: "1px solid var(--border-color)", paddingBottom: "10px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                <span style={{ fontWeight: 600, fontSize: "1rem" }}>Export Progress & Logs</span>
+                <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                  <span style={{ fontWeight: 600, fontSize: "1rem" }}>Export Progress & Logs</span>
+                  {!isExportAutoScroll && exportLogs.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={handleExportScrollToLatest}
+                      style={{
+                        backgroundColor: "rgba(138, 92, 246, 0.15)",
+                        color: "var(--accent-purple-hover)",
+                        border: "1px solid var(--accent-purple)",
+                        borderRadius: "14px",
+                        padding: "2px 10px",
+                        fontSize: "0.74rem",
+                        fontWeight: 600,
+                        cursor: "pointer",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "4px",
+                        transition: "all 0.2s ease",
+                      }}
+                      title="Click to jump to latest logs and resume auto-scroll"
+                    >
+                      <span>⬇ Jump to latest</span>
+                    </button>
+                  )}
+                </div>
                 <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
                   {isExporting && (
                     <button
@@ -1051,7 +1102,12 @@ export const ExportView: React.FC<ExportViewProps> = ({
                 </div>
               )}
 
-              <div ref={logContainerRef} className="console-log" style={{ flex: 1, minHeight: "260px", maxHeight: "400px", overflowY: "auto", marginTop: "12px" }}>
+              <div
+                ref={logContainerRef}
+                onScroll={handleExportLogsScroll}
+                className="console-log"
+                style={{ flex: 1, minHeight: "260px", maxHeight: "400px", overflowY: "auto", marginTop: "12px" }}
+              >
                 {exportLogs.join("\n")}
               </div>
             </div>

@@ -110,6 +110,38 @@ function App() {
     localStorage.setItem("theme", theme);
   }, [theme]);
 
+  // Ensure window fits full usable screen space without any cutoff (not fullscreen)
+  useEffect(() => {
+    const fitWindow = async () => {
+      try {
+        await invoke("fit_window_to_screen");
+      } catch (err) {
+        try {
+          const { getCurrentWindow, currentMonitor, LogicalPosition, LogicalSize } = await import("@tauri-apps/api/window");
+          const win = getCurrentWindow();
+          const monitor = await currentMonitor();
+          if (monitor && monitor.workArea) {
+            const scale = monitor.scaleFactor || 1;
+            const x = monitor.workArea.position.x / scale;
+            const y = monitor.workArea.position.y / scale;
+            const width = monitor.workArea.size.width / scale;
+            const height = monitor.workArea.size.height / scale;
+
+            // Accurately align origin and size to display work area (below menu bar, above Dock)
+            await win.setPosition(new LogicalPosition(x, y));
+            await win.setSize(new LogicalSize(width, height));
+          } else {
+            await win.maximize();
+          }
+        } catch (e) {
+          console.error("Failed to fit window to screen work area:", e);
+        }
+      }
+    };
+
+    fitWindow();
+  }, []);
+
   // OS Filesystem Watcher (3s debounced) listener
   useEffect(() => {
     let unlisten: (() => void) | null = null;

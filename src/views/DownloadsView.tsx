@@ -26,6 +26,38 @@ type DownloadsViewProps = {
   config: MainConfig | null;
 };
 
+function getYtDlpCommandLine(params: {
+  url: string;
+  outputDir: string;
+  audioFormat: string;
+  useArchive: boolean;
+  archivePath?: string;
+  ignoreErrors: boolean;
+}): string {
+  const args: string[] = [];
+  if (params.ignoreErrors) {
+    args.push("--ignore-errors");
+  }
+  args.push("-f", '"ba[ext=m4a]/ba"');
+  args.push("-x");
+  args.push("--audio-format", params.audioFormat);
+  args.push("--audio-quality", "0");
+  args.push("--embed-thumbnail");
+  args.push("--embed-metadata");
+  args.push("--convert-thumbnails", "jpg");
+
+  if (params.useArchive) {
+    const arch = params.archivePath?.trim() ? params.archivePath : `${params.outputDir}/archive.txt`;
+    args.push("--download-archive", `"${arch}"`);
+  }
+
+  const outTemplate = `"${params.outputDir}/%(playlist_title)s/%(title)s.%(ext)s"`;
+  args.push("-o", outTemplate);
+  args.push(`"${params.url}"`);
+
+  return `$ yt-dlp ${args.join(" ")}`;
+}
+
 export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
   // Binary detection status
   const [binaries, setBinaries] = useState<SystemBinariesStatus | null>(null);
@@ -156,6 +188,9 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
         setJobs((prevJobs) =>
           prevJobs.map((j) => {
             if (j.id === job_id) {
+              if (line.startsWith("$ yt-dlp ") && j.logs.some((l) => l.startsWith("$ yt-dlp "))) {
+                return j;
+              }
               return { ...j, logs: [...j.logs, line] };
             }
             return j;
@@ -477,7 +512,17 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
       ignore_errors: ignoreErrors,
       status: "running",
       progress: 0,
-      logs: [`🚀 Initializing yt-dlp download job for: ${targetEntry.name || targetEntry.url}`],
+      logs: [
+        getYtDlpCommandLine({
+          url: targetEntry.url,
+          outputDir: targetEntry.output_dir,
+          audioFormat,
+          useArchive,
+          archivePath: globalSettings.archive_path,
+          ignoreErrors,
+        }),
+        `🚀 Initializing yt-dlp download job for: ${targetEntry.name || targetEntry.url}`,
+      ],
       start_time: Date.now(),
       title: targetEntry.name,
     };
@@ -675,7 +720,17 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
       ignore_errors: ignoreErrors,
       status: "running",
       progress: 0,
-      logs: [`🚀 Initializing batch job for: ${entry.name}`],
+      logs: [
+        getYtDlpCommandLine({
+          url: entry.url,
+          outputDir: entry.output_dir,
+          audioFormat,
+          useArchive,
+          archivePath: globalSettings.archive_path,
+          ignoreErrors,
+        }),
+        `🚀 Initializing batch job for: ${entry.name}`,
+      ],
       start_time: Date.now(),
       title: entry.name,
     };
@@ -913,6 +968,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
               onTabChange={setConsoleTab}
               selectedJobLogs={selectedEntryJob?.logs || []}
               selectedJobTitle={selectedEntry?.name}
+              selectedJobId={selectedEntryJob?.id || selectedEntry?.id}
               batchQueueItems={batchQueueItems}
               isBatchRunning={!!isBatchRunning}
               onCancelJob={handleCancelJob}

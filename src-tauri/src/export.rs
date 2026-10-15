@@ -467,6 +467,15 @@ pub async fn execute_export(
         logs.push(msg);
     };
 
+    let formats_str = formats.join(",");
+    let exact_cmd = format!(
+        "$ sync-export --config \"{}\" --destination \"{}\" --formats \"{}\"{}",
+        config_path,
+        destination,
+        formats_str,
+        if delete_orphans { " --delete-orphans" } else { "" }
+    );
+    push_log(exact_cmd, &mut logs);
     push_log("Starting smart sync export process...".to_string(), &mut logs);
 
     let report = analyze_export_diff(
