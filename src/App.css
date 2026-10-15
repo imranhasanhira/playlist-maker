@@ -598,7 +598,6 @@ tr:hover td {
   font-family: var(--font-mono);
   font-size: 0.85rem;
   color: #10b981;
-  max-height: 250px;
   overflow-y: auto;
   white-space: pre-wrap;
 }

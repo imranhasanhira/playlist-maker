@@ -81,6 +81,27 @@ pub async fn start_download_job(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    let formatted_args = args
+        .iter()
+        .map(|a| {
+            if a.contains(' ') || a.contains('"') || a.contains('\'') || a.contains('[') || a.contains(']') || a.contains('$') || a.contains('%') {
+                format!("\"{}\"", a.replace('\\', "\\\\").replace('"', "\\\""))
+            } else {
+                a.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let full_command = format!("$ yt-dlp {}", formatted_args);
+
+    let _ = app.emit(
+        "download-log",
+        DownloadLogPayload {
+            job_id: job_id.clone(),
+            line: full_command,
+        },
+    );
+
     let mut child = command
         .spawn()
         .map_err(|e| format!("Failed to start yt-dlp. Make sure yt-dlp is installed and in PATH: {}", e))?;

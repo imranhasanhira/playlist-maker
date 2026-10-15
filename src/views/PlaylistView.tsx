@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef, useLayoutEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { MainConfig, AudioTrack, TrackPreview } from "../types";
 import { ResolvedTracksPanel } from "../components/ResolvedTracksPanel";
@@ -32,6 +32,32 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   const [generationLogs, setGenerationLogs] = useState<string[]>([]);
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
   const [showLogsModal, setShowLogsModal] = useState<boolean>(false);
+  const compilationLogsRef = useRef<HTMLDivElement | null>(null);
+  const isCompilationAutoScrollRef = useRef<boolean>(true);
+  const [isCompilationAutoScroll, setIsCompilationAutoScroll] = useState<boolean>(true);
+
+  const handleCompilationLogsScroll = () => {
+    if (!compilationLogsRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = compilationLogsRef.current;
+    const isAtBottom = scrollHeight - scrollTop - clientHeight <= 45;
+    isCompilationAutoScrollRef.current = isAtBottom;
+    setIsCompilationAutoScroll((prev) => (prev !== isAtBottom ? isAtBottom : prev));
+  };
+
+  const handleCompilationScrollToLatest = () => {
+    if (compilationLogsRef.current) {
+      compilationLogsRef.current.scrollTop = compilationLogsRef.current.scrollHeight;
+      isCompilationAutoScrollRef.current = true;
+      setIsCompilationAutoScroll(true);
+    }
+  };
+
+  useLayoutEffect(() => {
+    if (showLogsModal && compilationLogsRef.current && isCompilationAutoScrollRef.current) {
+      compilationLogsRef.current.scrollTop = compilationLogsRef.current.scrollHeight;
+    }
+  }, [generationLogs, showLogsModal]);
+
   const [isConfirmingDelete, setIsConfirmingDelete] = useState<boolean>(false);
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
     try {
@@ -438,7 +464,10 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     if (!configPath) return;
     setIsGenerating(true);
     setShowLogsModal(true);
-    setGenerationLogs(["Starting playlist compilation..."]);
+    isCompilationAutoScrollRef.current = true;
+    setIsCompilationAutoScroll(true);
+    const cmdStr = `$ generate-playlists --config "${configPath}" --formats "${formats}"${relativeToConfig ? " --relative-to-config" : ""}`;
+    setGenerationLogs([cmdStr, "Starting playlist compilation..."]);
     try {
       const logs = await invoke<string[]>("generate_all_playlists", {
         configPath,
@@ -1087,8 +1116,33 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
           zIndex: 1000
         }}>
           <div className="card" style={{ width: "650px", maxHeight: "80%", display: "flex", flexDirection: "column", margin: 0, padding: "24px" }}>
-            <div className="card-title" style={{ borderBottom: "1px solid var(--border-color)", paddingBottom: "12px" }}>
-              <span>Playlist Compiler Logs</span>
+            <div className="card-title" style={{ borderBottom: "1px solid var(--border-color)", paddingBottom: "12px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                <span>Playlist Compiler Logs</span>
+                {!isCompilationAutoScroll && generationLogs.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleCompilationScrollToLatest}
+                    style={{
+                      backgroundColor: "rgba(138, 92, 246, 0.15)",
+                      color: "var(--accent-purple-hover)",
+                      border: "1px solid var(--accent-purple)",
+                      borderRadius: "14px",
+                      padding: "2px 10px",
+                      fontSize: "0.74rem",
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "4px",
+                      transition: "all 0.2s ease",
+                    }}
+                    title="Click to jump to latest logs and resume auto-scroll"
+                  >
+                    <span>⬇ Jump to latest</span>
+                  </button>
+                )}
+              </div>
               <button
                 className="btn btn-secondary"
                 onClick={() => setShowLogsModal(false)}
@@ -1098,7 +1152,12 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                 Close Logs
               </button>
             </div>
-            <div className="console-log" style={{ flex: 1, minHeight: "300px", maxHeight: "400px", overflowY: "auto", marginTop: "16px" }}>
+            <div
+              ref={compilationLogsRef}
+              onScroll={handleCompilationLogsScroll}
+              className="console-log"
+              style={{ flex: 1, minHeight: "300px", maxHeight: "400px", overflowY: "auto", marginTop: "16px" }}
+            >
               {generationLogs.join("\n")}
             </div>
           </div>

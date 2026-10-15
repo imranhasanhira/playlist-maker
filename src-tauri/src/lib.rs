@@ -108,6 +108,12 @@ async fn generate_all_playlists(
             .collect();
 
         let mut logs = Vec::new();
+        logs.push(format!(
+            "$ generate-playlists --config \"{}\" --formats \"{}\"{}",
+            configPath,
+            formats,
+            if relativeToConfig { " --relative-to-config" } else { "" }
+        ));
         logs.push(format!("Writing all playlist files to {}", resolved_target_dir.display()));
 
         for playlist_config in &config.playlists {
@@ -406,6 +412,19 @@ async fn preview_directory_tracks(
     .map_err(|e| format!("Thread execution error: {}", e))?
 }
 
+#[tauri::command]
+async fn fit_window_to_screen(window: tauri::WebviewWindow) -> Result<(), String> {
+    let mon = window.current_monitor().ok().flatten().or_else(|| window.primary_monitor().ok().flatten());
+    if let Some(monitor) = mon {
+        let work_area = monitor.work_area();
+        let _ = window.set_position(work_area.position);
+        let _ = window.set_size(work_area.size);
+    } else {
+        let _ = window.maximize();
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -413,10 +432,19 @@ pub fn run() {
         .setup(|app| {
             let conn = download_store::init_db(app.handle())?;
             app.manage(download_store::DbState(Mutex::new(conn)));
+            if let Some(window) = app.get_webview_window("main") {
+                let mon = window.current_monitor().ok().flatten().or_else(|| window.primary_monitor().ok().flatten());
+                if let Some(monitor) = mon {
+                    let work_area = monitor.work_area();
+                    let _ = window.set_position(work_area.position);
+                    let _ = window.set_size(work_area.size);
+                }
+            }
             Ok(())
         })
         .manage(watcher::WatcherState::default())
         .invoke_handler(tauri::generate_handler![
+            fit_window_to_screen,
             load_workspace,
             save_workspace,
             preview_playlist_tracks,

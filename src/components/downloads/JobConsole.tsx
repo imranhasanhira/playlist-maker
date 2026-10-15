@@ -1,4 +1,4 @@
-import React, { useRef, useEffect } from "react";
+import React, { useRef, useEffect, useState, useLayoutEffect } from "react";
 import { DownloadJob, DownloadEntry } from "../../types";
 import { ProgressBar } from "../common/ProgressBar";
 
@@ -13,6 +13,7 @@ type JobConsoleProps = {
   onTabChange: (tab: "logs" | "queue") => void;
   selectedJobLogs: string[];
   selectedJobTitle?: string;
+  selectedJobId?: string;
   batchQueueItems: BatchQueueItem[];
   isBatchRunning: boolean;
   onCancelJob: (jobId: string) => void;
@@ -24,18 +25,69 @@ export const JobConsole: React.FC<JobConsoleProps> = ({
   onTabChange,
   selectedJobLogs,
   selectedJobTitle,
+  selectedJobId,
   batchQueueItems,
   isBatchRunning,
   onCancelJob,
   onCancelAllBatchJobs,
 }) => {
   const logBoxRef = useRef<HTMLDivElement | null>(null);
+  const isAutoScrollRef = useRef<boolean>(true);
+  const [isAutoScroll, setIsAutoScroll] = useState<boolean>(true);
 
+  // When job or entry selection changes, reset to bottom & re-enable auto-scroll
+  const prevJobKeyRef = useRef<string | undefined>(selectedJobId || selectedJobTitle);
   useEffect(() => {
-    if (activeTab === "logs" && logBoxRef.current) {
+    const currentKey = selectedJobId || selectedJobTitle;
+    if (prevJobKeyRef.current !== currentKey) {
+      prevJobKeyRef.current = currentKey;
+      isAutoScrollRef.current = true;
+      setIsAutoScroll(true);
+      if (logBoxRef.current) {
+        logBoxRef.current.scrollTop = logBoxRef.current.scrollHeight;
+      }
+    }
+  }, [selectedJobId, selectedJobTitle]);
+
+  // When switching to logs tab, scroll to bottom & enable auto-scroll
+  const prevActiveTabRef = useRef(activeTab);
+  useEffect(() => {
+    if (prevActiveTabRef.current !== activeTab) {
+      prevActiveTabRef.current = activeTab;
+      if (activeTab === "logs") {
+        isAutoScrollRef.current = true;
+        setIsAutoScroll(true);
+        if (logBoxRef.current) {
+          logBoxRef.current.scrollTop = logBoxRef.current.scrollHeight;
+        }
+      }
+    }
+  }, [activeTab]);
+
+  // Handle user scroll: if user scrolls up away from bottom, pause auto-scroll.
+  // If user scrolls back down to the bottom, resume auto-scroll.
+  const handleScroll = () => {
+    if (!logBoxRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = logBoxRef.current;
+    const isAtBottom = scrollHeight - scrollTop - clientHeight <= 45;
+    isAutoScrollRef.current = isAtBottom;
+    setIsAutoScroll((prev) => (prev !== isAtBottom ? isAtBottom : prev));
+  };
+
+  // Only auto-scroll to latest if user is currently at the bottom (or auto-scroll enabled)
+  useLayoutEffect(() => {
+    if (activeTab === "logs" && logBoxRef.current && isAutoScrollRef.current) {
       logBoxRef.current.scrollTop = logBoxRef.current.scrollHeight;
     }
   }, [selectedJobLogs, activeTab]);
+
+  const handleScrollToLatest = () => {
+    if (logBoxRef.current) {
+      logBoxRef.current.scrollTop = logBoxRef.current.scrollHeight;
+      isAutoScrollRef.current = true;
+      setIsAutoScroll(true);
+    }
+  };
 
   const activeCount = batchQueueItems.filter((i) => i.status === "running").length;
 
@@ -56,7 +108,13 @@ export const JobConsole: React.FC<JobConsoleProps> = ({
         <div style={{ display: "flex", gap: "12px", alignItems: "center" }}>
           <button
             type="button"
-            onClick={() => onTabChange("logs")}
+            onClick={() => {
+              if (activeTab === "logs") {
+                handleScrollToLatest();
+              } else {
+                onTabChange("logs");
+              }
+            }}
             style={{
               background: "none",
               border: "none",
@@ -67,6 +125,7 @@ export const JobConsole: React.FC<JobConsoleProps> = ({
               padding: "4px 6px",
               cursor: "pointer",
             }}
+            title={activeTab === "logs" ? "Click to jump to latest logs" : "Switch to logs"}
           >
             📋 Terminal Logs {selectedJobTitle ? `(${selectedJobTitle})` : ""}
           </button>
@@ -104,6 +163,32 @@ export const JobConsole: React.FC<JobConsoleProps> = ({
               </span>
             )}
           </button>
+
+          {/* Jump to latest button right on the tab bar */}
+          {activeTab === "logs" && !isAutoScroll && selectedJobLogs.length > 0 && (
+            <button
+              type="button"
+              onClick={handleScrollToLatest}
+              style={{
+                backgroundColor: "rgba(138, 92, 246, 0.15)",
+                color: "var(--accent-purple-hover)",
+                border: "1px solid var(--accent-purple)",
+                borderRadius: "14px",
+                padding: "2px 10px",
+                fontSize: "0.74rem",
+                fontWeight: 600,
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                gap: "4px",
+                marginLeft: "4px",
+                transition: "all 0.2s ease",
+              }}
+              title="Click to jump to latest logs and resume auto-scroll"
+            >
+              <span>⬇ Jump to latest</span>
+            </button>
+          )}
         </div>
 
         {/* Cancel All Button in Header if Batch Running */}
@@ -123,10 +208,13 @@ export const JobConsole: React.FC<JobConsoleProps> = ({
       {activeTab === "logs" ? (
         <div
           ref={logBoxRef}
+          onScroll={handleScroll}
           className="console-log"
           style={{
             flex: 1,
             minHeight: 0,
+            height: "100%",
+            maxHeight: "none",
             overflowY: "auto",
             fontSize: "0.78rem",
             fontFamily: "var(--font-mono)",
@@ -151,6 +239,8 @@ export const JobConsole: React.FC<JobConsoleProps> = ({
           style={{
             flex: 1,
             minHeight: 0,
+            height: "100%",
+            maxHeight: "none",
             overflowY: "auto",
             display: "flex",
             flexDirection: "column",

@@ -151,16 +151,16 @@ export const EntryDetail: React.FC<EntryDetailProps> = ({
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid var(--border-color)", paddingBottom: "8px" }}>
         <h3 style={{ fontSize: "1.05rem", margin: 0, fontWeight: 600 }}>Entry Configuration & Details</h3>
 
-        <div style={{ display: "flex", gap: "8px" }}>
+        <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
           <button
             type="button"
             className="btn btn-secondary"
             onClick={handleRefresh}
             disabled={isRefreshing || isDownloading}
             style={{ padding: "4px 10px", fontSize: "0.78rem" }}
-            title="Parse playlist URL again to check for new songs and refresh disk count"
+            title="Refresh Playlist: Parse playlist URL again to check for new songs and refresh disk count"
           >
-            {isRefreshing ? "Parsing..." : "🔄 Refresh Playlist"}
+            {isRefreshing ? "Parsing..." : "Refresh"}
           </button>
 
           {isDownloading ? (
@@ -168,21 +168,42 @@ export const EntryDetail: React.FC<EntryDetailProps> = ({
               type="button"
               className="btn btn-danger"
               onClick={() => activeJob && onCancelDownload && onCancelDownload(activeJob.id)}
-              style={{ padding: "4px 14px", fontSize: "0.82rem" }}
-              title="Stop current download job"
+              style={{ padding: "4px 12px", fontSize: "0.8rem" }}
+              title="Cancel Download: Stop current active download job"
             >
-              🛑 Cancel Download
+              Cancel
             </button>
           ) : (
             <button
               type="button"
               className="btn btn-primary"
               onClick={() => onStartDownload(formData)}
-              style={{ padding: "4px 14px", fontSize: "0.82rem" }}
+              style={{ padding: "4px 12px", fontSize: "0.8rem" }}
+              title="Download: Start downloading this playlist entry using yt-dlp"
             >
-              🚀 Download Now
+              Download
             </button>
           )}
+
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => onDeleteEntry(formData.id)}
+            style={{ padding: "4px 10px", fontSize: "0.78rem", color: "var(--text-secondary)" }}
+            title="Delete: Removes only this entry from downloads management list. Files remain safe on disk."
+          >
+            Delete
+          </button>
+
+          <button
+            type="button"
+            className="btn btn-danger"
+            onClick={handleOpenDeleteFilesModal}
+            style={{ padding: "4px 10px", fontSize: "0.78rem" }}
+            title="Purge: Permanently deletes all downloaded audio files for this playlist entry from disk and clears archive records."
+          >
+            Purge
+          </button>
         </div>
       </div>
 
@@ -350,30 +371,6 @@ export const EntryDetail: React.FC<EntryDetailProps> = ({
         )}
       </div>
 
-      {/* Bottom Actions Row */}
-      <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", marginTop: "4px" }}>
-        <div style={{ display: "flex", gap: "8px" }}>
-          <button
-            type="button"
-            className="btn btn-secondary"
-            onClick={() => onDeleteEntry(formData.id)}
-            style={{ padding: "4px 10px", fontSize: "0.78rem", color: "var(--text-secondary)" }}
-            title="Deletes only this entry from downloads management list. Files remain on disk."
-          >
-            🗑 Delete Entry
-          </button>
-
-          <button
-            type="button"
-            className="btn btn-danger"
-            onClick={handleOpenDeleteFilesModal}
-            style={{ padding: "4px 10px", fontSize: "0.78rem" }}
-            title="Deletes all downloaded audio files for this playlist entry from disk and clears archive IDs"
-          >
-            ⚠️ Delete Files from Disk
-          </button>
-        </div>
-      </div>
 
       {/* Delete Files Blatant Warning Modal */}
       {showDeleteModal && (
