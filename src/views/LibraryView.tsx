@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { MainConfig, AudioTrack, TrackPreview } from "../types";
 import { ResolvedTracksPanel } from "../components/ResolvedTracksPanel";
@@ -20,6 +20,8 @@ type DirTreeNode = {
   path: string;
   is_dir: boolean;
   children: DirTreeNode[];
+  year?: number | null;
+  unknown_year_count?: number;
 };
 
 type TrackTags = {
@@ -90,6 +92,16 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
   const [isLoadingDirPreviews, setIsLoadingDirPreviews] = useState<boolean>(false);
   const [dirPreviewsError, setDirPreviewsError] = useState<string>("");
   const [activeFolderPath, setActiveFolderPath] = useState<string>("");
+  const [filterUnknownYearOnly, setFilterUnknownYearOnly] = useState<boolean>(false);
+
+  const filteredDirPreviews = useMemo(() => {
+    if (!filterUnknownYearOnly) return dirPreviews;
+    return dirPreviews.filter((t) => !t.year || t.year === 0);
+  }, [dirPreviews, filterUnknownYearOnly]);
+
+  const handleToggleFilterUnknownYear = () => {
+    setFilterUnknownYearOnly((prev) => !prev);
+  };
   useEffect(() => {
     if (config?.sourceDir) {
       loadLibraryTree();
@@ -278,6 +290,10 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
       addBackgroundTask(`save_tags_${Date.now()}`, `Write tags to ${selectedNode.name}`, promise);
       await promise;
       alert("Tags updated successfully!");
+      if (activeFolderPath) {
+        loadMultipleFolderPreviews(activeFolderPath.split("|"), true);
+      }
+      loadLibraryTree();
     } catch (e) {
       alert("Error saving tags: " + e);
     } finally {
@@ -342,6 +358,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
         const foldersToReload = activeFolderPath.split("|");
         loadMultipleFolderPreviews(foldersToReload, true);
       }
+      loadLibraryTree();
     } catch (e) {
       alert("Error in batch folder updates: " + e);
     } finally {
@@ -443,7 +460,16 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
     window.addEventListener("mouseup", handleMouseUp);
   };
 
-  const renderTree = (node: DirTreeNode, depth = 0) => {
+  const renderTree = (node: DirTreeNode, depth = 0): React.ReactNode => {
+    if (filterUnknownYearOnly) {
+      if (node.is_dir && (node.unknown_year_count ?? 0) === 0) {
+        return null;
+      }
+      if (!node.is_dir && node.year !== null && node.year !== undefined && node.year > 0) {
+        return null;
+      }
+    }
+
     const isExpanded = expandedPaths.has(node.path);
     const isSelected = selectedNodes.has(node.path);
     
@@ -507,9 +533,42 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
               <span>🎵</span>
             </>
           )}
-          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
             {node.name}
           </span>
+          {node.is_dir && filterUnknownYearOnly && (node.unknown_year_count ?? 0) > 0 && (
+            <span
+              style={{
+                fontSize: "0.68rem",
+                padding: "1px 6px",
+                borderRadius: "10px",
+                backgroundColor: "rgba(245, 158, 11, 0.18)",
+                color: "var(--warning)",
+                fontWeight: 600,
+                flexShrink: 0,
+                marginLeft: "auto",
+              }}
+              title={`${node.unknown_year_count} song(s) missing year data in this folder`}
+            >
+              {node.unknown_year_count} missing
+            </span>
+          )}
+          {!node.is_dir && filterUnknownYearOnly && (
+            <span
+              style={{
+                fontSize: "0.68rem",
+                padding: "1px 6px",
+                borderRadius: "10px",
+                backgroundColor: "rgba(239, 68, 68, 0.15)",
+                color: "var(--danger)",
+                fontWeight: 500,
+                flexShrink: 0,
+                marginLeft: "auto",
+              }}
+            >
+              No Year
+            </span>
+          )}
         </div>
         
         {node.is_dir && isExpanded && node.children.length > 0 && (
@@ -567,18 +626,53 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
         <div className="card" style={{ width: `${leftWidth}px`, flexShrink: 0, overflowY: "auto", display: "flex", flexDirection: "column", margin: 0 }}>
           <div className="card-title" style={{ fontSize: "1rem", borderBottom: "1px solid var(--border-color)", paddingBottom: "12px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span>Library Tree</span>
-            <button 
-              className="btn btn-secondary" 
-              onClick={loadLibraryTree} 
-              disabled={isLoadingTree} 
-              style={{ padding: "6px", width: "28px", height: "28px", display: "flex", alignItems: "center", justifyContent: "center", borderRadius: "6px" }}
-              title={isLoadingTree ? "Scanning library files..." : "Refresh Library Tree"}
-            >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M23 4v6h-6"></path>
-                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
-              </svg>
-            </button>
+            <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={handleToggleFilterUnknownYear}
+                style={{
+                  padding: "5px",
+                  width: "28px",
+                  height: "28px",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  borderRadius: "6px",
+                  backgroundColor: filterUnknownYearOnly ? "var(--accent-purple)" : "var(--bg-secondary)",
+                  color: filterUnknownYearOnly ? "#fff" : "var(--text-secondary)",
+                  border: filterUnknownYearOnly ? "1px solid var(--accent-purple)" : "1px solid var(--border-color)",
+                  cursor: "pointer",
+                  transition: "all 0.15s ease",
+                }}
+                title={
+                  filterUnknownYearOnly
+                    ? "Filter Active: Showing only songs and folders with missing year data (Click to show all)"
+                    : "Show only songs and folders without year data"
+                }
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
+                  <line x1="16" y1="2" x2="16" y2="6" />
+                  <line x1="8" y1="2" x2="8" y2="6" />
+                  <line x1="3" y1="10" x2="21" y2="10" />
+                  <path d="M10 14a2 2 0 1 1 3 1.7c-.5.4-.5.8-.5 1.3" />
+                  <circle cx="12.5" cy="19" r="0.7" fill="currentColor" />
+                </svg>
+              </button>
+              <button 
+                className="btn btn-secondary" 
+                onClick={loadLibraryTree} 
+                disabled={isLoadingTree} 
+                style={{ padding: "6px", width: "28px", height: "28px", display: "flex", alignItems: "center", justifyContent: "center", borderRadius: "6px" }}
+                title={isLoadingTree ? "Scanning library files..." : "Refresh Library Tree"}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M23 4v6h-6"></path>
+                  <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+                </svg>
+              </button>
+            </div>
           </div>
           
           <div style={{ flex: 1, marginTop: "12px", overflowX: "hidden" }}>
@@ -586,7 +680,17 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
             {isLoadingTree ? (
               <p className="no-data">Scanning library files...</p>
             ) : treeRoot ? (
-              renderTree(treeRoot)
+              filterUnknownYearOnly && (treeRoot.unknown_year_count ?? 0) === 0 ? (
+                <div style={{ padding: "24px 16px", textAlign: "center", color: "var(--text-secondary)", fontSize: "0.85rem" }}>
+                  <div style={{ fontSize: "1.8rem", marginBottom: "8px" }}>🎉</div>
+                  <div style={{ fontWeight: 600, color: "var(--text-primary)", marginBottom: "4px" }}>
+                    All Tracks Have Years!
+                  </div>
+                  <div>No songs with missing year data found in the library.</div>
+                </div>
+              ) : (
+                renderTree(treeRoot)
+              )
             ) : (
               <p className="no-data">No source directory scanned. Verify sourceDir mapping.</p>
             )}
@@ -622,7 +726,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
         {/* Middle Side: Resolved Music Tracks */}
         <div style={{ width: `${middleWidth}px`, flexShrink: 0, display: "flex", flexDirection: "column", margin: 0 }}>
           <ResolvedTracksPanel
-            previews={dirPreviews}
+            previews={filteredDirPreviews}
             isLoadingPreview={isLoadingDirPreviews}
             previewError={dirPreviewsError}
             loadPreview={() => activeFolderPath && loadFolderPreviews(activeFolderPath, true)}
@@ -630,8 +734,20 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
             contextName={activeFolderPath ? activeFolderPath.split(/[/\\]/).pop() || "Library" : "Library"}
             selectedFilePath={selectedNode && !selectedNode.is_dir ? selectedNode.path : null}
             onSelectTrack={(track) => handleSelectNode({ name: track.title, path: track.file_path, is_dir: false, children: [] })}
-            emptyMessage="Select a folder or track from the Library Tree to preview resolved music tracks."
-            title={activeFolderPath ? `Resolved Tracks (${dirPreviews.length})` : "Resolved Tracks"}
+            emptyMessage={
+              filterUnknownYearOnly
+                ? "No tracks missing year data in the selected folder(s)."
+                : "Select a folder or track from the Library Tree to preview resolved music tracks."
+            }
+            title={
+              activeFolderPath
+                ? filterUnknownYearOnly
+                  ? `Resolved Tracks (${filteredDirPreviews.length} missing year)`
+                  : `Resolved Tracks (${dirPreviews.length})`
+                : filterUnknownYearOnly
+                ? "Resolved Tracks (Missing Year)"
+                : "Resolved Tracks"
+            }
           />
         </div>
 

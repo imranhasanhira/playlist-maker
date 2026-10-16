@@ -34,6 +34,7 @@ function getYtDlpCommandLine(params: {
   useArchive: boolean;
   archivePath?: string;
   ignoreErrors: boolean;
+  folderName?: string;
 }): string {
   const args: string[] = [];
   if (params.ignoreErrors) {
@@ -52,7 +53,8 @@ function getYtDlpCommandLine(params: {
     args.push("--download-archive", `"${arch}"`);
   }
 
-  const outTemplate = `"${params.outputDir}/%(playlist_title)s/%(title)s.%(ext)s"`;
+  const folderPart = params.folderName?.trim() ? params.folderName.trim() : "%(playlist_title)s";
+  const outTemplate = `"${params.outputDir}/${folderPart}/%(title)s.%(ext)s"`;
   args.push("-o", outTemplate);
   args.push(`"${params.url}"`);
 
@@ -336,6 +338,21 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
   // Entry CRUD Operations
   const handleSaveEntry = async (updated: DownloadEntry) => {
     try {
+      const oldEntry = entries.find((e) => e.id === updated.id);
+      if (oldEntry && oldEntry.name && updated.name && oldEntry.name.trim() !== updated.name.trim()) {
+        const outDir = updated.output_dir || globalSettings?.default_output_dir;
+        if (outDir) {
+          try {
+            await invoke("dl_rename_entry_folder", {
+              outputDir: outDir,
+              oldName: oldEntry.name,
+              newName: updated.name,
+            });
+          } catch (renameErr) {
+            console.warn("Folder rename warning:", renameErr);
+          }
+        }
+      }
       await invoke("dl_store_save_entry", { entry: updated });
       setEntries((prev) => prev.map((e) => (e.id === updated.id ? updated : e)));
     } catch (e) {
@@ -375,7 +392,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
 
     const count = await invoke<number>("dl_count_songs_on_disk", {
       outputDir: entryToUpdate.output_dir,
-      playlistTitle: entryToUpdate.playlist_title || entryToUpdate.name,
+      playlistTitle: entryToUpdate.name || entryToUpdate.playlist_title,
       formats: [],
     });
 
@@ -397,7 +414,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
 
       const count = await invoke<number>("dl_count_songs_on_disk", {
         outputDir: entry.output_dir,
-        playlistTitle: meta.title || entry.playlist_title || entry.name,
+        playlistTitle: entry.name || meta.title || entry.playlist_title,
         formats: [],
       });
 
@@ -434,7 +451,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
       // Fallback: just count disk files
       const count = await invoke<number>("dl_count_songs_on_disk", {
         outputDir: entry.output_dir,
-        playlistTitle: entry.playlist_title || entry.name,
+        playlistTitle: entry.name || entry.playlist_title,
         formats: [],
       });
 
@@ -547,6 +564,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
           useArchive,
           archivePath: globalSettings.archive_path,
           ignoreErrors,
+          folderName: targetEntry.name,
         }),
         `🚀 Initializing yt-dlp download job for: ${targetEntry.name || targetEntry.url}`,
       ],
@@ -570,6 +588,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
         useArchive: newJob.use_archive,
         archivePath: newJob.archive_path,
         ignoreErrors: newJob.ignore_errors,
+        folderName: targetEntry.name,
       });
 
       await monitorJobCompletion(jobId, targetEntry);
@@ -595,7 +614,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
           try {
             const diskCount = await invoke<number>("dl_count_songs_on_disk", {
               outputDir: targetEntry.output_dir,
-              playlistTitle: targetEntry.playlist_title || targetEntry.name,
+              playlistTitle: targetEntry.name || targetEntry.playlist_title,
               formats: [],
             });
             setEntries((prev) =>
@@ -618,7 +637,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
             (async () => {
               const count = await invoke<number>("dl_count_songs_on_disk", {
                 outputDir: targetEntry.output_dir,
-                playlistTitle: targetEntry.playlist_title || targetEntry.name,
+                playlistTitle: targetEntry.name || targetEntry.playlist_title,
                 formats: [],
               });
 
@@ -709,7 +728,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
         jobId,
         url: targetEntry.url,
         outputDir: targetEntry.output_dir,
-        playlistTitle: targetEntry.playlist_title || targetEntry.name,
+        playlistTitle: targetEntry.name || targetEntry.playlist_title,
         archivePath: globalSettings.archive_path,
       });
 
@@ -795,7 +814,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
           jobId: globalJobId,
           url: entry.url,
           outputDir: entry.output_dir,
-          playlistTitle: entry.playlist_title || entry.name,
+          playlistTitle: entry.name || entry.playlist_title,
           archivePath: globalSettings.archive_path,
         });
         totalMissingAcrossAll += report.missing_count;
@@ -952,6 +971,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
           useArchive,
           archivePath: globalSettings.archive_path,
           ignoreErrors,
+          folderName: entry.name,
         }),
         `🚀 Initializing batch job for: ${entry.name}`,
       ],
@@ -970,6 +990,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
         useArchive: newJob.use_archive,
         archivePath: newJob.archive_path,
         ignoreErrors: newJob.ignore_errors,
+        folderName: entry.name,
       });
 
       return await monitorJobCompletion(jobId, entry);

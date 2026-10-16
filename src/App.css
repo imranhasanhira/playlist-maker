@@ -35,6 +35,11 @@
   --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.3);
   --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -1px rgba(0, 0, 0, 0.3);
   --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.5), 0 4px 6px -2px rgba(0, 0, 0, 0.4);
+
+  /* Table Hover & Selection */
+  --table-hover-bg: rgba(255, 255, 255, 0.04);
+  --table-selected-bg: rgba(139, 92, 246, 0.18);
+  --table-selected-hover-bg: rgba(139, 92, 246, 0.26);
 }
 
 /* System Light Theme Media Query Override */
@@ -52,6 +57,9 @@
     --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.05);
     --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.08), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
     --accent-purple-glow: rgba(139, 92, 246, 0.08);
+    --table-hover-bg: rgba(0, 0, 0, 0.035);
+    --table-selected-bg: rgba(139, 92, 246, 0.12);
+    --table-selected-hover-bg: rgba(139, 92, 246, 0.18);
   }
 }
 
@@ -69,6 +77,9 @@
   --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -1px rgba(0, 0, 0, 0.3);
   --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.5), 0 4px 6px -2px rgba(0, 0, 0, 0.4);
   --accent-purple-glow: rgba(139, 92, 246, 0.15);
+  --table-hover-bg: rgba(255, 255, 255, 0.04);
+  --table-selected-bg: rgba(139, 92, 246, 0.18);
+  --table-selected-hover-bg: rgba(139, 92, 246, 0.26);
 }
 
 [data-theme="light"] {
@@ -84,6 +95,9 @@
   --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.05);
   --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.08), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
   --accent-purple-glow: rgba(139, 92, 246, 0.08);
+  --table-hover-bg: rgba(0, 0, 0, 0.035);
+  --table-selected-bg: rgba(139, 92, 246, 0.12);
+  --table-selected-hover-bg: rgba(139, 92, 246, 0.18);
 }
 
 /* Global Reset & Scrollbars */
@@ -359,14 +373,44 @@ td {
   border-bottom: 1px solid var(--border-color);
   color: var(--text-primary);
   vertical-align: middle;
+  transition: background-color 0.12s ease;
 }
 
 tr:last-child td {
   border-bottom: none;
 }
 
+/* Default table row hover */
 tr:hover td {
-  background-color: rgba(26, 28, 40, 0.5);
+  background-color: var(--table-hover-bg);
+}
+
+/* Selected row styling */
+tr.selected td,
+tr[data-selected="true"] td {
+  background-color: var(--table-selected-bg);
+}
+
+tr.selected:hover td,
+tr[data-selected="true"]:hover td {
+  background-color: var(--table-selected-hover-bg);
+}
+
+/* Winner / Highlighted row styling (e.g. deduplication winners) */
+tr.row-winner td,
+tr[data-winner="true"] td {
+  background-color: rgba(34, 197, 94, 0.08);
+}
+
+tr.row-winner:hover td,
+tr[data-winner="true"]:hover td {
+  background-color: rgba(34, 197, 94, 0.16);
+}
+
+/* Preserve static background for detail / sample rows */
+tr.row-static:hover td,
+tr[data-static="true"]:hover td {
+  background-color: var(--bg-tertiary);
 }
 
 /* Directory tree component */

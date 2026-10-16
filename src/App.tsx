@@ -197,20 +197,20 @@ function App() {
     }
   };
 
+  // Background Task Queue
+  const [bgTasks, setBgTasks] = useState<BgTask[]>([]);
+  const cancelledTaskIdsRef = useRef<Set<string>>(new Set());
+
   const handleCancelTask = async (taskId: string) => {
+    cancelledTaskIdsRef.current.add(taskId);
+    setBgTasks((prev) => prev.filter((t) => t.id !== taskId));
+    window.dispatchEvent(new CustomEvent("bg-task-cancelled", { detail: { taskId } }));
     try {
-      if (taskId.startsWith("export_")) {
-        await invoke("cancel_export");
-      } else {
-        await invoke("cancel_sanitizer_scan", { taskId });
-      }
+      await invoke("cancel_any_task", { taskId });
     } catch (e) {
       console.error("Error cancelling task:", e);
     }
   };
-
-  // Background Task Queue
-  const [bgTasks, setBgTasks] = useState<BgTask[]>([]);
 
   // Modal / Onboarding Wizard State (when config is null)
   const [wizardMode, setWizardMode] = useState<"load" | "create" | null>(null);
@@ -221,19 +221,22 @@ function App() {
   const [isCreating, setIsCreating] = useState<boolean>(false);
 
   const addBackgroundTask = (id: string, name: string, taskPromise: Promise<any>) => {
+    cancelledTaskIdsRef.current.delete(id);
     setBgTasks(prev => [
       ...prev.filter(t => t.id !== id),
-      { id, name, progress: 20, status: "running", text: "Working..." }
+      { id, name, progress: 0, status: "running", text: "Starting..." }
     ]);
 
     taskPromise
       .then(() => {
+        if (cancelledTaskIdsRef.current.has(id)) return;
         setBgTasks(prev => prev.map(t => t.id === id ? { ...t, status: "completed", progress: 100, text: "Completed ✓" } : t));
         setTimeout(() => {
           setBgTasks(prev => prev.filter(t => t.id !== id));
         }, 5000);
       })
       .catch((err) => {
+        if (cancelledTaskIdsRef.current.has(id)) return;
         setBgTasks(prev => prev.map(t => t.id === id ? { ...t, status: "failed", progress: 100, text: `Error: ${err}` } : t));
         setTimeout(() => {
           setBgTasks(prev => prev.filter(t => t.id !== id));
@@ -249,7 +252,24 @@ function App() {
         const { listen } = await import("@tauri-apps/api/event");
         unlisten = await listen<any>("task-progress", (event) => {
           const { task_id, task_name, index, total, status, message } = event.payload;
-          const progressPercent = Math.round(((index + 1) / total) * 100);
+          if (cancelledTaskIdsRef.current.has(task_id)) {
+            return;
+          }
+
+          const isInitialResolving = index === 0 && total === 100 && message === "Resolving playlist files...";
+          const progressPercent = isInitialResolving
+            ? 0
+            : total > 0
+            ? Math.min(100, Math.round(((index + 1) / total) * 100))
+            : status === "completed"
+            ? 100
+            : 0;
+          const displayText =
+            status === "completed"
+              ? "Done ✓"
+              : isInitialResolving
+              ? message
+              : `Item ${Math.min(index + 1, total)} of ${total} - ${message || ""}`;
           
           setBgTasks((prev) => {
             const exists = prev.some((t) => t.id === task_id);
@@ -260,7 +280,7 @@ function App() {
                       ...t,
                       progress: progressPercent,
                       status: status === "completed" ? "completed" as const : "running" as const,
-                      text: status === "completed" ? "Done ✓" : `Item ${index + 1} of ${total} (${progressPercent}%) - ${message || ""}`,
+                      text: displayText,
                     }
                   : t
               );
@@ -271,8 +291,8 @@ function App() {
                   id: task_id,
                   name: task_name || "Background Task",
                   progress: progressPercent,
-                  status: "running" as const,
-                  text: `Item ${index + 1} of ${total} (${progressPercent}%) - ${message || ""}`,
+                  status: status === "completed" ? "completed" as const : "running" as const,
+                  text: displayText,
                 },
               ];
             }
@@ -534,6 +554,7 @@ function App() {
               onPlayTrack={handlePlayTrack}
               onPlayQueue={handlePlayQueue}
               relativeToConfig={config?.relativeToConfig ?? true}
+              addBackgroundTask={addBackgroundTask}
             />
           )}
         </div>
@@ -623,25 +644,57 @@ function App() {
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: "12px", maxHeight: "220px", overflowY: "auto" }}>
               {bgTasks.map((task) => (
-                <div key={task.id} style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.85rem", fontWeight: 600 }}>
-                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "240px" }}>
+                <div key={task.id} style={{ display: "flex", flexDirection: "column", gap: "5px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", fontSize: "0.85rem", fontWeight: 600 }}>
+                    <span
+                      style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}
+                      title={task.name}
+                    >
                       {task.name}
                     </span>
+                    <button
+                      type="button"
+                      onClick={() => handleCancelTask(task.id)}
+                      style={{
+                        background: "rgba(239, 68, 68, 0.15)",
+                        border: "1px solid var(--danger)",
+                        color: "var(--danger)",
+                        borderRadius: "4px",
+                        cursor: "pointer",
+                        padding: "2px 5px",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        fontSize: "0.7rem",
+                        lineHeight: 1,
+                        flexShrink: 0,
+                      }}
+                      title={task.status === "running" ? `Cancel task: ${task.name}` : `Dismiss: ${task.name}`}
+                    >
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                      </svg>
+                    </button>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                    <ProgressBar
+                      progress={task.progress}
+                      status={task.status}
+                      style={{ flex: 1 }}
+                    />
                     <span style={{
                       color: task.status === "completed" ? "var(--success)" : task.status === "failed" ? "var(--danger)" : "var(--accent-purple)",
                       fontFamily: "var(--font-mono)",
-                      fontSize: "0.78rem"
+                      fontSize: "0.76rem",
+                      fontWeight: 600,
+                      flexShrink: 0,
+                      minWidth: "42px",
+                      textAlign: "right",
                     }}>
                       {task.status === "running" ? `${task.progress}%` : task.status === "completed" ? "Done ✓" : "Failed ✗"}
                     </span>
                   </div>
-                  <ProgressBar
-                    progress={task.progress}
-                    status={task.status}
-                    onCancel={() => handleCancelTask(task.id)}
-                    cancelTitle={`Cancel task: ${task.name}`}
-                  />
                   <div style={{ fontSize: "0.75rem", color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {task.text}
                   </div>

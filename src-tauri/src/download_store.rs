@@ -119,6 +119,9 @@ pub fn init_db(app: &AppHandle) -> Result<Connection, String> {
     )
     .map_err(|e| format!("Failed to initialize database tables: {}", e))?;
 
+    // Drop legacy table if previously created, since year/metadata caching is in-memory
+    let _ = conn.execute("DROP TABLE IF EXISTS track_year_cache", []);
+
     Ok(conn)
 }
 

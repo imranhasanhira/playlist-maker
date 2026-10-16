@@ -802,9 +802,11 @@ export const ExportView: React.FC<ExportViewProps> = ({
                         return (
                           <tr
                             key={idx}
+                            className={isSelected ? "selected" : undefined}
+                            data-selected={isSelected}
                             title={item.file_path}
                             onClick={(e) => handleToggleSelectItem(item.relative_path, idx, e.shiftKey, sortedItems.newFiles)}
-                            style={{ backgroundColor: isSelected ? "var(--accent-purple-glow)" : "transparent", cursor: "pointer", userSelect: "none" }}
+                            style={{ cursor: "pointer", userSelect: "none" }}
                           >
                             <td style={{ textAlign: "center" }} onClick={(e) => e.stopPropagation()}>
                               <input
@@ -917,9 +919,11 @@ export const ExportView: React.FC<ExportViewProps> = ({
                         return (
                           <tr
                             key={idx}
+                            className={isSelected ? "selected" : undefined}
+                            data-selected={isSelected}
                             title={item.file_path}
                             onClick={(e) => handleToggleSelectItem(item.relative_path, idx, e.shiftKey, sortedItems.upToDateFiles)}
-                            style={{ backgroundColor: isSelected ? "var(--accent-purple-glow)" : "transparent", cursor: "pointer", userSelect: "none" }}
+                            style={{ cursor: "pointer", userSelect: "none" }}
                           >
                             <td style={{ textAlign: "center" }} onClick={(e) => e.stopPropagation()}>
                               <input
@@ -1016,9 +1020,11 @@ export const ExportView: React.FC<ExportViewProps> = ({
                         return (
                           <tr
                             key={idx}
+                            className={isSelected ? "selected" : undefined}
+                            data-selected={isSelected}
                             title={item.file_path}
                             onClick={(e) => handleToggleSelectItem(item.relative_path, idx, e.shiftKey, sortedItems.orphanFiles)}
-                            style={{ backgroundColor: isSelected ? "var(--accent-purple-glow)" : "transparent", cursor: "pointer", userSelect: "none" }}
+                            style={{ cursor: "pointer", userSelect: "none" }}
                           >
                             <td style={{ textAlign: "center" }} onClick={(e) => e.stopPropagation()}>
                               <input
@@ -1112,7 +1118,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
                               </td>
                             </tr>
                             {isExpanded && warn.sample_files && warn.sample_files.length > 0 && (
-                              <tr style={{ backgroundColor: "var(--bg-tertiary)" }}>
+                              <tr className="row-static" data-static="true" style={{ backgroundColor: "var(--bg-tertiary)" }}>
                                 <td colSpan={4} style={{ padding: "8px 16px" }}>
                                   <div style={{ fontSize: "0.76rem", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "4px" }}>
                                     Sample Affected Track Paths ({warn.sample_files.length}):

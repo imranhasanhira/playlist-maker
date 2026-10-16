@@ -108,7 +108,7 @@ export const EntryDetail: React.FC<EntryDetailProps> = ({
     try {
       const report = await invoke<DeleteFilesReport>("dl_get_delete_files_report", {
         outputDir: formData.output_dir,
-        playlistTitle: formData.playlist_title || formData.name,
+        playlistTitle: formData.name || formData.playlist_title,
       });
       setDeleteReport(report);
     } catch (e) {
@@ -123,7 +123,7 @@ export const EntryDetail: React.FC<EntryDetailProps> = ({
     try {
       await invoke("dl_execute_delete_files", {
         outputDir: formData.output_dir,
-        playlistTitle: formData.playlist_title || formData.name,
+        playlistTitle: formData.name || formData.playlist_title,
         archivePath: globalSettings.archive_path,
         videoIds: [], // delete all IDs matching playlist folder
       });

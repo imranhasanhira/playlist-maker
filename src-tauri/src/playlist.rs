@@ -7,6 +7,7 @@ use walkdir::WalkDir;
 use lofty::probe::Probe;
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::tag::Accessor;
+use tauri::Emitter;
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
 pub struct YearSplitConfig {
@@ -22,6 +23,8 @@ pub struct YearSplitConfig {
     pub split_1y: Vec<u32>, // 5y half-decades (e.g. 1965, 1995) split into individual years
     #[serde(default)]
     pub custom_merges: Vec<[u32; 2]>, // [start_year, end_year] spans (e.g. [[1950, 1989], [2011, 2012]])
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_unknown_parts: Option<usize>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -57,6 +60,17 @@ pub struct TrackPreview {
     pub duration: u32,
     pub size_bytes: u64,
     pub year: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CachedTrackMeta {
+    pub file_path: String,
+    pub mtime_secs: u64,
+    pub size_bytes: u64,
+    pub year: Option<u32>,
+    pub title: String,
+    pub artist: String,
+    pub duration_secs: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -275,15 +289,21 @@ pub fn list_music_files(folder: &Path, formats: &HashSet<String>) -> Vec<PathBuf
 pub fn extract_track_year(path: &Path, tagged_file_opt: Option<&lofty::file::TaggedFile>) -> Option<u32> {
     // 1. Primary: Audio metadata tags (ID3v2, Vorbis, MP4, etc.)
     if let Some(tagged_file) = tagged_file_opt {
-        if let Some(primary_tag) = tagged_file.primary_tag() {
-            if let Some(y) = primary_tag.year() {
+        let tag_opt = tagged_file.primary_tag().or_else(|| tagged_file.first_tag());
+        if let Some(tag) = tag_opt {
+            if let Some(y) = tag.year() {
                 if (1900..=2099).contains(&y) {
                     return Some(y);
                 }
             }
-            // Check OriginalReleaseDate tag frame if present
+            // Check OriginalReleaseDate and RecordingDate tag frames if present
             use lofty::tag::ItemKey;
-            if let Some(val) = primary_tag.get_string(&ItemKey::OriginalReleaseDate) {
+            if let Some(val) = tag.get_string(&ItemKey::OriginalReleaseDate) {
+                if let Some(parsed) = parse_year_from_str(val) {
+                    return Some(parsed);
+                }
+            }
+            if let Some(val) = tag.get_string(&ItemKey::RecordingDate) {
                 if let Some(parsed) = parse_year_from_str(val) {
                     return Some(parsed);
                 }
@@ -306,13 +326,18 @@ fn parse_year_from_str(text: &str) -> Option<u32> {
     lazy_static_or_local_year_regex(text)
 }
 
+static YEAR_REGEX: std::sync::LazyLock<Option<regex::Regex>> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"(?:\b|_)(19\d\d|20\d\d)(?:\b|_)").ok()
+});
+
 fn lazy_static_or_local_year_regex(text: &str) -> Option<u32> {
-    let re = regex::Regex::new(r"(?:\b|_)(19\d\d|20\d\d)(?:\b|_)").ok()?;
-    for cap in re.captures_iter(text) {
-        if let Some(m) = cap.get(1) {
-            if let Ok(y) = m.as_str().parse::<u32>() {
-                if (1900..=2099).contains(&y) {
-                    return Some(y);
+    if let Some(re) = YEAR_REGEX.as_ref() {
+        for cap in re.captures_iter(text) {
+            if let Some(m) = cap.get(1) {
+                if let Ok(y) = m.as_str().parse::<u32>() {
+                    if (1900..=2099).contains(&y) {
+                        return Some(y);
+                    }
                 }
             }
         }
@@ -320,48 +345,227 @@ fn lazy_static_or_local_year_regex(text: &str) -> Option<u32> {
     None
 }
 
-pub fn get_track_preview(path: &Path, base_playlist_dir: &Path) -> TrackPreview {
-    let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let file_path = canonical.to_string_lossy().to_string();
-    
-    let canonical_base = fs::canonicalize(base_playlist_dir).unwrap_or_else(|_| base_playlist_dir.to_path_buf());
-    let relative_path = pathdiff::diff_paths(&canonical, &canonical_base)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| file_path.clone());
+static TRACK_METADATA_CACHE: std::sync::LazyLock<std::sync::RwLock<std::collections::HashMap<String, CachedTrackMeta>>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
 
-    let size_bytes = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    
+#[allow(dead_code)]
+pub fn clear_track_metadata_cache() {
+    if let Ok(mut cache_guard) = TRACK_METADATA_CACHE.write() {
+        cache_guard.clear();
+    }
+}
+
+pub fn probe_track_metadata(path: &Path, mtime_secs: u64, size_bytes: u64) -> CachedTrackMeta {
+    let file_path = crate::utils::canonical_path_str(path);
+
     let mut title = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     let mut artist = String::new();
-    let mut duration = 0;
+    let mut duration_secs = 0;
+    let year;
 
-    let year = if let Ok(tagged_file) = Probe::open(path).and_then(|p| p.read()) {
-        let properties = tagged_file.properties();
-        duration = properties.duration().as_secs() as u32;
+    if let Ok(probe) = Probe::open(path) {
+        if let Ok(tagged_file) = probe.read() {
+            let properties = tagged_file.properties();
+            duration_secs = properties.duration().as_secs() as u32;
 
-        if let Some(primary_tag) = tagged_file.primary_tag() {
-            if let Some(t) = primary_tag.title() {
-                title = t.to_string();
+            if let Some(primary_tag) = tagged_file.primary_tag().or_else(|| tagged_file.first_tag()) {
+                if let Some(t) = primary_tag.title() {
+                    title = t.to_string();
+                }
+                if let Some(a) = primary_tag.artist() {
+                    artist = a.to_string();
+                }
             }
-            if let Some(a) = primary_tag.artist() {
-                artist = a.to_string();
-            }
+            year = extract_track_year(path, Some(&tagged_file));
+        } else {
+            year = extract_track_year(path, None);
         }
-
-        extract_track_year(path, Some(&tagged_file))
     } else {
-        extract_track_year(path, None)
-    };
+        year = extract_track_year(path, None);
+    }
 
-    TrackPreview {
+    CachedTrackMeta {
         file_path,
-        relative_path,
-        title,
-        artist,
-        duration,
+        mtime_secs,
         size_bytes,
         year,
+        title,
+        artist,
+        duration_secs,
     }
+}
+
+pub fn save_cached_metadata_batch(records: &[CachedTrackMeta]) {
+    if records.is_empty() {
+        return;
+    }
+    if let Ok(mut cache_guard) = TRACK_METADATA_CACHE.write() {
+        for r in records {
+            cache_guard.insert(r.file_path.clone(), r.clone());
+        }
+    }
+}
+
+pub fn get_cached_metadata_batch(
+    files: &[PathBuf],
+) -> (std::collections::HashMap<PathBuf, CachedTrackMeta>, Vec<(usize, PathBuf, u64, u64)>) {
+    let mut hits = std::collections::HashMap::new();
+    let mut misses = Vec::new();
+
+    let cache_guard = TRACK_METADATA_CACHE.read().unwrap();
+
+    for (idx, path) in files.iter().enumerate() {
+        let path_str = crate::utils::canonical_path_str(path);
+        let (mtime, size) = crate::utils::get_file_mtime_and_size(path).unwrap_or((0, 0));
+
+        if let Some(cached) = cache_guard.get(&path_str) {
+            if cached.mtime_secs == mtime && cached.size_bytes == size && mtime > 0 {
+                hits.insert(path.clone(), cached.clone());
+                continue;
+            }
+        }
+        misses.push((idx, path.clone(), mtime, size));
+    }
+
+    (hits, misses)
+}
+
+pub fn get_or_probe_track_metadata_batch(files: &[PathBuf]) -> Vec<CachedTrackMeta> {
+    if files.is_empty() {
+        return Vec::new();
+    }
+
+    let (mut hits, misses) = get_cached_metadata_batch(files);
+
+    if !misses.is_empty() {
+        let num_workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .min(16);
+        let chunk_size = (misses.len() + num_workers - 1) / num_workers;
+        let new_records_mutex = std::sync::Mutex::new(Vec::with_capacity(misses.len()));
+
+        std::thread::scope(|s| {
+            for chunk in misses.chunks(chunk_size.max(1)) {
+                let records_ref = &new_records_mutex;
+                s.spawn(move || {
+                    let mut local = Vec::with_capacity(chunk.len());
+                    for (_idx, path, mtime, size) in chunk {
+                        let probed = probe_track_metadata(path, *mtime, *size);
+                        local.push((path.clone(), probed));
+                    }
+                    if let Ok(mut guard) = records_ref.lock() {
+                        guard.extend(local);
+                    }
+                });
+            }
+        });
+
+        let new_records = new_records_mutex.into_inner().unwrap_or_default();
+        let records_to_save: Vec<CachedTrackMeta> = new_records.iter().map(|(_, r)| r.clone()).collect();
+        save_cached_metadata_batch(&records_to_save);
+
+        for (path, meta) in new_records {
+            hits.insert(path, meta);
+        }
+    }
+
+    files
+        .iter()
+        .map(|f| {
+            hits.remove(f)
+                .unwrap_or_else(|| probe_track_metadata(f, 0, 0))
+        })
+        .collect()
+}
+
+pub fn get_tracks_previews_with_options(
+    files: &[PathBuf],
+    base_playlist_dir: &Path,
+    probe_uncached: bool,
+) -> Vec<TrackPreview> {
+    if files.is_empty() {
+        return Vec::new();
+    }
+
+    let metas = if probe_uncached {
+        get_or_probe_track_metadata_batch(files)
+    } else {
+        let (mut hits, _misses) = get_cached_metadata_batch(files);
+        files
+            .iter()
+            .map(|f| {
+                if let Some(cached) = hits.remove(f) {
+                    cached
+                } else {
+                    let file_path = crate::utils::canonical_path_str(f);
+                    let (mtime_secs, size_bytes) =
+                        crate::utils::get_file_mtime_and_size(f).unwrap_or((0, 0));
+                    let title = f
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let year = extract_track_year(f, None);
+                    CachedTrackMeta {
+                        file_path,
+                        mtime_secs,
+                        size_bytes,
+                        year,
+                        title,
+                        artist: String::new(),
+                        duration_secs: 0,
+                    }
+                }
+            })
+            .collect()
+    };
+
+    let canonical_base =
+        fs::canonicalize(base_playlist_dir).unwrap_or_else(|_| base_playlist_dir.to_path_buf());
+
+    files
+        .iter()
+        .zip(metas)
+        .map(|(path, meta)| {
+            let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+            let relative_path = pathdiff::diff_paths(&canonical, &canonical_base)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| meta.file_path.clone());
+
+            TrackPreview {
+                file_path: meta.file_path,
+                relative_path,
+                title: meta.title,
+                artist: meta.artist,
+                duration: meta.duration_secs,
+                size_bytes: meta.size_bytes,
+                year: meta.year,
+            }
+        })
+        .collect()
+}
+
+pub fn get_tracks_previews(files: &[PathBuf], base_playlist_dir: &Path) -> Vec<TrackPreview> {
+    get_tracks_previews_with_options(files, base_playlist_dir, true)
+}
+
+pub fn get_track_preview(path: &Path, base_playlist_dir: &Path) -> TrackPreview {
+    get_tracks_previews(&[path.to_path_buf()], base_playlist_dir)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| {
+            let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+            let file_path = canonical.to_string_lossy().to_string();
+            TrackPreview {
+                file_path: file_path.clone(),
+                relative_path: file_path,
+                title: String::new(),
+                artist: String::new(),
+                duration: 0,
+                size_bytes: 0,
+                year: None,
+            }
+        })
 }
 
 #[derive(Debug, Clone)]
@@ -497,17 +701,13 @@ pub fn expand_playlist_buckets(
         }
     };
 
-    // 1. Gather all file years
+    // 1. Gather all file years from cache (and probe misses in parallel if any)
+    let file_metas = get_or_probe_track_metadata_batch(&files);
     let mut file_years: Vec<(PathBuf, Option<u32>)> = Vec::with_capacity(files.len());
     let mut single_year_counts: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
 
-    for f in &files {
-        let yr = if let Ok(tagged_file) = Probe::open(f).and_then(|p| p.read()) {
-            extract_track_year(f, Some(&tagged_file))
-        } else {
-            extract_track_year(f, None)
-        };
-
+    for (f, meta) in files.iter().zip(file_metas) {
+        let yr = meta.year;
         if let Some(y) = yr {
             *single_year_counts.entry(y).or_insert(0) += 1;
         }
@@ -516,15 +716,37 @@ pub fn expand_playlist_buckets(
 
     // 2. Group into buckets
     let mut bucket_files: std::collections::BTreeMap<String, Vec<PathBuf>> = std::collections::BTreeMap::new();
+    let mut unknown_files: Vec<PathBuf> = Vec::new();
 
     for (path, yr) in file_years {
-        if yr.is_none() && !year_cfg.include_unknown {
-            // Default ignored!
+        if yr.is_none() {
+            if year_cfg.include_unknown {
+                unknown_files.push(path);
+            }
             continue;
         }
 
         let (key, _) = determine_year_bucket_key(yr, &year_cfg, &single_year_counts, global_min_tracks);
         bucket_files.entry(key).or_default().push(path);
+    }
+
+    if !unknown_files.is_empty() {
+        let split_parts = year_cfg.split_unknown_parts.unwrap_or(0);
+        if split_parts >= 2 {
+            let total_u = unknown_files.len();
+            let base = total_u / split_parts;
+            let rem = total_u % split_parts;
+            let mut offset = 0;
+            for i in 0..split_parts {
+                let count = base + if i < rem { 1 } else { 0 };
+                let chunk = unknown_files[offset..offset + count].to_vec();
+                offset += count;
+                let key = format!("unknown_{:02}", i + 1);
+                bucket_files.insert(key, chunk);
+            }
+        } else {
+            bucket_files.insert("unknown".to_string(), unknown_files);
+        }
     }
 
     let mut result = Vec::new();
@@ -534,6 +756,8 @@ pub fn expand_playlist_buckets(
         }
         let sub_name = if key == "unknown" {
             format!("{} - Unknown", playlist_config.name)
+        } else if let Some(suffix) = key.strip_prefix("unknown_") {
+            format!("{} - Unknown {}", playlist_config.name, suffix)
         } else {
             format!("{} - {}", playlist_config.name, key)
         };
@@ -561,11 +785,6 @@ pub fn compute_buckets_summary(
     for &yr in file_years {
         if yr.is_none() {
             unknown_count += 1;
-            if year_cfg.include_unknown {
-                let info = determine_year_bucket_info(None, year_cfg, single_year_counts, global_min_tracks);
-                let entry = bucket_counts.entry("unknown".to_string()).or_insert((info, 0));
-                entry.1 += 1;
-            }
             continue;
         }
 
@@ -578,20 +797,6 @@ pub fn compute_buckets_summary(
     let mut warning_exceeds_max = false;
 
     let effective_min_tracks = year_cfg.min_tracks.or(global_min_tracks).unwrap_or(10);
-
-    if unknown_count > 0 && !year_cfg.include_unknown {
-        buckets.push(YearBucketSummary {
-            key: "unknown".to_string(),
-            label: "Unknown Year".to_string(),
-            bucket_type: "unknown".to_string(),
-            parent_key: None,
-            track_count: unknown_count,
-            is_split: false,
-            start_year: None,
-            end_year: None,
-            below_min_tracks: false,
-        });
-    }
 
     for (key, (info, count)) in bucket_counts {
         if count > max_tracks {
@@ -639,103 +844,344 @@ pub fn compute_buckets_summary(
         )
     });
 
+    if unknown_count > 0 {
+        let split_parts = year_cfg.split_unknown_parts.unwrap_or(0);
+        if split_parts >= 2 {
+            let base = unknown_count / split_parts;
+            let rem = unknown_count % split_parts;
+            for i in 0..split_parts {
+                let count = base + if i < rem { 1 } else { 0 };
+                let key = format!("unknown_{:02}", i + 1);
+                let label = format!("Unknown {:02}", i + 1);
+                if count > max_tracks && year_cfg.include_unknown {
+                    warning_exceeds_max = true;
+                }
+                buckets.push(YearBucketSummary {
+                    key: key.clone(),
+                    label,
+                    bucket_type: "unknown_split".to_string(),
+                    parent_key: Some("unknown".to_string()),
+                    track_count: count,
+                    is_split: true,
+                    start_year: None,
+                    end_year: None,
+                    below_min_tracks: false,
+                });
+            }
+        } else {
+            if unknown_count > max_tracks && year_cfg.include_unknown {
+                warning_exceeds_max = true;
+            }
+            buckets.push(YearBucketSummary {
+                key: "unknown".to_string(),
+                label: "Unknown Year".to_string(),
+                bucket_type: "unknown".to_string(),
+                parent_key: None,
+                track_count: unknown_count,
+                is_split: false,
+                start_year: None,
+                end_year: None,
+                below_min_tracks: false,
+            });
+        }
+    }
+
     (buckets, warning_exceeds_max)
 }
 
 // Generate summary of all playlists and their year buckets for the sidebar refresh
 pub fn calculate_playlist_summaries(
+    app: Option<&tauri::AppHandle>,
+    task_id: Option<&str>,
     config: &MainConfig,
     source_dir: &Path,
     formats: &HashSet<String>,
 ) -> Vec<PlaylistSummaryItem> {
-    let max_tracks = config.max_tracks_per_playlist.unwrap_or(400);
+    if let Some(tid) = task_id {
+        crate::sanitizer::clear_task_cancel(tid);
+    }
     let mut summaries = Vec::new();
+    let total_playlists = config.playlists.len();
 
     for (index, pl) in config.playlists.iter().enumerate() {
-        let (files, _) = resolve_playlist_files(pl, source_dir, formats);
-        let total_tracks = files.len();
-        let year_split_enabled = pl.year_split.as_ref().map(|y| y.enabled).unwrap_or(false);
-
-        let mut buckets = Vec::new();
-        let mut warning_exceeds_max = total_tracks > max_tracks;
-
-        if year_split_enabled {
-            let year_cfg = pl.year_split.as_ref().unwrap();
-            let mut file_years: Vec<Option<u32>> = Vec::with_capacity(files.len());
-            let mut single_year_counts: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
-
-            for f in &files {
-                let yr = if let Ok(tagged_file) = Probe::open(f).and_then(|p| p.read()) {
-                    extract_track_year(f, Some(&tagged_file))
-                } else {
-                    extract_track_year(f, None)
-                };
-                if let Some(y) = yr {
-                    *single_year_counts.entry(y).or_insert(0) += 1;
-                }
-                file_years.push(yr);
-            }
-
-            let (computed_buckets, exceeds) = compute_buckets_summary(
-                &file_years,
-                year_cfg,
-                &single_year_counts,
-                config.min_tracks_per_year_playlist,
-                max_tracks,
-            );
-            buckets = computed_buckets;
-            if exceeds {
-                warning_exceeds_max = true;
+        if let Some(tid) = task_id {
+            if crate::sanitizer::is_task_cancelled(tid) {
+                return summaries;
             }
         }
+        if let (Some(app), Some(tid)) = (app, task_id) {
+            let _ = app.emit(
+                "task-progress",
+                crate::sanitizer::TaskProgress {
+                    task_id: tid.to_string(),
+                    task_name: "Scanning Playlist Summaries".to_string(),
+                    index,
+                    total: total_playlists,
+                    status: "running".to_string(),
+                    message: pl.name.clone(),
+                    file_path: None,
+                },
+            );
+        }
 
-        summaries.push(PlaylistSummaryItem {
-            index,
-            name: pl.name.clone(),
-            total_tracks,
-            year_split_enabled,
-            buckets,
-            warning_exceeds_max,
-        });
+        if let Ok(item) = calculate_single_playlist_summary(None, None, config, source_dir, formats, index, false) {
+            summaries.push(item);
+        }
+    }
+
+    if let (Some(app), Some(tid)) = (app, task_id) {
+        if !crate::sanitizer::is_task_cancelled(tid) {
+            let _ = app.emit(
+                "task-progress",
+                crate::sanitizer::TaskProgress {
+                    task_id: tid.to_string(),
+                    task_name: "Scanning Playlist Summaries".to_string(),
+                    index: total_playlists.saturating_sub(1),
+                    total: total_playlists,
+                    status: "completed".to_string(),
+                    message: "All playlists analyzed".to_string(),
+                    file_path: None,
+                },
+            );
+        }
     }
 
     summaries
 }
 
-// Calculate summary for a single playlist
+// Calculate summary for a single playlist with in-memory caching, multi-threaded probing, and smooth progress
 pub fn calculate_single_playlist_summary(
+    app: Option<&tauri::AppHandle>,
+    task_id: Option<&str>,
     config: &MainConfig,
     source_dir: &Path,
     formats: &HashSet<String>,
     playlist_index: usize,
+    probe_uncached: bool,
 ) -> Result<PlaylistSummaryItem, String> {
     if playlist_index >= config.playlists.len() {
         return Err("Playlist index out of bounds".to_string());
     }
+    if let Some(tid) = task_id {
+        crate::sanitizer::clear_task_cancel(tid);
+    }
+
     let max_tracks = config.max_tracks_per_playlist.unwrap_or(400);
     let pl = &config.playlists[playlist_index];
+    let year_split_enabled = pl.year_split.as_ref().map(|y| y.enabled).unwrap_or(false);
+    let effective_task_id = task_id;
+    let task_name = format!("Analyzing Year Distribution: {}", pl.name);
+
+    if year_split_enabled && probe_uncached {
+        if let (Some(app), Some(tid)) = (app, effective_task_id) {
+            let _ = app.emit(
+                "task-progress",
+                crate::sanitizer::TaskProgress {
+                    task_id: tid.to_string(),
+                    task_name: task_name.clone(),
+                    index: 0,
+                    total: 100,
+                    status: "running".to_string(),
+                    message: "Resolving playlist files...".to_string(),
+                    file_path: None,
+                },
+            );
+        }
+    }
+
     let (files, _) = resolve_playlist_files(pl, source_dir, formats);
     let total_tracks = files.len();
-    let year_split_enabled = pl.year_split.as_ref().map(|y| y.enabled).unwrap_or(false);
 
     let mut buckets = Vec::new();
     let mut warning_exceeds_max = total_tracks > max_tracks;
 
     if year_split_enabled {
         let year_cfg = pl.year_split.as_ref().unwrap();
-        let mut file_years: Vec<Option<u32>> = Vec::with_capacity(files.len());
-        let mut single_year_counts: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+        let total = files.len();
 
-        for f in &files {
-            let yr = if let Ok(tagged_file) = Probe::open(f).and_then(|p| p.read()) {
-                extract_track_year(f, Some(&tagged_file))
-            } else {
-                extract_track_year(f, None)
-            };
-            if let Some(y) = yr {
-                *single_year_counts.entry(y).or_insert(0) += 1;
+        if total == 0 {
+            if let (Some(app), Some(tid)) = (app, effective_task_id) {
+                let _ = app.emit(
+                    "task-progress",
+                    crate::sanitizer::TaskProgress {
+                        task_id: tid.to_string(),
+                        task_name: task_name.clone(),
+                        index: 1,
+                        total: 1,
+                        status: "completed".to_string(),
+                        message: "No candidate tracks found".to_string(),
+                        file_path: None,
+                    },
+                );
             }
-            file_years.push(yr);
+            return Ok(PlaylistSummaryItem {
+                index: playlist_index,
+                name: pl.name.clone(),
+                total_tracks: 0,
+                year_split_enabled,
+                buckets: Vec::new(),
+                warning_exceeds_max: false,
+            });
+        }
+
+        // 1. Check cache first
+        let (cached_hits, misses) = get_cached_metadata_batch(&files);
+        let cached_count = cached_hits.len();
+        let misses_count = misses.len();
+
+        let mut file_years: Vec<Option<u32>> = vec![None; total];
+        for (i, f) in files.iter().enumerate() {
+            if let Some(m) = cached_hits.get(f) {
+                file_years[i] = m.year;
+            }
+        }
+
+        if !probe_uncached {
+            // When probe_uncached is false (e.g. background/app startup summary):
+            // Only use cached data; do not trigger disk tag scanning
+            if cached_count > 0 {
+                let mut single_year_counts: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+                for yr in &file_years {
+                    if let Some(y) = yr {
+                        *single_year_counts.entry(*y).or_insert(0) += 1;
+                    }
+                }
+
+                let (computed_buckets, exceeds) = compute_buckets_summary(
+                    &file_years,
+                    year_cfg,
+                    &single_year_counts,
+                    config.min_tracks_per_year_playlist,
+                    max_tracks,
+                );
+                buckets = computed_buckets;
+                if exceeds {
+                    warning_exceeds_max = true;
+                }
+            }
+
+            return Ok(PlaylistSummaryItem {
+                index: playlist_index,
+                name: pl.name.clone(),
+                total_tracks,
+                year_split_enabled,
+                buckets,
+                warning_exceeds_max,
+            });
+        }
+
+        // When probe_uncached is true:
+        if misses_count > 0 {
+            if let (Some(app), Some(tid)) = (app, effective_task_id) {
+                let _ = app.emit(
+                    "task-progress",
+                    crate::sanitizer::TaskProgress {
+                        task_id: tid.to_string(),
+                        task_name: task_name.clone(),
+                        index: cached_count,
+                        total,
+                        status: "running".to_string(),
+                        message: format!("Analyzing {} tracks...", misses_count),
+                        file_path: None,
+                    },
+                );
+            }
+
+            let num_workers = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .min(16);
+            let chunk_size = (misses_count + num_workers - 1) / num_workers;
+            let processed_counter = std::sync::atomic::AtomicUsize::new(cached_count);
+            let start_instant = std::time::Instant::now();
+            let last_emit_ms = std::sync::atomic::AtomicU64::new(0);
+
+            let processed_ref = &processed_counter;
+            let last_emit_ms_ref = &last_emit_ms;
+            let task_name_ref = &task_name;
+
+            let probe_results_mutex = std::sync::Mutex::new(Vec::with_capacity(misses_count));
+            let probe_results_ref = &probe_results_mutex;
+
+            std::thread::scope(|s| {
+                for chunk in misses.chunks(chunk_size.max(1)) {
+                    s.spawn(move || {
+                        let mut local_results = Vec::with_capacity(chunk.len());
+                        for (orig_idx, path, mtime, size) in chunk {
+                            if let Some(tid) = effective_task_id {
+                                if crate::sanitizer::is_task_cancelled(tid) {
+                                    break;
+                                }
+                            }
+
+                            let probed = probe_track_metadata(path, *mtime, *size);
+                            local_results.push((*orig_idx, probed.year, probed));
+
+                            let cur = processed_ref.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                            if let (Some(app), Some(tid)) = (app, effective_task_id) {
+                                let elapsed_ms = start_instant.elapsed().as_millis() as u64;
+                                let prev_ms = last_emit_ms_ref.load(std::sync::atomic::Ordering::Relaxed);
+                                let mut should_emit = cur == cached_count + 1 || cur == total;
+                                if !should_emit && elapsed_ms >= prev_ms + 80 {
+                                    if last_emit_ms_ref
+                                        .compare_exchange_weak(
+                                            prev_ms,
+                                            elapsed_ms,
+                                            std::sync::atomic::Ordering::Relaxed,
+                                            std::sync::atomic::Ordering::Relaxed,
+                                        )
+                                        .is_ok()
+                                    {
+                                        should_emit = true;
+                                    }
+                                }
+                                if should_emit {
+                                    let _ = app.emit(
+                                        "task-progress",
+                                        crate::sanitizer::TaskProgress {
+                                            task_id: tid.to_string(),
+                                            task_name: task_name_ref.clone(),
+                                            index: cur.saturating_sub(1),
+                                            total,
+                                            status: "running".to_string(),
+                                            message: path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                                            file_path: None,
+                                        },
+                                    );
+                                }
+                            }
+                        }
+
+                        if let Ok(mut guard) = probe_results_ref.lock() {
+                            guard.extend(local_results);
+                        }
+                    });
+                }
+            });
+
+            let mut newly_probed = Vec::with_capacity(misses_count);
+            if let Ok(probed_list) = probe_results_mutex.into_inner() {
+                for (orig_idx, yr, meta) in probed_list {
+                    file_years[orig_idx] = yr;
+                    newly_probed.push(meta);
+                }
+            }
+
+            // Save newly probed metadata to in-memory cache (even partial results if cancelled)
+            save_cached_metadata_batch(&newly_probed);
+
+            if let Some(tid) = effective_task_id {
+                if crate::sanitizer::is_task_cancelled(tid) {
+                    return Err("Task cancelled".to_string());
+                }
+            }
+        }
+
+        let mut single_year_counts: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+        for yr in &file_years {
+            if let Some(y) = yr {
+                *single_year_counts.entry(*y).or_insert(0) += 1;
+            }
         }
 
         let (computed_buckets, exceeds) = compute_buckets_summary(
@@ -748,6 +1194,21 @@ pub fn calculate_single_playlist_summary(
         buckets = computed_buckets;
         if exceeds {
             warning_exceeds_max = true;
+        }
+
+        if let (Some(app), Some(tid)) = (app, effective_task_id) {
+            let _ = app.emit(
+                "task-progress",
+                crate::sanitizer::TaskProgress {
+                    task_id: tid.to_string(),
+                    task_name: task_name.clone(),
+                    index: total.saturating_sub(1),
+                    total,
+                    status: "completed".to_string(),
+                    message: "Year distribution analysis complete".to_string(),
+                    file_path: None,
+                },
+            );
         }
     }
 
@@ -768,9 +1229,9 @@ pub fn resolve_playlist_files(
 ) -> (Vec<PathBuf>, Vec<String>) {
     let (candidates, errors) =
         crate::dedup::gather_playlist_candidates(playlist_config, 0, source_dir, formats);
-    let (winning_files, _, _) =
-        crate::dedup::analyze_candidates(&candidates, source_dir, false, 60, false, None);
-    (winning_files, errors)
+    let mut files: Vec<PathBuf> = candidates.into_iter().map(|c| c.path).collect();
+    files.sort();
+    (files, errors)
 }
 
 pub fn write_playlist_file(
@@ -783,10 +1244,20 @@ pub fn write_playlist_file(
 
     writeln!(writer, "#EXTM3U").map_err(|e| e.to_string())?;
 
+    let cache_opt = TRACK_METADATA_CACHE.read().ok();
+
     for file_path in music_files {
         let mut duration = 0;
-        if let Ok(tagged_file) = Probe::open(file_path).and_then(|p| p.read()) {
-            duration = tagged_file.properties().duration().as_secs() as u32;
+        let c_str = crate::utils::canonical_path_str(file_path);
+        if let Some(ref guard) = cache_opt {
+            if let Some(cached) = guard.get(&c_str) {
+                duration = cached.duration_secs;
+            }
+        }
+        if duration == 0 {
+            if let Ok(tagged_file) = Probe::open(file_path).and_then(|p| p.read()) {
+                duration = tagged_file.properties().duration().as_secs() as u32;
+            }
         }
 
         let rel_path = pathdiff::diff_paths(file_path, playlist_file_path.parent().unwrap())
@@ -819,6 +1290,7 @@ mod tests {
             split_5y: vec![2000],
             split_1y: vec![2010],
             custom_merges: vec![[1950, 1989], [2011, 2012]],
+            split_unknown_parts: None,
         };
 
         let mut single_year_counts = std::collections::HashMap::new();
@@ -877,5 +1349,44 @@ mod tests {
         let (buckets, _) = compute_buckets_summary(&[Some(2010), Some(2013), Some(2013)], &cfg, &single_year_counts, None, 400);
         let b2010 = buckets.iter().find(|b| b.key == "2010").unwrap();
         assert_eq!(b2010.below_min_tracks, true); // 1 track in this run < 10 min_tracks
+    }
+
+    #[test]
+    fn test_split_unknown_parts() {
+        let single_year_counts = std::collections::HashMap::new();
+
+        // Single unknown
+        let mut cfg = YearSplitConfig {
+            enabled: true,
+            min_tracks: Some(10),
+            include_unknown: true,
+            split_5y: vec![],
+            split_1y: vec![],
+            custom_merges: vec![],
+            split_unknown_parts: None,
+        };
+
+        let file_years: Vec<Option<u32>> = vec![None; 10];
+        let (buckets1, _) = compute_buckets_summary(&file_years, &cfg, &single_year_counts, None, 400);
+        assert_eq!(buckets1.len(), 1);
+        assert_eq!(buckets1[0].key, "unknown");
+        assert_eq!(buckets1[0].label, "Unknown Year");
+        assert_eq!(buckets1[0].track_count, 10);
+
+        // Split unknown into 3 parts (10 tracks -> 4, 3, 3)
+        cfg.split_unknown_parts = Some(3);
+        let (buckets2, _) = compute_buckets_summary(&file_years, &cfg, &single_year_counts, None, 400);
+        assert_eq!(buckets2.len(), 3);
+        assert_eq!(buckets2[0].key, "unknown_01");
+        assert_eq!(buckets2[0].label, "Unknown 01");
+        assert_eq!(buckets2[0].track_count, 4);
+
+        assert_eq!(buckets2[1].key, "unknown_02");
+        assert_eq!(buckets2[1].label, "Unknown 02");
+        assert_eq!(buckets2[1].track_count, 3);
+
+        assert_eq!(buckets2[2].key, "unknown_03");
+        assert_eq!(buckets2[2].label, "Unknown 03");
+        assert_eq!(buckets2[2].track_count, 3);
     }
 }

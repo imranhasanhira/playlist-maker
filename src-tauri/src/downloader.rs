@@ -34,6 +34,22 @@ fn get_active_processes() -> &'static Arc<Mutex<HashMap<String, Child>>> {
     ACTIVE_PROCESSES.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
+pub fn sanitize_folder_name(name: &str) -> String {
+    let sanitized: String = name
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c => c,
+        })
+        .collect();
+    let trimmed = sanitized.trim();
+    if trimmed.is_empty() {
+        "Default".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 #[tauri::command]
 pub async fn start_download_job(
     app: AppHandle,
@@ -44,6 +60,7 @@ pub async fn start_download_job(
     use_archive: bool,
     archive_path: String,
     ignore_errors: bool,
+    folder_name: Option<String>,
 ) -> Result<(), String> {
     let mut args = vec![
         "-f".to_string(),
@@ -73,8 +90,14 @@ pub async fn start_download_job(
         args.push(arch);
     }
 
-    // Output template
-    let out_template = format!("{}/%(playlist_title)s/%(title)s.%(ext)s", output_dir);
+    // Output template: use user's entry name if provided, otherwise default to YouTube's %(playlist_title)s
+    let folder_part = folder_name
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(sanitize_folder_name)
+        .unwrap_or_else(|| "%(playlist_title)s".to_string());
+    let out_template = format!("{}/{}/%(title)s.%(ext)s", output_dir, folder_part);
     args.push("-o".to_string());
     args.push(out_template);
 
@@ -489,6 +512,43 @@ pub async fn dl_fetch_playlist_metadata(url: String) -> Result<PlaylistMetadata,
 }
 
 #[tauri::command]
+pub async fn dl_rename_entry_folder(
+    output_dir: String,
+    old_name: String,
+    new_name: String,
+) -> Result<bool, String> {
+    tokio::task::spawn_blocking(move || {
+        let base_path = std::path::Path::new(&output_dir);
+        let old_clean = sanitize_folder_name(&old_name);
+        let new_clean = sanitize_folder_name(&new_name);
+        if old_clean == new_clean {
+            return Ok(false);
+        }
+
+        // Check if old folder exists (try sanitized name first, then raw old_name)
+        let old_path = if base_path.join(&old_clean).exists() {
+            base_path.join(&old_clean)
+        } else if base_path.join(old_name.trim()).exists() {
+            base_path.join(old_name.trim())
+        } else {
+            return Ok(false); // No folder on disk yet to rename
+        };
+
+        let new_path = base_path.join(&new_clean);
+        if new_path.exists() && old_path != new_path {
+            return Err(format!("Target folder '{}' already exists on disk", new_clean));
+        }
+
+        std::fs::rename(&old_path, &new_path)
+            .map_err(|e| format!("Failed to rename folder from '{}' to '{}': {}", old_clean, new_clean, e))?;
+
+        Ok(true)
+    })
+    .await
+    .map_err(|e| format!("Thread execution error: {}", e))?
+}
+
+#[tauri::command]
 pub async fn dl_count_songs_on_disk(
     output_dir: String,
     playlist_title: String,
@@ -496,8 +556,15 @@ pub async fn dl_count_songs_on_disk(
 ) -> Result<u32, String> {
     tokio::task::spawn_blocking(move || {
         let base_path = std::path::Path::new(&output_dir);
+        let sanitized = sanitize_folder_name(&playlist_title);
         let target_dir = if !playlist_title.trim().is_empty() {
-            base_path.join(playlist_title.trim())
+            if base_path.join(playlist_title.trim()).exists() {
+                base_path.join(playlist_title.trim())
+            } else if base_path.join(&sanitized).exists() {
+                base_path.join(&sanitized)
+            } else {
+                base_path.join(playlist_title.trim())
+            }
         } else {
             base_path.to_path_buf()
         };
@@ -539,8 +606,15 @@ pub async fn dl_get_delete_files_report(
 ) -> Result<DeleteFilesReport, String> {
     tokio::task::spawn_blocking(move || {
         let base_path = std::path::Path::new(&output_dir);
+        let sanitized = sanitize_folder_name(&playlist_title);
         let target_dir = if !playlist_title.trim().is_empty() {
-            base_path.join(playlist_title.trim())
+            if base_path.join(playlist_title.trim()).exists() {
+                base_path.join(playlist_title.trim())
+            } else if base_path.join(&sanitized).exists() {
+                base_path.join(&sanitized)
+            } else {
+                base_path.join(playlist_title.trim())
+            }
         } else {
             base_path.to_path_buf()
         };
@@ -581,8 +655,15 @@ pub async fn dl_execute_delete_files(
 ) -> Result<u32, String> {
     tokio::task::spawn_blocking(move || {
         let base_path = std::path::Path::new(&output_dir);
+        let sanitized = sanitize_folder_name(&playlist_title);
         let target_dir = if !playlist_title.trim().is_empty() {
-            base_path.join(playlist_title.trim())
+            if base_path.join(playlist_title.trim()).exists() {
+                base_path.join(playlist_title.trim())
+            } else if base_path.join(&sanitized).exists() {
+                base_path.join(&sanitized)
+            } else {
+                base_path.join(playlist_title.trim())
+            }
         } else {
             base_path.to_path_buf()
         };
