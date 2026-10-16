@@ -8,11 +8,29 @@ use lofty::probe::Probe;
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::tag::Accessor;
 
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+pub struct YearSplitConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_tracks: Option<usize>, // Optional playlist-level override; falls back to global minTracksPerYearPlaylist
+    #[serde(default)]
+    pub include_unknown: bool,
+    #[serde(default)]
+    pub split_5y: Vec<u32>, // Decades (e.g. 1960, 1990) split into 5y half-decades
+    #[serde(default)]
+    pub split_1y: Vec<u32>, // 5y half-decades (e.g. 1965, 1995) split into individual years
+    #[serde(default)]
+    pub custom_merges: Vec<[u32; 2]>, // [start_year, end_year] spans (e.g. [[1950, 1989], [2011, 2012]])
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PlaylistConfig {
     pub name: String,
     pub sources: Vec<String>,
     pub exclusions: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub year_split: Option<YearSplitConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -23,6 +41,10 @@ pub struct MainConfig {
     pub target_dir: Option<String>,
     #[serde(rename = "relativeToConfig")]
     pub relative_to_config: Option<bool>,
+    #[serde(rename = "maxTracksPerPlaylist", default, skip_serializing_if = "Option::is_none")]
+    pub max_tracks_per_playlist: Option<usize>,
+    #[serde(rename = "minTracksPerYearPlaylist", default, skip_serializing_if = "Option::is_none")]
+    pub min_tracks_per_year_playlist: Option<usize>,
     pub playlists: Vec<PlaylistConfig>,
 }
 
@@ -34,6 +56,31 @@ pub struct TrackPreview {
     pub artist: String,
     pub duration: u32,
     pub size_bytes: u64,
+    pub year: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct YearBucketSummary {
+    pub key: String,         // e.g. "2000-2009", "2000-2004", "2011", "1950-1989", "unknown"
+    pub label: String,       // Display label e.g. "2000-2009", "2000-2004", "2011", "1950-1989", "Unknown Year"
+    pub bucket_type: String, // "10y" | "5y" | "1y" | "custom" | "unknown"
+    pub parent_key: Option<String>, // Parent decade or half-decade for merge-back
+    pub track_count: usize,
+    pub is_split: bool,
+    pub start_year: Option<u32>,
+    pub end_year: Option<u32>,
+    #[serde(default)]
+    pub below_min_tracks: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PlaylistSummaryItem {
+    pub index: usize,
+    pub name: String,
+    pub total_tracks: usize,
+    pub year_split_enabled: bool,
+    pub buckets: Vec<YearBucketSummary>,
+    pub warning_exceeds_max: bool,
 }
 
 // Find right directory resolving logic similar to Python's findRightDir
@@ -224,6 +271,55 @@ pub fn list_music_files(folder: &Path, formats: &HashSet<String>) -> Vec<PathBuf
     files
 }
 
+// Extract year from metadata tags with fallback to filename regex (explicitly skipping directory paths)
+pub fn extract_track_year(path: &Path, tagged_file_opt: Option<&lofty::file::TaggedFile>) -> Option<u32> {
+    // 1. Primary: Audio metadata tags (ID3v2, Vorbis, MP4, etc.)
+    if let Some(tagged_file) = tagged_file_opt {
+        if let Some(primary_tag) = tagged_file.primary_tag() {
+            if let Some(y) = primary_tag.year() {
+                if (1900..=2099).contains(&y) {
+                    return Some(y);
+                }
+            }
+            // Check OriginalReleaseDate tag frame if present
+            use lofty::tag::ItemKey;
+            if let Some(val) = primary_tag.get_string(&ItemKey::OriginalReleaseDate) {
+                if let Some(parsed) = parse_year_from_str(val) {
+                    return Some(parsed);
+                }
+            }
+        }
+    }
+
+    // 2. Secondary: Filename stem regex (e.g. "Song (1968).mp3" or "1999 - Track.mp3")
+    // NOTE: Explicitly skipping parent directory names as per user requirement!
+    if let Some(file_name) = path.file_stem().and_then(|s| s.to_str()) {
+        if let Some(parsed) = parse_year_from_str(file_name) {
+            return Some(parsed);
+        }
+    }
+
+    None
+}
+
+fn parse_year_from_str(text: &str) -> Option<u32> {
+    lazy_static_or_local_year_regex(text)
+}
+
+fn lazy_static_or_local_year_regex(text: &str) -> Option<u32> {
+    let re = regex::Regex::new(r"(?:\b|_)(19\d\d|20\d\d)(?:\b|_)").ok()?;
+    for cap in re.captures_iter(text) {
+        if let Some(m) = cap.get(1) {
+            if let Ok(y) = m.as_str().parse::<u32>() {
+                if (1900..=2099).contains(&y) {
+                    return Some(y);
+                }
+            }
+        }
+    }
+    None
+}
+
 pub fn get_track_preview(path: &Path, base_playlist_dir: &Path) -> TrackPreview {
     let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let file_path = canonical.to_string_lossy().to_string();
@@ -239,7 +335,7 @@ pub fn get_track_preview(path: &Path, base_playlist_dir: &Path) -> TrackPreview 
     let mut artist = String::new();
     let mut duration = 0;
 
-    if let Ok(tagged_file) = Probe::open(path).and_then(|p| p.read()) {
+    let year = if let Ok(tagged_file) = Probe::open(path).and_then(|p| p.read()) {
         let properties = tagged_file.properties();
         duration = properties.duration().as_secs() as u32;
 
@@ -251,7 +347,11 @@ pub fn get_track_preview(path: &Path, base_playlist_dir: &Path) -> TrackPreview 
                 artist = a.to_string();
             }
         }
-    }
+
+        extract_track_year(path, Some(&tagged_file))
+    } else {
+        extract_track_year(path, None)
+    };
 
     TrackPreview {
         file_path,
@@ -260,7 +360,405 @@ pub fn get_track_preview(path: &Path, base_playlist_dir: &Path) -> TrackPreview 
         artist,
         duration,
         size_bytes,
+        year,
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedSubPlaylist {
+    pub name: String,
+    pub bucket_key: String,
+    pub files: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub struct YearBucketInfo {
+    pub key: String,
+    pub label: String,
+    pub bucket_type: String,
+    pub parent_key: Option<String>,
+    pub start_year: Option<u32>,
+    pub end_year: Option<u32>,
+}
+
+// Compute bucket info for a year given the year_split config
+// Returns YearBucketInfo with key, label, bucket_type, parent_key, and start/end years
+pub fn determine_year_bucket_info(
+    year_opt: Option<u32>,
+    cfg: &YearSplitConfig,
+    _single_year_counts: &std::collections::HashMap<u32, usize>,
+    _global_min_tracks: Option<usize>,
+) -> YearBucketInfo {
+    let y = match year_opt {
+        Some(val) => val,
+        None => return YearBucketInfo {
+            key: "unknown".to_string(),
+            label: "Unknown Year".to_string(),
+            bucket_type: "unknown".to_string(),
+            parent_key: None,
+            start_year: None,
+            end_year: None,
+        },
+    };
+
+    // 1. Check custom_merges first
+    for span in &cfg.custom_merges {
+        let start = span[0].min(span[1]);
+        let end = span[0].max(span[1]);
+        if y >= start && y <= end {
+            let key = if start == end {
+                format!("{}", start)
+            } else {
+                format!("{}-{}", start, end)
+            };
+            return YearBucketInfo {
+                key: key.clone(),
+                label: key,
+                bucket_type: "custom".to_string(),
+                parent_key: None,
+                start_year: Some(start),
+                end_year: Some(end),
+            };
+        }
+    }
+
+    let decade = (y / 10) * 10;
+    let half_decade = if (y % 10) < 5 { decade } else { decade + 5 };
+
+    let is_decade_split_5y = cfg.split_5y.contains(&decade);
+    let is_half_decade_split_1y = cfg.split_1y.contains(&half_decade);
+
+    if is_half_decade_split_1y {
+        let key = format!("{}", y);
+        return YearBucketInfo {
+            key: key.clone(),
+            label: key,
+            bucket_type: "1y".to_string(),
+            parent_key: Some(format!("{}-{}", half_decade, half_decade + 4)),
+            start_year: Some(y),
+            end_year: Some(y),
+        };
+    }
+
+    if is_decade_split_5y {
+        let key = format!("{}-{}", half_decade, half_decade + 4);
+        return YearBucketInfo {
+            key: key.clone(),
+            label: key,
+            bucket_type: "5y".to_string(),
+            parent_key: Some(format!("{}-{}", decade, decade + 9)),
+            start_year: Some(half_decade),
+            end_year: Some(half_decade + 4),
+        };
+    }
+
+    // Default 10y decade
+    let key = format!("{}-{}", decade, decade + 9);
+    YearBucketInfo {
+        key: key.clone(),
+        label: key,
+        bucket_type: "10y".to_string(),
+        parent_key: None,
+        start_year: Some(decade),
+        end_year: Some(decade + 9),
+    }
+}
+
+pub fn determine_year_bucket_key(
+    year_opt: Option<u32>,
+    cfg: &YearSplitConfig,
+    single_year_counts: &std::collections::HashMap<u32, usize>,
+    global_min_tracks: Option<usize>,
+) -> (String, String) {
+    let info = determine_year_bucket_info(year_opt, cfg, single_year_counts, global_min_tracks);
+    (info.key, info.bucket_type)
+}
+
+// Expand a playlist into its sub-playlists (or 1 playlist if year_split is disabled)
+pub fn expand_playlist_buckets(
+    playlist_config: &PlaylistConfig,
+    source_dir: &Path,
+    formats: &HashSet<String>,
+    global_min_tracks: Option<usize>,
+) -> (Vec<ResolvedSubPlaylist>, Vec<String>) {
+    let (files, errors) = resolve_playlist_files(playlist_config, source_dir, formats);
+
+    let year_cfg = match &playlist_config.year_split {
+        Some(cfg) if cfg.enabled => cfg.clone(),
+        _ => {
+            return (
+                vec![ResolvedSubPlaylist {
+                    name: playlist_config.name.clone(),
+                    bucket_key: "all".to_string(),
+                    files,
+                }],
+                errors,
+            );
+        }
+    };
+
+    // 1. Gather all file years
+    let mut file_years: Vec<(PathBuf, Option<u32>)> = Vec::with_capacity(files.len());
+    let mut single_year_counts: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+
+    for f in &files {
+        let yr = if let Ok(tagged_file) = Probe::open(f).and_then(|p| p.read()) {
+            extract_track_year(f, Some(&tagged_file))
+        } else {
+            extract_track_year(f, None)
+        };
+
+        if let Some(y) = yr {
+            *single_year_counts.entry(y).or_insert(0) += 1;
+        }
+        file_years.push((f.clone(), yr));
+    }
+
+    // 2. Group into buckets
+    let mut bucket_files: std::collections::BTreeMap<String, Vec<PathBuf>> = std::collections::BTreeMap::new();
+
+    for (path, yr) in file_years {
+        if yr.is_none() && !year_cfg.include_unknown {
+            // Default ignored!
+            continue;
+        }
+
+        let (key, _) = determine_year_bucket_key(yr, &year_cfg, &single_year_counts, global_min_tracks);
+        bucket_files.entry(key).or_default().push(path);
+    }
+
+    let mut result = Vec::new();
+    for (key, b_files) in bucket_files {
+        if b_files.is_empty() {
+            continue;
+        }
+        let sub_name = if key == "unknown" {
+            format!("{} - Unknown", playlist_config.name)
+        } else {
+            format!("{} - {}", playlist_config.name, key)
+        };
+        result.push(ResolvedSubPlaylist {
+            name: sub_name,
+            bucket_key: key,
+            files: b_files,
+        });
+    }
+
+    (result, errors)
+}
+
+// Compute bucket summaries for a set of file years
+pub fn compute_buckets_summary(
+    file_years: &[Option<u32>],
+    year_cfg: &YearSplitConfig,
+    single_year_counts: &std::collections::HashMap<u32, usize>,
+    global_min_tracks: Option<usize>,
+    max_tracks: usize,
+) -> (Vec<YearBucketSummary>, bool) {
+    let mut bucket_counts: std::collections::BTreeMap<String, (YearBucketInfo, usize)> = std::collections::BTreeMap::new();
+    let mut unknown_count = 0;
+
+    for &yr in file_years {
+        if yr.is_none() {
+            unknown_count += 1;
+            if year_cfg.include_unknown {
+                let info = determine_year_bucket_info(None, year_cfg, single_year_counts, global_min_tracks);
+                let entry = bucket_counts.entry("unknown".to_string()).or_insert((info, 0));
+                entry.1 += 1;
+            }
+            continue;
+        }
+
+        let info = determine_year_bucket_info(yr, year_cfg, single_year_counts, global_min_tracks);
+        let entry = bucket_counts.entry(info.key.clone()).or_insert((info, 0));
+        entry.1 += 1;
+    }
+
+    let mut buckets = Vec::new();
+    let mut warning_exceeds_max = false;
+
+    let effective_min_tracks = year_cfg.min_tracks.or(global_min_tracks).unwrap_or(10);
+
+    if unknown_count > 0 && !year_cfg.include_unknown {
+        buckets.push(YearBucketSummary {
+            key: "unknown".to_string(),
+            label: "Unknown Year".to_string(),
+            bucket_type: "unknown".to_string(),
+            parent_key: None,
+            track_count: unknown_count,
+            is_split: false,
+            start_year: None,
+            end_year: None,
+            below_min_tracks: false,
+        });
+    }
+
+    for (key, (info, count)) in bucket_counts {
+        if count > max_tracks {
+            warning_exceeds_max = true;
+        }
+
+        let is_split = match info.bucket_type.as_str() {
+            "10y" => {
+                if let Some(s) = info.start_year {
+                    year_cfg.split_5y.contains(&s)
+                } else {
+                    false
+                }
+            }
+            "5y" => {
+                if let Some(s) = info.start_year {
+                    year_cfg.split_1y.contains(&s)
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
+
+        let below_min_tracks = info.bucket_type != "unknown" && count < effective_min_tracks;
+
+        buckets.push(YearBucketSummary {
+            key,
+            label: info.label,
+            bucket_type: info.bucket_type,
+            parent_key: info.parent_key,
+            track_count: count,
+            is_split,
+            start_year: info.start_year,
+            end_year: info.end_year,
+            below_min_tracks,
+        });
+    }
+
+    // Sort buckets chronologically: known years first by (start_year, end_year), unknown at the end
+    buckets.sort_by_key(|b| {
+        (
+            b.start_year.unwrap_or(u32::MAX),
+            b.end_year.unwrap_or(u32::MAX),
+        )
+    });
+
+    (buckets, warning_exceeds_max)
+}
+
+// Generate summary of all playlists and their year buckets for the sidebar refresh
+pub fn calculate_playlist_summaries(
+    config: &MainConfig,
+    source_dir: &Path,
+    formats: &HashSet<String>,
+) -> Vec<PlaylistSummaryItem> {
+    let max_tracks = config.max_tracks_per_playlist.unwrap_or(400);
+    let mut summaries = Vec::new();
+
+    for (index, pl) in config.playlists.iter().enumerate() {
+        let (files, _) = resolve_playlist_files(pl, source_dir, formats);
+        let total_tracks = files.len();
+        let year_split_enabled = pl.year_split.as_ref().map(|y| y.enabled).unwrap_or(false);
+
+        let mut buckets = Vec::new();
+        let mut warning_exceeds_max = total_tracks > max_tracks;
+
+        if year_split_enabled {
+            let year_cfg = pl.year_split.as_ref().unwrap();
+            let mut file_years: Vec<Option<u32>> = Vec::with_capacity(files.len());
+            let mut single_year_counts: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+
+            for f in &files {
+                let yr = if let Ok(tagged_file) = Probe::open(f).and_then(|p| p.read()) {
+                    extract_track_year(f, Some(&tagged_file))
+                } else {
+                    extract_track_year(f, None)
+                };
+                if let Some(y) = yr {
+                    *single_year_counts.entry(y).or_insert(0) += 1;
+                }
+                file_years.push(yr);
+            }
+
+            let (computed_buckets, exceeds) = compute_buckets_summary(
+                &file_years,
+                year_cfg,
+                &single_year_counts,
+                config.min_tracks_per_year_playlist,
+                max_tracks,
+            );
+            buckets = computed_buckets;
+            if exceeds {
+                warning_exceeds_max = true;
+            }
+        }
+
+        summaries.push(PlaylistSummaryItem {
+            index,
+            name: pl.name.clone(),
+            total_tracks,
+            year_split_enabled,
+            buckets,
+            warning_exceeds_max,
+        });
+    }
+
+    summaries
+}
+
+// Calculate summary for a single playlist
+pub fn calculate_single_playlist_summary(
+    config: &MainConfig,
+    source_dir: &Path,
+    formats: &HashSet<String>,
+    playlist_index: usize,
+) -> Result<PlaylistSummaryItem, String> {
+    if playlist_index >= config.playlists.len() {
+        return Err("Playlist index out of bounds".to_string());
+    }
+    let max_tracks = config.max_tracks_per_playlist.unwrap_or(400);
+    let pl = &config.playlists[playlist_index];
+    let (files, _) = resolve_playlist_files(pl, source_dir, formats);
+    let total_tracks = files.len();
+    let year_split_enabled = pl.year_split.as_ref().map(|y| y.enabled).unwrap_or(false);
+
+    let mut buckets = Vec::new();
+    let mut warning_exceeds_max = total_tracks > max_tracks;
+
+    if year_split_enabled {
+        let year_cfg = pl.year_split.as_ref().unwrap();
+        let mut file_years: Vec<Option<u32>> = Vec::with_capacity(files.len());
+        let mut single_year_counts: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+
+        for f in &files {
+            let yr = if let Ok(tagged_file) = Probe::open(f).and_then(|p| p.read()) {
+                extract_track_year(f, Some(&tagged_file))
+            } else {
+                extract_track_year(f, None)
+            };
+            if let Some(y) = yr {
+                *single_year_counts.entry(y).or_insert(0) += 1;
+            }
+            file_years.push(yr);
+        }
+
+        let (computed_buckets, exceeds) = compute_buckets_summary(
+            &file_years,
+            year_cfg,
+            &single_year_counts,
+            config.min_tracks_per_year_playlist,
+            max_tracks,
+        );
+        buckets = computed_buckets;
+        if exceeds {
+            warning_exceeds_max = true;
+        }
+    }
+
+    Ok(PlaylistSummaryItem {
+        index: playlist_index,
+        name: pl.name.clone(),
+        total_tracks,
+        year_split_enabled,
+        buckets,
+        warning_exceeds_max,
+    })
 }
 
 pub fn resolve_playlist_files(
@@ -268,45 +766,11 @@ pub fn resolve_playlist_files(
     source_dir: &Path,
     formats: &HashSet<String>,
 ) -> (Vec<PathBuf>, Vec<String>) {
-    let mut errors = Vec::new();
-    let mut files = HashSet::new();
-
-    // 1. Gather all sources
-    for source in &playlist_config.sources {
-        let source_path = if Path::new(source).is_absolute() {
-            PathBuf::from(source)
-        } else {
-            source_dir.join(source)
-        };
-
-        if !source_path.exists() {
-            errors.push(format!("Folder not found: {}", source_path.display()));
-            continue;
-        }
-
-        for file in list_music_files(&source_path, formats) {
-            files.insert(file);
-        }
-    }
-
-    // 2. Remove exclusions
-    if let Some(exclusions) = &playlist_config.exclusions {
-        for exclusion in exclusions {
-            let exclusion_path = if Path::new(exclusion).is_absolute() {
-                PathBuf::from(exclusion)
-            } else {
-                source_dir.join(exclusion)
-            };
-
-            for file in list_music_files(&exclusion_path, formats) {
-                files.remove(&file);
-            }
-        }
-    }
-
-    let mut files_vec: Vec<PathBuf> = files.into_iter().collect();
-    files_vec.sort();
-    (files_vec, errors)
+    let (candidates, errors) =
+        crate::dedup::gather_playlist_candidates(playlist_config, 0, source_dir, formats);
+    let (winning_files, _, _) =
+        crate::dedup::analyze_candidates(&candidates, source_dir, false, 60, false, None);
+    (winning_files, errors)
 }
 
 pub fn write_playlist_file(
@@ -344,5 +808,74 @@ mod tests {
         let content = std::fs::read_to_string("../sample_config.yaml").unwrap();
         let config: MainConfig = serde_yaml::from_str(&content).unwrap();
         println!("Loaded config successfully: {:?}", config);
+    }
+
+    #[test]
+    fn test_year_bucket_patterns_and_custom_merges() {
+        let mut cfg = YearSplitConfig {
+            enabled: true,
+            min_tracks: Some(10),
+            include_unknown: false,
+            split_5y: vec![2000],
+            split_1y: vec![2010],
+            custom_merges: vec![[1950, 1989], [2011, 2012]],
+        };
+
+        let mut single_year_counts = std::collections::HashMap::new();
+        single_year_counts.insert(2010, 15);
+        single_year_counts.insert(2011, 12);
+        single_year_counts.insert(2012, 10);
+        single_year_counts.insert(1965, 8);
+
+        // 1. Custom merge span [1950, 1989] covers 1965 -> "1950-1989"
+        let b1 = determine_year_bucket_info(Some(1965), &cfg, &single_year_counts, None);
+        assert_eq!(b1.key, "1950-1989");
+        assert_eq!(b1.label, "1950-1989");
+        assert_eq!(b1.bucket_type, "custom");
+        assert_eq!(b1.start_year, Some(1950));
+        assert_eq!(b1.end_year, Some(1989));
+
+        // 2. Custom merge span [2011, 2012] covers 2011 -> "2011-2012"
+        let b2 = determine_year_bucket_info(Some(2011), &cfg, &single_year_counts, None);
+        assert_eq!(b2.key, "2011-2012");
+        assert_eq!(b2.label, "2011-2012");
+        assert_eq!(b2.bucket_type, "custom");
+
+        // 3. Default 10y decade pattern (e.g. 1995 without split) -> "1990-1999"
+        let b3 = determine_year_bucket_info(Some(1995), &cfg, &single_year_counts, None);
+        assert_eq!(b3.key, "1990-1999");
+        assert_eq!(b3.label, "1990-1999");
+        assert_eq!(b3.bucket_type, "10y");
+
+        // 4. 5y split pattern (2000 decade is split) -> 2002 is "2000-2004", 2007 is "2005-2009"
+        let b4 = determine_year_bucket_info(Some(2002), &cfg, &single_year_counts, None);
+        assert_eq!(b4.key, "2000-2004");
+        assert_eq!(b4.label, "2000-2004");
+        assert_eq!(b4.bucket_type, "5y");
+
+        let b5 = determine_year_bucket_info(Some(2007), &cfg, &single_year_counts, None);
+        assert_eq!(b5.key, "2005-2009");
+        assert_eq!(b5.label, "2005-2009");
+        assert_eq!(b5.bucket_type, "5y");
+
+        // 5. 1y split pattern (2010 half-decade is split, 2010 has 15 tracks) -> "2010"
+        cfg.custom_merges.clear();
+        let b6 = determine_year_bucket_info(Some(2010), &cfg, &single_year_counts, None);
+        assert_eq!(b6.key, "2010");
+        assert_eq!(b6.label, "2010");
+        assert_eq!(b6.bucket_type, "1y");
+
+        // 6. Unconditional 1y split even when tracks < min_tracks (e.g. 2013 has only 2 tracks)
+        let b7 = determine_year_bucket_info(Some(2013), &cfg, &single_year_counts, None);
+        assert_eq!(b7.key, "2013");
+        assert_eq!(b7.label, "2013");
+        assert_eq!(b7.bucket_type, "1y");
+        assert_eq!(b7.start_year, Some(2013));
+        assert_eq!(b7.end_year, Some(2013));
+
+        // 7. Verify below_min_tracks marker in compute_buckets_summary
+        let (buckets, _) = compute_buckets_summary(&[Some(2010), Some(2013), Some(2013)], &cfg, &single_year_counts, None, 400);
+        let b2010 = buckets.iter().find(|b| b.key == "2010").unwrap();
+        assert_eq!(b2010.below_min_tracks, true); // 1 track in this run < 10 min_tracks
     }
 }

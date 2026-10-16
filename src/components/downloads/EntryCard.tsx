@@ -173,13 +173,23 @@ export const EntryCard: React.FC<EntryCardProps> = ({
       {/* Row 4: Song count on Bottom Left */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", marginTop: "2px" }}>
         <span style={{ fontSize: "0.76rem", color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
-          {entry.total_songs > 0
-            ? entry.songs_on_disk > entry.total_songs
-              ? `${entry.songs_on_disk} downloaded (${entry.total_songs} in playlist)`
-              : `${entry.songs_on_disk} / ${entry.total_songs} downloaded`
-            : entry.songs_on_disk > 0
-            ? `${entry.songs_on_disk} downloaded`
-            : "0 downloaded"}
+          {(() => {
+            const liveSongsOnDisk =
+              activeJob && activeJob.status === "running" && activeJob.current_item
+                ? Math.max(entry.songs_on_disk || 0, activeJob.current_item > 1 ? activeJob.current_item - 1 : 0)
+                : (entry.songs_on_disk || 0);
+            const liveTotalSongs =
+              activeJob && activeJob.total_items && activeJob.total_items > 0
+                ? activeJob.total_items
+                : (entry.total_songs || 0);
+
+            if (liveTotalSongs > 0) {
+              return liveSongsOnDisk > liveTotalSongs
+                ? `${liveSongsOnDisk} downloaded (${liveTotalSongs} in playlist)`
+                : `${liveSongsOnDisk} / ${liveTotalSongs} downloaded`;
+            }
+            return liveSongsOnDisk > 0 ? `${liveSongsOnDisk} downloaded` : "0 downloaded";
+          })()}
         </span>
       </div>
     </div>

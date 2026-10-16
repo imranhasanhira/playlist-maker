@@ -45,6 +45,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
     }
   });
 
+  const [skipDuplicates, setSkipDuplicates] = useState<boolean>(false);
   const [deleteOrphans, setDeleteOrphans] = useState<boolean>(false);
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
   const [isExporting, setIsExporting] = useState<boolean>(false);
@@ -96,6 +97,74 @@ export const ExportView: React.FC<ExportViewProps> = ({
       ),
     };
   }, [diffReport, debouncedSearchQuery]);
+
+  type ExportSortField = "status" | "source" | "dest" | "size";
+  type ExportSortOrder = "asc" | "desc";
+  const [sortField, setSortField] = useState<ExportSortField | null>(null);
+  const [sortOrder, setSortOrder] = useState<ExportSortOrder>("asc");
+
+  const handleToggleSort = (field: ExportSortField) => {
+    if (sortField === field) {
+      if (sortOrder === "asc") {
+        setSortOrder("desc");
+      } else {
+        setSortField(null);
+        setSortOrder("asc");
+      }
+    } else {
+      setSortField(field);
+      setSortOrder("asc");
+    }
+  };
+
+  const renderSortIndicator = (field: ExportSortField) => {
+    if (sortField !== field) {
+      return (
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.3, marginLeft: "4px", verticalAlign: "middle" }}>
+          <path d="M7 15l5 5 5-5M7 9l5-5 5 5"/>
+        </svg>
+      );
+    }
+    return (
+      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="var(--accent-purple-hover)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ marginLeft: "4px", verticalAlign: "middle" }}>
+        {sortOrder === "asc" ? (
+          <path d="M18 15l-6-6-6 6"/>
+        ) : (
+          <path d="M6 9l6 6 6-6"/>
+        )}
+      </svg>
+    );
+  };
+
+  const sortedItems = useMemo(() => {
+    const sortList = <T extends { status?: string; is_playlist?: boolean; relative_path: string; dest_relative_path?: string; size_bytes?: number }>(items: T[]): T[] => {
+      if (!sortField) return items;
+      return [...items].sort((a, b) => {
+        let comp = 0;
+        if (sortField === "status") {
+          const sa = a.status || (a.is_playlist ? "PLAYLIST" : "AUDIO");
+          const sb = b.status || (b.is_playlist ? "PLAYLIST" : "AUDIO");
+          comp = sa.localeCompare(sb);
+        } else if (sortField === "source") {
+          comp = a.relative_path.localeCompare(b.relative_path);
+        } else if (sortField === "dest") {
+          const da = a.dest_relative_path || "";
+          const db = b.dest_relative_path || "";
+          comp = da.localeCompare(db);
+        } else if (sortField === "size") {
+          comp = (a.size_bytes || 0) - (b.size_bytes || 0);
+        }
+        return sortOrder === "asc" ? comp : -comp;
+      });
+    };
+
+    return {
+      newFiles: sortList(filteredItems.newFiles),
+      upToDateFiles: sortList(filteredItems.upToDateFiles),
+      orphanFiles: sortList(filteredItems.orphanFiles),
+      warningItems: filteredItems.warningItems,
+    };
+  }, [filteredItems, sortField, sortOrder]);
 
   const [selectedItemPaths, setSelectedItemPaths] = useState<Set<string>>(new Set());
   const [excludedPaths, setExcludedPaths] = useState<Set<string>>(new Set());
@@ -236,11 +305,13 @@ export const ExportView: React.FC<ExportViewProps> = ({
     }
   };
 
-  const handleAnalyzeDiff = async () => {
+  const handleAnalyzeDiff = async (skipDupsOverride?: boolean | React.MouseEvent) => {
     if (!configPath || !exportDir) {
       alert("Please select a valid export destination directory first.");
       return;
     }
+    const effectiveSkipDups =
+      typeof skipDupsOverride === "boolean" ? skipDupsOverride : skipDuplicates;
     setIsAnalyzing(true);
     try {
       const formatsList = formats.split(",").map((f) => f.trim());
@@ -249,6 +320,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
         destination: exportDir,
         formats: formatsList,
         relativeToConfig,
+        skipDuplicates: effectiveSkipDups,
       });
       setDiffReport(report);
       onDismissStale();
@@ -316,7 +388,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
     setShowLogsModal(true);
     isExportAutoScrollRef.current = true;
     setIsExportAutoScroll(true);
-    const cmdStr = `$ sync-export --config "${configPath}" --destination "${exportDir}" --formats "${formats || "all"}"${deleteOrphans ? " --delete-orphans" : ""}`;
+    const cmdStr = `$ sync-export --config "${configPath}" --destination "${exportDir}" --formats "${formats || "all"}"${skipDuplicates ? " --skip-duplicates" : ""}${deleteOrphans ? " --delete-orphans" : ""}`;
     setExportLogs([cmdStr, "Initializing smart sync export..."]);
     setExportProgress(null);
 
@@ -349,6 +421,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
         configPath,
         destination: exportDir,
         deleteOrphans,
+        skipDuplicates,
         excludedPaths: Array.from(excludedPaths),
         formats: formatsList,
         relativeToConfig,
@@ -486,15 +559,39 @@ export const ExportView: React.FC<ExportViewProps> = ({
           </div>
 
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid var(--border-color)", paddingTop: "10px" }}>
-            <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer", fontSize: "0.85rem", color: "var(--text-secondary)" }}>
-              <input
-                type="checkbox"
-                checked={deleteOrphans}
-                onChange={(e) => setDeleteOrphans(e.target.checked)}
-                style={{ width: "16px", height: "16px", accentColor: "var(--accent-purple)" }}
-              />
-              <span>Delete orphan files in destination folder (files no longer in playlists)</span>
-            </label>
+            <div style={{ display: "flex", alignItems: "center", gap: "20px" }}>
+              <label
+                style={{ display: "flex", alignItems: "center", gap: "7px", cursor: "pointer", fontSize: "0.85rem", color: "var(--text-secondary)" }}
+                title="Deduplicate songs across playlists (Rule 1 priority + format quality), export only the superior file, and update all playlists referencing that song to point to the superior file"
+              >
+                <input
+                  type="checkbox"
+                  checked={skipDuplicates}
+                  onChange={(e) => {
+                    const next = e.target.checked;
+                    setSkipDuplicates(next);
+                    if (diffReport && exportDir) {
+                      handleAnalyzeDiff(next);
+                    }
+                  }}
+                  style={{ width: "16px", height: "16px", accentColor: "var(--accent-purple)" }}
+                />
+                <span>Skip duplicates</span>
+              </label>
+
+              <label
+                style={{ display: "flex", alignItems: "center", gap: "7px", cursor: "pointer", fontSize: "0.85rem", color: "var(--text-secondary)" }}
+                title="Remove files in the destination folder that are no longer referenced by any exported playlist"
+              >
+                <input
+                  type="checkbox"
+                  checked={deleteOrphans}
+                  onChange={(e) => setDeleteOrphans(e.target.checked)}
+                  style={{ width: "16px", height: "16px", accentColor: "var(--accent-purple)" }}
+                />
+                <span>Delete orphans</span>
+              </label>
+            </div>
 
             {diffReport && (
               <span className="text-secondary" style={{ fontSize: "0.8rem", fontFamily: "var(--font-mono)" }}>
@@ -640,7 +737,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
 
           <div className="table-container" onScroll={handleTableScroll} style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
             {activeTab === "new" && (
-              filteredItems.newFiles.length > 0 ? (
+              sortedItems.newFiles.length > 0 ? (
                 <>
                   <table style={{ tableLayout: "fixed", width: "100%" }}>
                     <thead>
@@ -649,35 +746,71 @@ export const ExportView: React.FC<ExportViewProps> = ({
                           <input
                             type="checkbox"
                             checked={
-                              filteredItems.newFiles.length > 0 &&
-                              filteredItems.newFiles.every((item) => selectedItemPaths.has(item.relative_path))
+                              sortedItems.newFiles.length > 0 &&
+                              sortedItems.newFiles.every((item) => selectedItemPaths.has(item.relative_path))
                             }
-                            onChange={() => handleToggleSelectAll(filteredItems.newFiles)}
+                            onChange={() => handleToggleSelectAll(sortedItems.newFiles)}
                             style={{ cursor: "pointer" }}
                           />
                         </th>
-                        <th style={{ width: "100px" }}>Status</th>
-                        <th style={{ width: "55%" }}>Source Relative Path</th>
-                        <th style={{ width: "25%" }}>Target Relative Path</th>
-                        <th style={{ width: "90px", textAlign: "right" }}>Size</th>
+                        <th
+                          style={{ width: "100px", cursor: "pointer", userSelect: "none" }}
+                          onClick={() => handleToggleSort("status")}
+                          title="Click to sort by Status"
+                        >
+                          <div style={{ display: "inline-flex", alignItems: "center" }}>
+                            <span>Status</span>
+                            {renderSortIndicator("status")}
+                          </div>
+                        </th>
+                        <th
+                          style={{ width: "55%", cursor: "pointer", userSelect: "none" }}
+                          onClick={() => handleToggleSort("source")}
+                          title="Click to sort by Source Path"
+                        >
+                          <div style={{ display: "inline-flex", alignItems: "center" }}>
+                            <span>Source Relative Path</span>
+                            {renderSortIndicator("source")}
+                          </div>
+                        </th>
+                        <th
+                          style={{ width: "25%", cursor: "pointer", userSelect: "none" }}
+                          onClick={() => handleToggleSort("dest")}
+                          title="Click to sort by Target Path"
+                        >
+                          <div style={{ display: "inline-flex", alignItems: "center" }}>
+                            <span>Target Relative Path</span>
+                            {renderSortIndicator("dest")}
+                          </div>
+                        </th>
+                        <th
+                          style={{ width: "90px", textAlign: "right", cursor: "pointer", userSelect: "none" }}
+                          onClick={() => handleToggleSort("size")}
+                          title="Click to sort by File Size"
+                        >
+                          <div style={{ display: "inline-flex", alignItems: "center", justifyContent: "flex-end" }}>
+                            <span>Size</span>
+                            {renderSortIndicator("size")}
+                          </div>
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
-                      {filteredItems.newFiles.slice(0, visibleLimit).map((item, idx) => {
+                      {sortedItems.newFiles.slice(0, visibleLimit).map((item, idx) => {
                         const isExcluded = excludedPaths.has(item.relative_path);
                         const isSelected = selectedItemPaths.has(item.relative_path);
                         return (
                           <tr
                             key={idx}
                             title={item.file_path}
-                            onClick={(e) => handleToggleSelectItem(item.relative_path, idx, e.shiftKey, filteredItems.newFiles)}
+                            onClick={(e) => handleToggleSelectItem(item.relative_path, idx, e.shiftKey, sortedItems.newFiles)}
                             style={{ backgroundColor: isSelected ? "var(--accent-purple-glow)" : "transparent", cursor: "pointer", userSelect: "none" }}
                           >
                             <td style={{ textAlign: "center" }} onClick={(e) => e.stopPropagation()}>
                               <input
                                 type="checkbox"
                                 checked={isSelected}
-                                onChange={(e) => handleToggleSelectItem(item.relative_path, idx, (e.nativeEvent as MouseEvent).shiftKey, filteredItems.newFiles)}
+                                onChange={(e) => handleToggleSelectItem(item.relative_path, idx, (e.nativeEvent as MouseEvent).shiftKey, sortedItems.newFiles)}
                                 style={{ cursor: "pointer" }}
                               />
                             </td>
@@ -706,9 +839,9 @@ export const ExportView: React.FC<ExportViewProps> = ({
                       })}
                     </tbody>
                   </table>
-                  {filteredItems.newFiles.length > visibleLimit && (
+                  {sortedItems.newFiles.length > visibleLimit && (
                     <div className="text-secondary" style={{ textAlign: "center", padding: "8px", fontSize: "0.75rem", fontFamily: "var(--font-mono)" }}>
-                      Showing {visibleLimit} of {filteredItems.newFiles.length} files (Scroll down to load more)
+                      Showing {visibleLimit} of {sortedItems.newFiles.length} files (Scroll down to load more)
                     </div>
                   )}
                 </>
@@ -720,7 +853,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
             )}
 
             {activeTab === "uptodate" && (
-              filteredItems.upToDateFiles.length > 0 ? (
+              sortedItems.upToDateFiles.length > 0 ? (
                 <>
                   <table style={{ tableLayout: "fixed", width: "100%" }}>
                     <thead>
@@ -729,34 +862,70 @@ export const ExportView: React.FC<ExportViewProps> = ({
                           <input
                             type="checkbox"
                             checked={
-                              filteredItems.upToDateFiles.length > 0 &&
-                              filteredItems.upToDateFiles.every((item) => selectedItemPaths.has(item.relative_path))
+                              sortedItems.upToDateFiles.length > 0 &&
+                              sortedItems.upToDateFiles.every((item) => selectedItemPaths.has(item.relative_path))
                             }
-                            onChange={() => handleToggleSelectAll(filteredItems.upToDateFiles)}
+                            onChange={() => handleToggleSelectAll(sortedItems.upToDateFiles)}
                             style={{ cursor: "pointer" }}
                           />
                         </th>
-                        <th style={{ width: "100px" }}>Status</th>
-                        <th style={{ width: "55%" }}>Source Relative Path</th>
-                        <th style={{ width: "25%" }}>Target Relative Path</th>
-                        <th style={{ width: "90px", textAlign: "right" }}>Size</th>
+                        <th
+                          style={{ width: "100px", cursor: "pointer", userSelect: "none" }}
+                          onClick={() => handleToggleSort("status")}
+                          title="Click to sort by Status"
+                        >
+                          <div style={{ display: "inline-flex", alignItems: "center" }}>
+                            <span>Status</span>
+                            {renderSortIndicator("status")}
+                          </div>
+                        </th>
+                        <th
+                          style={{ width: "55%", cursor: "pointer", userSelect: "none" }}
+                          onClick={() => handleToggleSort("source")}
+                          title="Click to sort by Source Path"
+                        >
+                          <div style={{ display: "inline-flex", alignItems: "center" }}>
+                            <span>Source Relative Path</span>
+                            {renderSortIndicator("source")}
+                          </div>
+                        </th>
+                        <th
+                          style={{ width: "25%", cursor: "pointer", userSelect: "none" }}
+                          onClick={() => handleToggleSort("dest")}
+                          title="Click to sort by Target Path"
+                        >
+                          <div style={{ display: "inline-flex", alignItems: "center" }}>
+                            <span>Target Relative Path</span>
+                            {renderSortIndicator("dest")}
+                          </div>
+                        </th>
+                        <th
+                          style={{ width: "90px", textAlign: "right", cursor: "pointer", userSelect: "none" }}
+                          onClick={() => handleToggleSort("size")}
+                          title="Click to sort by File Size"
+                        >
+                          <div style={{ display: "inline-flex", alignItems: "center", justifyContent: "flex-end" }}>
+                            <span>Size</span>
+                            {renderSortIndicator("size")}
+                          </div>
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
-                      {filteredItems.upToDateFiles.slice(0, visibleLimit).map((item, idx) => {
+                      {sortedItems.upToDateFiles.slice(0, visibleLimit).map((item, idx) => {
                         const isSelected = selectedItemPaths.has(item.relative_path);
                         return (
                           <tr
                             key={idx}
                             title={item.file_path}
-                            onClick={(e) => handleToggleSelectItem(item.relative_path, idx, e.shiftKey, filteredItems.upToDateFiles)}
+                            onClick={(e) => handleToggleSelectItem(item.relative_path, idx, e.shiftKey, sortedItems.upToDateFiles)}
                             style={{ backgroundColor: isSelected ? "var(--accent-purple-glow)" : "transparent", cursor: "pointer", userSelect: "none" }}
                           >
                             <td style={{ textAlign: "center" }} onClick={(e) => e.stopPropagation()}>
                               <input
                                 type="checkbox"
                                 checked={isSelected}
-                                onChange={(e) => handleToggleSelectItem(item.relative_path, idx, (e.nativeEvent as MouseEvent).shiftKey, filteredItems.upToDateFiles)}
+                                onChange={(e) => handleToggleSelectItem(item.relative_path, idx, (e.nativeEvent as MouseEvent).shiftKey, sortedItems.upToDateFiles)}
                                 style={{ cursor: "pointer" }}
                               />
                             </td>
@@ -779,9 +948,9 @@ export const ExportView: React.FC<ExportViewProps> = ({
                       })}
                     </tbody>
                   </table>
-                  {filteredItems.upToDateFiles.length > visibleLimit && (
+                  {sortedItems.upToDateFiles.length > visibleLimit && (
                     <div className="text-secondary" style={{ textAlign: "center", padding: "8px", fontSize: "0.75rem", fontFamily: "var(--font-mono)" }}>
-                      Showing {visibleLimit} of {filteredItems.upToDateFiles.length} files (Scroll down to load more)
+                      Showing {visibleLimit} of {sortedItems.upToDateFiles.length} files (Scroll down to load more)
                     </div>
                   )}
                 </>
@@ -793,7 +962,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
             )}
 
             {activeTab === "orphans" && (
-              filteredItems.orphanFiles.length > 0 ? (
+              sortedItems.orphanFiles.length > 0 ? (
                 <>
                   <table style={{ tableLayout: "fixed", width: "100%" }}>
                     <thead>
@@ -802,33 +971,60 @@ export const ExportView: React.FC<ExportViewProps> = ({
                           <input
                             type="checkbox"
                             checked={
-                              filteredItems.orphanFiles.length > 0 &&
-                              filteredItems.orphanFiles.every((item) => selectedItemPaths.has(item.relative_path))
+                              sortedItems.orphanFiles.length > 0 &&
+                              sortedItems.orphanFiles.every((item) => selectedItemPaths.has(item.relative_path))
                             }
-                            onChange={() => handleToggleSelectAll(filteredItems.orphanFiles)}
+                            onChange={() => handleToggleSelectAll(sortedItems.orphanFiles)}
                             style={{ cursor: "pointer" }}
                           />
                         </th>
-                        <th style={{ width: "100px" }}>Type</th>
-                        <th style={{ width: "70%" }}>Destination Orphan Relative Path</th>
-                        <th style={{ width: "90px", textAlign: "right" }}>Size</th>
+                        <th
+                          style={{ width: "100px", cursor: "pointer", userSelect: "none" }}
+                          onClick={() => handleToggleSort("status")}
+                          title="Click to sort by Type"
+                        >
+                          <div style={{ display: "inline-flex", alignItems: "center" }}>
+                            <span>Type</span>
+                            {renderSortIndicator("status")}
+                          </div>
+                        </th>
+                        <th
+                          style={{ width: "70%", cursor: "pointer", userSelect: "none" }}
+                          onClick={() => handleToggleSort("source")}
+                          title="Click to sort by Orphan Path"
+                        >
+                          <div style={{ display: "inline-flex", alignItems: "center" }}>
+                            <span>Destination Orphan Relative Path</span>
+                            {renderSortIndicator("source")}
+                          </div>
+                        </th>
+                        <th
+                          style={{ width: "90px", textAlign: "right", cursor: "pointer", userSelect: "none" }}
+                          onClick={() => handleToggleSort("size")}
+                          title="Click to sort by File Size"
+                        >
+                          <div style={{ display: "inline-flex", alignItems: "center", justifyContent: "flex-end" }}>
+                            <span>Size</span>
+                            {renderSortIndicator("size")}
+                          </div>
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
-                      {filteredItems.orphanFiles.slice(0, visibleLimit).map((item, idx) => {
+                      {sortedItems.orphanFiles.slice(0, visibleLimit).map((item, idx) => {
                         const isSelected = selectedItemPaths.has(item.relative_path);
                         return (
                           <tr
                             key={idx}
                             title={item.file_path}
-                            onClick={(e) => handleToggleSelectItem(item.relative_path, idx, e.shiftKey, filteredItems.orphanFiles)}
+                            onClick={(e) => handleToggleSelectItem(item.relative_path, idx, e.shiftKey, sortedItems.orphanFiles)}
                             style={{ backgroundColor: isSelected ? "var(--accent-purple-glow)" : "transparent", cursor: "pointer", userSelect: "none" }}
                           >
                             <td style={{ textAlign: "center" }} onClick={(e) => e.stopPropagation()}>
                               <input
                                 type="checkbox"
                                 checked={isSelected}
-                                onChange={(e) => handleToggleSelectItem(item.relative_path, idx, (e.nativeEvent as MouseEvent).shiftKey, filteredItems.orphanFiles)}
+                                onChange={(e) => handleToggleSelectItem(item.relative_path, idx, (e.nativeEvent as MouseEvent).shiftKey, sortedItems.orphanFiles)}
                                 style={{ cursor: "pointer" }}
                               />
                             </td>
@@ -848,9 +1044,9 @@ export const ExportView: React.FC<ExportViewProps> = ({
                       })}
                     </tbody>
                   </table>
-                  {filteredItems.orphanFiles.length > visibleLimit && (
+                  {sortedItems.orphanFiles.length > visibleLimit && (
                     <div className="text-secondary" style={{ textAlign: "center", padding: "8px", fontSize: "0.75rem", fontFamily: "var(--font-mono)" }}>
-                      Showing {visibleLimit} of {filteredItems.orphanFiles.length} files (Scroll down to load more)
+                      Showing {visibleLimit} of {sortedItems.orphanFiles.length} files (Scroll down to load more)
                     </div>
                   )}
                 </>

@@ -1,5 +1,10 @@
+use lofty::probe::Probe;
+use lofty::file::TaggedFileExt;
+use lofty::tag::Accessor;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
@@ -133,6 +138,8 @@ pub async fn start_download_job(
                     playlist_finished = true;
                 }
 
+                let mut item_updated = false;
+
                 // Parse "Downloading item 33 of 34"
                 if line.contains("Downloading item ") && line.contains(" of ") {
                     if let Some(idx) = line.find("Downloading item ") {
@@ -142,6 +149,7 @@ pub async fn start_download_job(
                             if let (Ok(curr), Ok(tot)) = (parts[0].parse::<u32>(), parts[2].parse::<u32>()) {
                                 current_item = Some(curr);
                                 total_items = Some(tot);
+                                item_updated = true;
                             }
                         }
                     }
@@ -155,9 +163,13 @@ pub async fn start_download_job(
                             if let (Ok(curr), Ok(tot)) = (parts[0].parse::<u32>(), parts[3].parse::<u32>()) {
                                 current_item = Some(curr);
                                 total_items = Some(tot);
+                                item_updated = true;
                             }
                         }
                     }
+                }
+                else if line.contains("has already been recorded in the archive") {
+                    item_updated = true;
                 }
 
                 // Emit raw log line
@@ -168,6 +180,29 @@ pub async fn start_download_job(
                         line: line.clone(),
                     },
                 );
+
+                if item_updated {
+                    let overall_progress = match (current_item, total_items) {
+                        (Some(curr), Some(tot)) if tot > 0 => {
+                            let completed = if curr > 0 { curr - 1 } else { 0 };
+                            (completed as f64 / tot as f64 * 100.0).min(99.0)
+                        }
+                        _ => last_progress,
+                    };
+                    last_progress = overall_progress;
+                    let _ = app_clone.emit(
+                        "download-progress",
+                        DownloadProgressPayload {
+                            job_id: job_id_clone.clone(),
+                            status: "running".to_string(),
+                            progress: last_progress,
+                            current_item,
+                            total_items,
+                            title: detected_title.clone(),
+                            error: None,
+                        },
+                    );
+                }
 
                 // Parse progress percentage from yt-dlp stdout (e.g. "[download]  45.2% of  12.30MiB")
                 if line.contains("[download]") && line.contains('%') {
@@ -595,5 +630,326 @@ pub async fn dl_execute_delete_files(
     })
     .await
     .map_err(|e| format!("Thread execution error: {}", e))?
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ReconcilePlaylistReport {
+    pub playlist_title: String,
+    pub total_online: u32,
+    pub songs_on_disk: u32,
+    pub matched_on_disk: u32,
+    pub missing_count: u32,
+    pub missing_ids: Vec<String>,
+    pub missing_titles: Vec<String>,
+    pub pruned_from_archive: usize,
+    pub added_to_archive: usize,
+    pub logs: Vec<String>,
+}
+
+fn normalize_match_str(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+#[allow(dead_code)]
+struct LocalFileScanned {
+    path: PathBuf,
+    filename: String,
+    detected_id: Option<String>,
+    normalized_title: String,
+}
+
+#[tauri::command]
+pub async fn dl_reconcile_playlist_archive(
+    app: AppHandle,
+    job_id: Option<String>,
+    url: String,
+    output_dir: String,
+    playlist_title: String,
+    archive_path: String,
+) -> Result<ReconcilePlaylistReport, String> {
+    if url.trim().is_empty() {
+        return Err("Playlist URL cannot be empty".to_string());
+    }
+
+    let display_title = if !playlist_title.trim().is_empty() {
+        playlist_title.trim().to_string()
+    } else {
+        url.clone()
+    };
+
+    let base_path = Path::new(&output_dir);
+    let target_dir = if !playlist_title.trim().is_empty() {
+        base_path.join(playlist_title.trim())
+    } else {
+        base_path.to_path_buf()
+    };
+
+    let mut logs: Vec<String> = Vec::new();
+    let emit_line = |line: &str, logs: &mut Vec<String>| {
+        logs.push(line.to_string());
+        if let Some(ref jid) = job_id {
+            let _ = app.emit(
+                "download-log",
+                DownloadLogPayload {
+                    job_id: jid.clone(),
+                    line: line.to_string(),
+                },
+            );
+        }
+    };
+
+    // Prepend clear visual separation if anything else exists in logs
+    emit_line("", &mut logs);
+    emit_line("================================================================================", &mut logs);
+    emit_line(&format!("🔄 RECONCILING ARCHIVE FROM DISK: {}", display_title), &mut logs);
+    emit_line(&format!("Folder: {}", target_dir.display()), &mut logs);
+    emit_line("================================================================================", &mut logs);
+
+    // 1. Scan local files on disk
+    emit_line(&format!("[reconcile] Scanning local audio files in \"{}\"...", target_dir.display()), &mut logs);
+
+    let id_bracket_re = Regex::new(r"\[([a-zA-Z0-9_-]{11})\]").unwrap();
+    let id_paren_re = Regex::new(r"\(([a-zA-Z0-9_-]{11})\)").unwrap();
+    let id_trailing_re = Regex::new(r"(?:^|[-_ ])([a-zA-Z0-9_-]{11})\.(?:mp3|m4a|flac|wav|ogg|opus|aac|alac)$").unwrap();
+    let yt_url_re = Regex::new(r"(?:v=|youtu\.be/|/embed/|/v/|/watch\?v=)([a-zA-Z0-9_-]{11})").unwrap();
+
+    let formats_set: HashSet<&str> = ["mp3", "m4a", "wav", "flac", "ogg", "aac", "wma", "alac", "opus"]
+        .into_iter()
+        .collect();
+
+    let mut local_files: Vec<LocalFileScanned> = Vec::new();
+
+    if target_dir.exists() {
+        for entry in walkdir::WalkDir::new(&target_dir).into_iter().filter_map(|e| e.ok()) {
+            if entry.file_type().is_file() {
+                let path = entry.path();
+                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                    if formats_set.contains(ext.to_lowercase().as_str()) {
+                        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+
+                        // Detect ID from filename
+                        let mut detected_id = id_bracket_re.captures(&filename)
+                            .or_else(|| id_paren_re.captures(&filename))
+                            .or_else(|| id_trailing_re.captures(&filename))
+                            .and_then(|c| c.get(1))
+                            .map(|m| m.as_str().to_string());
+
+                        let mut tag_title = String::new();
+
+                        // Probe audio tags if not detected in filename or to get tag title
+                        if let Ok(tagged_file) = Probe::open(path).and_then(|p| p.read()) {
+                            if let Some(tag) = tagged_file.primary_tag() {
+                                if let Some(t) = tag.title() {
+                                    tag_title = t.to_string();
+                                }
+                                if detected_id.is_none() {
+                                    if let Some(comment) = tag.comment() {
+                                        if let Some(caps) = yt_url_re.captures(&comment) {
+                                            detected_id = caps.get(1).map(|m| m.as_str().to_string());
+                                        }
+                                    }
+                                }
+                                if detected_id.is_none() {
+                                    for item in tag.items() {
+                                        if let Some(val) = item.value().text() {
+                                            if let Some(caps) = yt_url_re.captures(val) {
+                                                detected_id = caps.get(1).map(|m| m.as_str().to_string());
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let normalized_title = if !tag_title.trim().is_empty() {
+                            normalize_match_str(&tag_title)
+                        } else {
+                            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                            normalize_match_str(stem)
+                        };
+
+                        local_files.push(LocalFileScanned {
+                            path: path.to_path_buf(),
+                            filename,
+                            detected_id,
+                            normalized_title,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    emit_line(&format!("[reconcile] Found {} audio file(s) on disk.", local_files.len()), &mut logs);
+
+    // 2. Query online playlist tracks via yt-dlp
+    emit_line(&format!("$ yt-dlp --flat-playlist --dump-single-json \"{}\"", url), &mut logs);
+    emit_line("[reconcile] Querying YouTube playlist metadata...", &mut logs);
+
+    let output = Command::new("yt-dlp")
+        .args(&["--flat-playlist", "--dump-single-json", &url])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to query YouTube playlist via yt-dlp: {}", e))?;
+
+    if !output.status.success() {
+        let err_msg = String::from_utf8_lossy(&output.stderr);
+        emit_line(&format!("[reconcile] ❌ yt-dlp error: {}", err_msg), &mut logs);
+        return Err(format!("yt-dlp error: {}", err_msg));
+    }
+
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout_str)
+        .map_err(|e| format!("Failed to parse metadata JSON: {}", e))?;
+
+    struct OnlineTrack {
+        id: String,
+        title: String,
+        normalized_title: String,
+    }
+
+    let mut online_tracks: Vec<OnlineTrack> = Vec::new();
+
+    if let Some(entries) = json.get("entries").and_then(|v| v.as_array()) {
+        for entry in entries {
+            if let Some(id) = entry.get("id").and_then(|v| v.as_str()) {
+                let title = entry.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let normalized_title = normalize_match_str(&title);
+                online_tracks.push(OnlineTrack {
+                    id: id.to_string(),
+                    title,
+                    normalized_title,
+                });
+            }
+        }
+    } else if let Some(id) = json.get("id").and_then(|v| v.as_str()) {
+        let title = json.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let normalized_title = normalize_match_str(&title);
+        online_tracks.push(OnlineTrack {
+            id: id.to_string(),
+            title,
+            normalized_title,
+        });
+    }
+
+    emit_line(&format!("[reconcile] YouTube playlist has {} track(s).", online_tracks.len()), &mut logs);
+    emit_line("[reconcile] Cross-matching local files against YouTube tracks...", &mut logs);
+
+    // 3. Match online tracks against local files
+    let mut matched_disk_ids: HashSet<String> = HashSet::new();
+    let mut missing_ids: Vec<String> = Vec::new();
+    let mut missing_titles: Vec<String> = Vec::new();
+
+    for track in &online_tracks {
+        // Priority A: Exact ID match
+        let mut found = local_files.iter().any(|f| f.detected_id.as_deref() == Some(&track.id));
+
+        // Priority B: Normalized title match (fallback if song was sanitized without ID)
+        if !found && !track.normalized_title.is_empty() && track.normalized_title.len() >= 6 {
+            found = local_files.iter().any(|f| {
+                if f.normalized_title.is_empty() || f.normalized_title.len() < 6 {
+                    return false;
+                }
+                f.normalized_title == track.normalized_title
+                    || f.normalized_title.contains(&track.normalized_title)
+                    || track.normalized_title.contains(&f.normalized_title)
+            });
+        }
+
+        if found {
+            matched_disk_ids.insert(track.id.clone());
+        } else {
+            missing_ids.push(track.id.clone());
+            missing_titles.push(track.title.clone());
+        }
+    }
+
+    emit_line(&format!("[reconcile] Match result: {} verified on disk, {} missing from disk.", matched_disk_ids.len(), missing_ids.len()), &mut logs);
+
+    if !missing_titles.is_empty() {
+        emit_line("[reconcile] Missing tracks to be re-downloaded:", &mut logs);
+        for (i, t) in missing_titles.iter().take(12).enumerate() {
+            emit_line(&format!("  {:2}. {}", i + 1, t), &mut logs);
+        }
+        if missing_titles.len() > 12 {
+            emit_line(&format!("  ... and {} more track(s)", missing_titles.len() - 12), &mut logs);
+        }
+    }
+
+    // 4. Update archive file
+    let resolved_archive = resolve_archive_path(&archive_path, &output_dir);
+    let archive_file_path = Path::new(&resolved_archive);
+
+    let mut existing_archive_lines: Vec<String> = if archive_file_path.exists() {
+        std::fs::read_to_string(archive_file_path)
+            .unwrap_or_default()
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let initial_line_count = existing_archive_lines.len();
+
+    // Prune missing IDs
+    existing_archive_lines.retain(|line| {
+        !missing_ids.iter().any(|mid| line.ends_with(mid) || line.contains(mid))
+    });
+    let pruned_count = initial_line_count - existing_archive_lines.len();
+
+    // Ensure matched disk IDs are in archive
+    let mut added_count = 0;
+    for matched_id in &matched_disk_ids {
+        let exists = existing_archive_lines.iter().any(|line| line.ends_with(matched_id) || line.contains(matched_id));
+        if !exists {
+            existing_archive_lines.push(format!("youtube {}", matched_id));
+            added_count += 1;
+        }
+    }
+
+    // Write back archive file
+    if let Some(parent) = archive_file_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let new_archive_content = if existing_archive_lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", existing_archive_lines.join("\n"))
+    };
+
+    std::fs::write(archive_file_path, new_archive_content)
+        .map_err(|e| format!("Failed to write updated archive file: {}", e))?;
+
+    emit_line(&format!("[reconcile] Updated archive file: \"{}\"", resolved_archive), &mut logs);
+    emit_line(&format!("  - Pruned {} missing track ID(s) from archive so yt-dlp will download them", pruned_count), &mut logs);
+    emit_line(&format!("  + Ensured {} existing track ID(s) are recorded in archive to prevent re-downloading", added_count), &mut logs);
+    emit_line("================================================================================", &mut logs);
+
+    if missing_ids.is_empty() {
+        emit_line("✨ All playlist tracks are already present on disk! Archive is 100% in sync.", &mut logs);
+    } else {
+        emit_line(&format!("✨ Done! {} missing track(s) ready to download without touching existing files.", missing_ids.len()), &mut logs);
+        emit_line("👉 Click \"Download\" on this entry to fetch the missing tracks.", &mut logs);
+    }
+    emit_line("================================================================================\n", &mut logs);
+
+    Ok(ReconcilePlaylistReport {
+        playlist_title: display_title,
+        total_online: online_tracks.len() as u32,
+        songs_on_disk: local_files.len() as u32,
+        matched_on_disk: matched_disk_ids.len() as u32,
+        missing_count: missing_ids.len() as u32,
+        missing_ids,
+        missing_titles,
+        pruned_from_archive: pruned_count,
+        added_to_archive: added_count,
+        logs,
+    })
 }
 

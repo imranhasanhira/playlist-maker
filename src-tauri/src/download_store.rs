@@ -2,9 +2,15 @@ use rusqlite::{params, Connection, Result as SqlResult};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use tauri::AppHandle;
 use tauri::Manager;
+
+static GLOBAL_DB_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn get_global_db_path() -> Option<PathBuf> {
+    GLOBAL_DB_PATH.get().cloned()
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DownloadEntry {
@@ -54,11 +60,15 @@ fn get_db_path(app: &AppHandle) -> Result<PathBuf, String> {
 
 pub fn init_db(app: &AppHandle) -> Result<Connection, String> {
     let db_path = get_db_path(app)?;
+    let _ = GLOBAL_DB_PATH.set(db_path.clone());
     let conn = Connection::open(&db_path)
         .map_err(|e| format!("Failed to open SQLite database at {:?}: {}", db_path, e))?;
 
     conn.execute_batch(
         "
+        PRAGMA journal_mode = WAL;
+        PRAGMA synchronous = NORMAL;
+
         CREATE TABLE IF NOT EXISTS download_entries (
             id TEXT PRIMARY KEY,
             url TEXT NOT NULL,
@@ -84,6 +94,27 @@ pub fn init_db(app: &AppHandle) -> Result<Connection, String> {
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS track_fingerprints (
+            file_path TEXT PRIMARY KEY,
+            mtime_secs INTEGER NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            quick_hash TEXT NOT NULL,
+            audio_hash TEXT NOT NULL,
+            youtube_id TEXT,
+            raw_title TEXT NOT NULL DEFAULT '',
+            raw_artist TEXT NOT NULL DEFAULT '',
+            norm_title TEXT NOT NULL,
+            norm_artist TEXT NOT NULL,
+            norm_stem TEXT NOT NULL DEFAULT '',
+            duration_secs INTEGER NOT NULL,
+            format_ext TEXT NOT NULL,
+            bitrate_kbps INTEGER NOT NULL DEFAULT 0,
+            chromaprint BLOB,
+            updated_at INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_fp_quick_hash ON track_fingerprints(size_bytes, quick_hash);
         ",
     )
     .map_err(|e| format!("Failed to initialize database tables: {}", e))?;

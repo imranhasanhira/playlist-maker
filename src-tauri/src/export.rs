@@ -85,6 +85,7 @@ pub async fn analyze_export_diff(
     destination: String,
     formats: Vec<String>,
     relative_to_config: bool,
+    skip_duplicates: Option<bool>,
 ) -> Result<ExportDiffReport, String> {
     let config_file_path = Path::new(&config_path);
     if !config_file_path.exists() {
@@ -109,37 +110,57 @@ pub async fn analyze_export_diff(
     let dest_music_dir = dest_path.join("music");
     let dest_playlists_dir = dest_path.join("playlists");
 
+    let replacement_map = if skip_duplicates.unwrap_or(false) {
+        crate::dedup::build_export_superior_replacement_map(&config, &resolved_source_dir, &formats_set)
+    } else {
+        HashMap::new()
+    };
+
     // Map of unique source tracks across all playlists: relative_path -> (absolute_source_path, TrackPreview)
     let mut required_tracks: HashMap<String, (String, TrackPreview)> = HashMap::new();
     let mut playlist_items: Vec<ExportPlaylistItem> = Vec::new();
 
     for pl in &config.playlists {
-        let (files, _) = playlist::resolve_playlist_files(pl, &resolved_source_dir, &formats_set);
-        let sanitized_name = sanitize_playlist_filename(&pl.name);
-        let filename = format!("{}.m3u8", sanitized_name);
+        let (sub_playlists, _) = playlist::expand_playlist_buckets(pl, &resolved_source_dir, &formats_set, config.min_tracks_per_year_playlist);
+        for sub in sub_playlists {
+            let sanitized_name = sanitize_playlist_filename(&sub.name);
+            let filename = format!("{}.m3u8", sanitized_name);
 
-        playlist_items.push(ExportPlaylistItem {
-            name: pl.name.clone(),
-            filename,
-            track_count: files.len(),
-        });
+            // Substitute inferior duplicate files with the superior file and deduplicate within the sub-playlist
+            let mut resolved_sub_files = Vec::new();
+            let mut seen_in_sub = HashSet::new();
+            for file_path_buf in sub.files {
+                let c_str = canonical_path_str(&file_path_buf);
+                let effective_path = replacement_map.get(&c_str).cloned().unwrap_or(file_path_buf);
+                let eff_c_str = canonical_path_str(&effective_path);
+                if seen_in_sub.insert(eff_c_str) {
+                    resolved_sub_files.push(effective_path);
+                }
+            }
 
-        for file_path_buf in files {
-            let track_src_path = file_path_buf.as_path();
-            let canonical_src = fs::canonicalize(track_src_path).unwrap_or_else(|_| track_src_path.to_path_buf());
-            let track = playlist::get_track_preview(&canonical_src, &resolved_source_dir);
+            playlist_items.push(ExportPlaylistItem {
+                name: sub.name.clone(),
+                filename,
+                track_count: resolved_sub_files.len(),
+            });
 
-            // Compute relative path from resolved_source_dir
-            let rel_path = match canonical_src.strip_prefix(&resolved_source_dir) {
-                Ok(p) => p.to_string_lossy().to_string(),
-                Err(_) => track_src_path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| track.title.clone()),
-            };
+            for file_path_buf in resolved_sub_files {
+                let track_src_path = file_path_buf.as_path();
+                let canonical_src = fs::canonicalize(track_src_path).unwrap_or_else(|_| track_src_path.to_path_buf());
+                let track = playlist::get_track_preview(&canonical_src, &resolved_source_dir);
 
-            let rel_clean = rel_path.replace('\\', "/");
-            required_tracks.entry(rel_clean).or_insert((canonical_path_str(&canonical_src), track));
+                // Compute relative path from resolved_source_dir
+                let rel_path = match canonical_src.strip_prefix(&resolved_source_dir) {
+                    Ok(p) => p.to_string_lossy().to_string(),
+                    Err(_) => track_src_path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| track.title.clone()),
+                };
+
+                let rel_clean = rel_path.replace('\\', "/");
+                required_tracks.entry(rel_clean).or_insert((canonical_path_str(&canonical_src), track));
+            }
         }
     }
 
@@ -453,6 +474,7 @@ pub async fn execute_export(
     config_path: String,
     destination: String,
     delete_orphans: bool,
+    skip_duplicates: Option<bool>,
     excluded_paths: Vec<String>,
     formats: Vec<String>,
     relative_to_config: bool,
@@ -467,12 +489,14 @@ pub async fn execute_export(
         logs.push(msg);
     };
 
+    let skip_dups = skip_duplicates.unwrap_or(false);
     let formats_str = formats.join(",");
     let exact_cmd = format!(
-        "$ sync-export --config \"{}\" --destination \"{}\" --formats \"{}\"{}",
+        "$ sync-export --config \"{}\" --destination \"{}\" --formats \"{}\"{}{}",
         config_path,
         destination,
         formats_str,
+        if skip_dups { " --skip-duplicates" } else { "" },
         if delete_orphans { " --delete-orphans" } else { "" }
     );
     push_log(exact_cmd, &mut logs);
@@ -483,6 +507,7 @@ pub async fn execute_export(
         destination.clone(),
         formats.clone(),
         relative_to_config,
+        Some(skip_dups),
     )
     .await?;
 
@@ -586,35 +611,51 @@ pub async fn execute_export(
         .map(|s| s.trim().to_lowercase())
         .collect();
 
+    let replacement_map = if skip_dups {
+        crate::dedup::build_export_superior_replacement_map(&config, &resolved_source_dir, &formats_set)
+    } else {
+        HashMap::new()
+    };
+
     for pl in &config.playlists {
-        let (files, _) = playlist::resolve_playlist_files(pl, &resolved_source_dir, &formats_set);
-        let sanitized_name = sanitize_playlist_filename(&pl.name);
-        let filename = format!("{}.m3u8", sanitized_name);
-        let m3u_path = dest_playlists_dir.join(&filename);
+        let (sub_playlists, _) = playlist::expand_playlist_buckets(pl, &resolved_source_dir, &formats_set, config.min_tracks_per_year_playlist);
+        for sub in sub_playlists {
+            let sanitized_name = sanitize_playlist_filename(&sub.name);
+            let filename = format!("{}.m3u8", sanitized_name);
+            let m3u_path = dest_playlists_dir.join(&filename);
 
-        if let Ok(mut file) = fs::File::create(&m3u_path) {
-            writeln!(file, "#EXTM3U").ok();
+            if let Ok(mut file) = fs::File::create(&m3u_path) {
+                writeln!(file, "#EXTM3U").ok();
 
-            for file_path_buf in files {
-                let track_src_path = file_path_buf.as_path();
-                let canonical_src = fs::canonicalize(track_src_path).unwrap_or_else(|_| track_src_path.to_path_buf());
-                let track = playlist::get_track_preview(&canonical_src, &resolved_source_dir);
+                let mut seen_in_sub = HashSet::new();
+                for file_path_buf in sub.files {
+                    let c_str = canonical_path_str(&file_path_buf);
+                    let effective_path = replacement_map.get(&c_str).cloned().unwrap_or(file_path_buf);
+                    let eff_c_str = canonical_path_str(&effective_path);
+                    if !seen_in_sub.insert(eff_c_str) {
+                        continue;
+                    }
 
-                let rel_path = match canonical_src.strip_prefix(&resolved_source_dir) {
-                    Ok(p) => p.to_string_lossy().to_string(),
-                    Err(_) => track_src_path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| track.title.clone()),
-                };
+                    let track_src_path = effective_path.as_path();
+                    let canonical_src = fs::canonicalize(track_src_path).unwrap_or_else(|_| track_src_path.to_path_buf());
+                    let track = playlist::get_track_preview(&canonical_src, &resolved_source_dir);
 
-                let rel_clean = rel_path.replace('\\', "/");
-                let m3u_track_ref = format!("../music/{}", rel_clean);
+                    let rel_path = match canonical_src.strip_prefix(&resolved_source_dir) {
+                        Ok(p) => p.to_string_lossy().to_string(),
+                        Err(_) => track_src_path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| track.title.clone()),
+                    };
 
-                writeln!(file, "#EXTINF:{},{} - {}", track.duration, track.artist, track.title).ok();
-                writeln!(file, "{}", m3u_track_ref).ok();
+                    let rel_clean = rel_path.replace('\\', "/");
+                    let m3u_track_ref = format!("../music/{}", rel_clean);
+
+                    writeln!(file, "#EXTINF:{},{} - {}", track.duration, track.artist, track.title).ok();
+                    writeln!(file, "{}", m3u_track_ref).ok();
+                }
+                push_log(format!("Created playlist: {}", filename), &mut logs);
             }
-            push_log(format!("Created playlist: {}", filename), &mut logs);
         }
     }
 

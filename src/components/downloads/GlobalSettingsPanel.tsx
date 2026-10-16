@@ -7,6 +7,8 @@ type GlobalSettingsPanelProps = {
   settings: DownloadGlobalSettings;
   onSaveSettings: (updated: DownloadGlobalSettings) => Promise<void>;
   onClose: () => void;
+  onReconcileAll?: () => Promise<void>;
+  isReconcilingAll?: boolean;
 };
 
 export const GlobalSettingsPanel: React.FC<GlobalSettingsPanelProps> = ({
@@ -14,6 +16,8 @@ export const GlobalSettingsPanel: React.FC<GlobalSettingsPanelProps> = ({
   settings,
   onSaveSettings,
   onClose,
+  onReconcileAll,
+  isReconcilingAll = false,
 }) => {
   const [formState, setFormState] = React.useState<DownloadGlobalSettings>(settings);
   const [isResettingArchive, setIsResettingArchive] = React.useState(false);
@@ -172,9 +176,20 @@ export const GlobalSettingsPanel: React.FC<GlobalSettingsPanelProps> = ({
               <button
                 className="btn btn-secondary"
                 type="button"
+                onClick={onReconcileAll}
+                disabled={isReconcilingAll || isResettingArchive}
+                style={{ padding: "4px 10px", fontSize: "0.78rem", whiteSpace: "nowrap" }}
+                title="Reconcile All: Scans local folders for all playlists and syncs archive so Download only fetches missing songs"
+              >
+                {isReconcilingAll ? "Reconciling..." : "🔄 Reconcile All"}
+              </button>
+
+              <button
+                className="btn btn-secondary"
+                type="button"
                 onClick={handleClearArchive}
-                disabled={isResettingArchive}
-                style={{ padding: "4px 10px", fontSize: "0.78rem" }}
+                disabled={isResettingArchive || isReconcilingAll}
+                style={{ padding: "4px 10px", fontSize: "0.78rem", whiteSpace: "nowrap" }}
               >
                 🗑 Clear Archive
               </button>

@@ -12,6 +12,37 @@ export interface TrackPreview {
   artist: string;
   duration: number;
   size_bytes: number;
+  year?: number | null;
+}
+
+export interface YearSplitConfig {
+  enabled: boolean;
+  min_tracks?: number; // Optional playlist override; falls back to global minTracksPerYearPlaylist
+  include_unknown?: boolean;
+  split_5y?: number[];
+  split_1y?: number[];
+  custom_merges?: [number, number][];
+}
+
+export interface YearBucketSummary {
+  key: string;
+  label: string;
+  bucket_type: "10y" | "5y" | "1y" | "custom" | "unknown";
+  parent_key: string | null;
+  track_count: number;
+  is_split: boolean;
+  start_year: number | null;
+  end_year: number | null;
+  below_min_tracks?: boolean;
+}
+
+export interface PlaylistSummaryItem {
+  index: number;
+  name: string;
+  total_tracks: number;
+  year_split_enabled: boolean;
+  buckets: YearBucketSummary[];
+  warning_exceeds_max: boolean;
 }
 
 export interface RuleConfig {
@@ -27,6 +58,7 @@ export interface PlaylistConfig {
   rules?: RuleConfig[];
   sort_by?: "artist" | "title" | "year" | "duration" | "random";
   limit?: number;
+  year_split?: YearSplitConfig;
 }
 
 export interface MainConfig {
@@ -35,6 +67,8 @@ export interface MainConfig {
   workspaceDir?: string;
   playlistsDir?: string;
   relativeToConfig?: boolean | null;
+  maxTracksPerPlaylist?: number | null;
+  minTracksPerYearPlaylist?: number | null;
   playlists: PlaylistConfig[];
 }
 
@@ -215,4 +249,73 @@ export interface DeleteFilesReport {
   files: string[];
   total_bytes: number;
 }
+
+export interface ReconcilePlaylistReport {
+  playlist_title: string;
+  total_online: number;
+  songs_on_disk: number;
+  matched_on_disk: number;
+  missing_count: number;
+  missing_ids: string[];
+  missing_titles: string[];
+  pruned_from_archive: number;
+  added_to_archive: number;
+  logs: string[];
+}
+
+export interface DuplicateTrackEntry {
+  file_path: string;
+  relative_path: string;
+  source_folder: string;
+  source_index: number;
+  playlist_names: string[];
+  title: string;
+  artist: string;
+  duration: number;
+  size_bytes: number;
+  format_ext: string;
+  bitrate_kbps: number;
+  youtube_id?: string | null;
+  is_winner: boolean;
+  offset_secs?: number | null;
+  winner_reason: string;
+}
+
+export interface DuplicateGroup {
+  group_id: string;
+  canonical_title: string;
+  canonical_artist: string;
+  match_tier: "exact_hash" | "youtube_id" | "acoustic" | "metadata" | string;
+  match_label: string;
+  confidence: number;
+  tracks: DuplicateTrackEntry[];
+}
+
+export interface DuplicateAnalysisReport {
+  scope_name: string;
+  total_scanned_files: number;
+  duplicate_groups: DuplicateGroup[];
+  redundant_files_count: number;
+  redundant_bytes: number;
+  cache_total_entries: number;
+  cache_stale_pruned: number;
+}
+
+export interface PruneCacheReport {
+  pruned_count: number;
+  remaining_count: number;
+}
+
+export interface DuplicateAnalysisProgressPayload {
+  phase: "fingerprinting" | "clustering" | "done" | string;
+  phase_label: string;
+  current: number;
+  total: number;
+  progress: number;
+  current_file?: string | null;
+  eta_secs?: number | null;
+  speed: number;
+}
+
+
 

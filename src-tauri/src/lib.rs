@@ -10,6 +10,7 @@ pub mod utils;
 mod downloader;
 mod font_issues;
 mod download_store;
+mod dedup;
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -38,6 +39,7 @@ async fn preview_playlist_tracks(
     sourceDirOverride: Option<String>,
     playlistIndex: usize,
     formats: String,
+    bucketKey: Option<String>,
 ) -> Result<Vec<playlist::TrackPreview>, String> {
     tokio::task::spawn_blocking(move || {
         let config = playlist::read_config_file(Path::new(&configPath))?;
@@ -58,8 +60,36 @@ async fn preview_playlist_tracks(
             .collect();
 
         let playlist_config = &config.playlists[playlistIndex];
-        let (files, _) = playlist::resolve_playlist_files(playlist_config, &resolved_source_dir, &formats_set);
 
+        let files = if let Some(ref target_bucket) = bucketKey {
+            if target_bucket == "all" || target_bucket.is_empty() {
+                let (all_files, _) = playlist::resolve_playlist_files(playlist_config, &resolved_source_dir, &formats_set);
+                all_files
+            } else {
+                let (sub_playlists, _) = playlist::expand_playlist_buckets(playlist_config, &resolved_source_dir, &formats_set, config.min_tracks_per_year_playlist);
+                // Also handle "unknown" bucket if it was excluded by include_unknown
+                if target_bucket == "unknown" && !sub_playlists.iter().any(|s| s.bucket_key == "unknown") {
+                    let (all_files, _) = playlist::resolve_playlist_files(playlist_config, &resolved_source_dir, &formats_set);
+                    all_files.into_iter().filter(|f| {
+                        let yr = if let Ok(tagged_file) = lofty::probe::Probe::open(f).and_then(|p| p.read()) {
+                            playlist::extract_track_year(f, Some(&tagged_file))
+                        } else {
+                            playlist::extract_track_year(f, None)
+                        };
+                        yr.is_none()
+                    }).collect()
+                } else {
+                    sub_playlists
+                        .into_iter()
+                        .find(|sub| &sub.bucket_key == target_bucket)
+                        .map(|sub| sub.files)
+                        .unwrap_or_default()
+                }
+            }
+        } else {
+            let (all_files, _) = playlist::resolve_playlist_files(playlist_config, &resolved_source_dir, &formats_set);
+            all_files
+        };
 
         let previews = files
             .iter()
@@ -67,6 +97,56 @@ async fn preview_playlist_tracks(
             .collect();
 
         Ok(previews)
+    })
+    .await
+    .map_err(|e| format!("Thread execution error: {}", e))?
+}
+
+#[tauri::command]
+async fn get_playlists_summary(
+    configPath: String,
+    sourceDirOverride: Option<String>,
+    formats: String,
+) -> Result<Vec<playlist::PlaylistSummaryItem>, String> {
+    tokio::task::spawn_blocking(move || {
+        let config = playlist::read_config_file(Path::new(&configPath))?;
+        let resolved_source_dir = playlist::find_right_dir(
+            sourceDirOverride,
+            config.source_dir.clone(),
+            true,
+            Path::new(&configPath),
+        );
+        let formats_set: HashSet<String> = formats
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .collect();
+        let summaries = playlist::calculate_playlist_summaries(&config, &resolved_source_dir, &formats_set);
+        Ok(summaries)
+    })
+    .await
+    .map_err(|e| format!("Thread execution error: {}", e))?
+}
+
+#[tauri::command]
+async fn get_single_playlist_summary(
+    configPath: String,
+    sourceDirOverride: Option<String>,
+    formats: String,
+    playlistIndex: usize,
+) -> Result<playlist::PlaylistSummaryItem, String> {
+    tokio::task::spawn_blocking(move || {
+        let config = playlist::read_config_file(Path::new(&configPath))?;
+        let resolved_source_dir = playlist::find_right_dir(
+            sourceDirOverride,
+            config.source_dir.clone(),
+            true,
+            Path::new(&configPath),
+        );
+        let formats_set: HashSet<String> = formats
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .collect();
+        playlist::calculate_single_playlist_summary(&config, &resolved_source_dir, &formats_set, playlistIndex)
     })
     .await
     .map_err(|e| format!("Thread execution error: {}", e))?
@@ -116,22 +196,37 @@ async fn generate_all_playlists(
         ));
         logs.push(format!("Writing all playlist files to {}", resolved_target_dir.display()));
 
-        for playlist_config in &config.playlists {
-            logs.push(format!("Making playlist: {}", playlist_config.name));
+        let replacement_map =
+            dedup::build_export_superior_replacement_map(&config, &resolved_source_dir, &formats_set);
 
-            let (files, errors) = playlist::resolve_playlist_files(playlist_config, &resolved_source_dir, &formats_set);
+        for playlist_config in &config.playlists {
+            let (sub_playlists, errors) = playlist::expand_playlist_buckets(playlist_config, &resolved_source_dir, &formats_set, config.min_tracks_per_year_playlist);
             for err in errors {
                 logs.push(format!("  {}", err));
             }
 
-            if !files.is_empty() {
-                let playlist_file_path = resolved_target_dir.join(format!("{}.m3u", playlist_config.name));
-                match playlist::write_playlist_file(&playlist_file_path, &files) {
-                    Ok(_) => logs.push(format!("  Done with {} files", files.len())),
-                    Err(e) => logs.push(format!("  ERROR: {}", e)),
+            for sub in sub_playlists {
+                logs.push(format!("Making playlist: {}", sub.name));
+                let mut resolved_files = Vec::new();
+                let mut seen = HashSet::new();
+                for f in sub.files {
+                    let c_str = utils::canonical_path_str(&f);
+                    let eff = replacement_map.get(&c_str).cloned().unwrap_or(f);
+                    let eff_c = utils::canonical_path_str(&eff);
+                    if seen.insert(eff_c) {
+                        resolved_files.push(eff);
+                    }
                 }
-            } else {
-                logs.push(format!("  SKIPPED due to no available music"));
+                if !resolved_files.is_empty() {
+                    let sanitized = sub.name.replace('/', "_").replace('\\', "_");
+                    let playlist_file_path = resolved_target_dir.join(format!("{}.m3u", sanitized));
+                    match playlist::write_playlist_file(&playlist_file_path, &resolved_files) {
+                        Ok(_) => logs.push(format!("  Done with {} files", resolved_files.len())),
+                        Err(e) => logs.push(format!("  ERROR: {}", e)),
+                    }
+                } else {
+                    logs.push(format!("  SKIPPED due to no available music"));
+                }
             }
         }
 
@@ -449,6 +544,8 @@ pub fn run() {
             save_workspace,
             preview_playlist_tracks,
             preview_directory_tracks,
+            get_playlists_summary,
+            get_single_playlist_summary,
             generate_all_playlists,
             scan_sanitizer,
             execute_sanitizer,
@@ -483,6 +580,7 @@ pub fn run() {
             downloader::dl_count_songs_on_disk,
             downloader::dl_get_delete_files_report,
             downloader::dl_execute_delete_files,
+            downloader::dl_reconcile_playlist_archive,
             download_store::dl_store_get_all_entries,
             download_store::dl_store_save_entry,
             download_store::dl_store_delete_entry,
@@ -491,7 +589,9 @@ pub fn run() {
             font_issues::scan_font_issues,
             font_issues::apply_font_issue_option1,
             font_issues::apply_font_issue_option2,
-            utils::check_system_binaries
+            utils::check_system_binaries,
+            dedup::analyze_playlist_duplicates,
+            dedup::prune_fingerprint_cache
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
