@@ -3,7 +3,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use lofty::probe::Probe;
 use lofty::file::{AudioFile, TaggedFileExt};
-use lofty::tag::{Accessor, Tag};
+use lofty::tag::{Accessor, Tag, TagType};
 use lofty::picture::{Picture, PictureType, MimeType};
 use base64::prelude::*;
 use tauri::Emitter;
@@ -15,6 +15,10 @@ pub struct DirTreeNode {
     pub path: String,
     pub is_dir: bool,
     pub children: Vec<DirTreeNode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub year: Option<u32>,
+    #[serde(default)]
+    pub unknown_year_count: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -38,12 +42,14 @@ pub fn read_tree_recursive(
     counter: &mut usize,
     total: usize,
 ) -> Result<DirTreeNode, String> {
-    if current_depth > 8 {
+    if current_depth > 8 || crate::sanitizer::is_task_cancelled(task_id) {
         return Ok(DirTreeNode {
             name: path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "/".to_string()),
             path: path.to_string_lossy().to_string(),
             is_dir: true,
             children: Vec::new(),
+            year: None,
+            unknown_year_count: 0,
         });
     }
 
@@ -83,6 +89,8 @@ pub fn read_tree_recursive(
                                 path: p.to_string_lossy().to_string(),
                                 is_dir: false,
                                 children: Vec::new(),
+                                year: None,
+                                unknown_year_count: 0,
                             });
                         }
                     }
@@ -104,6 +112,8 @@ pub fn read_tree_recursive(
             path: path_str,
             is_dir: true,
             children,
+            year: None,
+            unknown_year_count: 0,
         })
     } else {
         Ok(DirTreeNode {
@@ -111,8 +121,58 @@ pub fn read_tree_recursive(
             path: path_str,
             is_dir: false,
             children: Vec::new(),
+            year: None,
+            unknown_year_count: 0,
         })
     }
+}
+
+pub fn annotate_tree_years(root: &mut DirTreeNode) {
+    let mut file_paths = Vec::new();
+    fn collect_files(node: &DirTreeNode, paths: &mut Vec<std::path::PathBuf>) {
+        if node.is_dir {
+            for child in &node.children {
+                collect_files(child, paths);
+            }
+        } else {
+            paths.push(std::path::PathBuf::from(&node.path));
+        }
+    }
+    collect_files(root, &mut file_paths);
+
+    let metas = crate::playlist::get_or_probe_track_metadata_batch(&file_paths);
+    let mut meta_map = std::collections::HashMap::with_capacity(metas.len());
+    for m in metas {
+        meta_map.insert(m.file_path, m.year);
+    }
+
+    fn annotate_node(
+        node: &mut DirTreeNode,
+        meta_map: &std::collections::HashMap<String, Option<u32>>,
+    ) -> usize {
+        if node.is_dir {
+            let mut total_unknown = 0;
+            for child in &mut node.children {
+                total_unknown += annotate_node(child, meta_map);
+            }
+            node.unknown_year_count = total_unknown;
+            node.year = None;
+            total_unknown
+        } else {
+            let c_path = crate::utils::canonical_path_str(std::path::Path::new(&node.path));
+            let year = meta_map.get(&c_path).copied().flatten();
+            node.year = year;
+            if year.is_none() {
+                node.unknown_year_count = 1;
+                1
+            } else {
+                node.unknown_year_count = 0;
+                0
+            }
+        }
+    }
+
+    annotate_node(root, &meta_map);
 }
 
 pub fn read_track_tags_impl(file_path: &Path) -> Result<TrackTags, String> {
@@ -229,8 +289,15 @@ pub fn write_track_tags_impl(file_path: &Path, tags: TrackTags) -> Result<(), St
         }
     }
 
+    tagged_file.remove(TagType::Id3v1);
+    let _ = TagType::Id3v1.remove_from_path(file_path);
     tagged_file.save_to_path(file_path, lofty::config::WriteOptions::default())
         .map_err(|e| format!("Failed to save audio tags: {}", e))?;
+
+    if let Some((mtime, size)) = crate::utils::get_file_mtime_and_size(file_path) {
+        let meta = crate::playlist::probe_track_metadata(file_path, mtime, size);
+        crate::playlist::save_cached_metadata_batch(&[meta]);
+    }
 
     Ok(())
 }
@@ -313,7 +380,13 @@ pub fn batch_update_folder_tags_impl(
                     }
 
                     if changed {
+                        tagged_file.remove(TagType::Id3v1);
+                        let _ = TagType::Id3v1.remove_from_path(p);
                         let _ = tagged_file.save_to_path(p, lofty::config::WriteOptions::default());
+                        if let Some((mtime, size)) = crate::utils::get_file_mtime_and_size(p) {
+                            let meta = crate::playlist::probe_track_metadata(p, mtime, size);
+                            crate::playlist::save_cached_metadata_batch(&[meta]);
+                        }
                     }
                 }
             }

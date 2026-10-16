@@ -3,11 +3,11 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use lofty::probe::Probe;
-use lofty::tag::Tag;
+use lofty::tag::{Tag, TagType};
 use lofty::prelude::*;
 use regex::Regex;
-use tauri::AppHandle;
 use any_ascii::any_ascii;
+use tauri::{AppHandle, Emitter};
 use walkdir::WalkDir;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -21,192 +21,354 @@ pub struct FontIssueItem {
 
 #[tauri::command]
 pub async fn scan_font_issues(
-    _app: AppHandle,
-    _task_id: String,
+    app: AppHandle,
+    task_id: String,
     folder: String,
     formats: Vec<String>,
 ) -> Result<Vec<FontIssueItem>, String> {
-    let root_path = Path::new(&folder);
-    if !root_path.exists() {
-        return Err(format!("Folder path does not exist: {}", folder));
-    }
-
-    let formats_set: HashSet<String> = formats
-        .iter()
-        .map(|s| s.trim().to_lowercase())
-        .collect();
-
-    let mut files = Vec::new();
-    for entry in WalkDir::new(root_path).into_iter().filter_map(|e| e.ok()) {
-        if entry.file_type().is_file() {
-            let path = entry.path();
-            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                if formats_set.contains(&ext.to_lowercase()) {
-                    files.push(path.to_path_buf());
-                }
-            }
-        }
-    }
-
-    let regex_bangla = Regex::new(r"[\u0980-\u09FF]").unwrap();
-    let regex_pua = Regex::new(r"[\uF000-\uFFFF]").unwrap();
-
-    let mut items = Vec::new();
-
-    for path in files {
-        let abs_path_str = path.to_string_lossy().to_string();
-        let rel_path_str = match path.strip_prefix(root_path) {
-            Ok(p) => p.to_string_lossy().to_string(),
-            Err(_) => path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-        };
-
-        let file_stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-        let ext_str = path.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
-
-        let mut issues = Vec::new();
-        let mut has_non_ascii = false;
-
-        if regex_bangla.is_match(&rel_path_str) {
-            issues.push("Bangla Unicode Script in Filename".to_string());
-            has_non_ascii = true;
+    tokio::task::spawn_blocking(move || {
+        crate::sanitizer::clear_task_cancel(&task_id);
+        let root_path = Path::new(&folder);
+        if !root_path.exists() {
+            return Err(format!("Folder path does not exist: {}", folder));
         }
 
-        if regex_pua.is_match(&rel_path_str) {
-            issues.push("Private Use Area Symbol (e.g. )".to_string());
-            has_non_ascii = true;
-        }
+        let formats_set: HashSet<String> = formats
+            .iter()
+            .map(|s| s.trim().to_lowercase())
+            .collect();
 
-        if let Ok(tagged_file) = Probe::open(&path).and_then(|f| f.read()) {
-            if let Some(tag) = tagged_file.primary_tag() {
-                if let Some(t) = tag.title() {
-                    if regex_bangla.is_match(&t) {
-                        issues.push("Bangla Title Tag".to_string());
-                        has_non_ascii = true;
-                    }
-                }
-                if let Some(a) = tag.artist() {
-                    if regex_bangla.is_match(&a) {
-                        issues.push("Bangla Artist Tag".to_string());
-                        has_non_ascii = true;
+        let mut files = Vec::new();
+        for entry in WalkDir::new(root_path).into_iter().filter_map(|e| e.ok()) {
+            if entry.file_type().is_file() {
+                let path = entry.path();
+                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                    if formats_set.contains(&ext.to_lowercase()) {
+                        files.push(path.to_path_buf());
                     }
                 }
             }
         }
 
-        if !has_non_ascii && rel_path_str.chars().any(|c| c as u32 > 127) {
-            issues.push("Non-ASCII Characters".to_string());
-            has_non_ascii = true;
+        let total = files.len();
+        if total == 0 {
+            return Ok(Vec::new());
         }
 
-        if has_non_ascii {
-            let option1_text = "Keep Bangla + Write ID3v2.3 UTF-16".to_string();
-            
-            let latin_stem = any_ascii(&file_stem);
-            let option2_text = if ext_str.is_empty() {
-                latin_stem
-            } else {
-                format!("{}.{}", latin_stem, ext_str)
-            };
+        let num_workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .min(16);
 
-            items.push(FontIssueItem {
-                file_path: abs_path_str,
-                relative_path: rel_path_str,
-                detected_issue: issues.join(", "),
-                option1_preview: option1_text,
-                option2_preview: option2_text,
-            });
-        }
-    }
+        let chunk_size = (total + num_workers - 1) / num_workers;
+        let processed_counter = std::sync::atomic::AtomicUsize::new(0);
+        let items_mutex = std::sync::Mutex::new(Vec::new());
+        let last_emit_mutex = std::sync::Mutex::new(std::time::Instant::now());
 
-    Ok(items)
+        let processed_ref = &processed_counter;
+        let items_ref = &items_mutex;
+        let last_emit_ref = &last_emit_mutex;
+        let app_ref = &app;
+        let task_id_ref = &task_id;
+
+        std::thread::scope(|s| {
+            for chunk in files.chunks(chunk_size) {
+                s.spawn(move || {
+                    let regex_bangla = Regex::new(r"[\u0980-\u09FF]").unwrap();
+                    let regex_pua = Regex::new(r"[\uF000-\uFFFF]").unwrap();
+                    let mut local_items = Vec::new();
+                    for path in chunk {
+                        if crate::sanitizer::is_task_cancelled(task_id_ref) {
+                            break;
+                        }
+                        let abs_path_str = path.to_string_lossy().to_string();
+                        let rel_path_str = match path.strip_prefix(root_path) {
+                            Ok(p) => p.to_string_lossy().to_string(),
+                            Err(_) => path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                        };
+
+                        let file_stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                        let ext_str = path.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
+
+                        let mut issues = Vec::new();
+                        let mut has_non_ascii = false;
+
+                        if regex_bangla.is_match(&rel_path_str) {
+                            issues.push("Bangla Unicode Script in Filename".to_string());
+                            has_non_ascii = true;
+                        }
+
+                        if regex_pua.is_match(&rel_path_str) {
+                            issues.push("Private Use Area Symbol (e.g. )".to_string());
+                            has_non_ascii = true;
+                        }
+
+                        if let Ok(tagged_file) = Probe::open(path).and_then(|f| f.read()) {
+                            if let Some(tag) = tagged_file.primary_tag() {
+                                if let Some(t) = tag.title() {
+                                    if regex_bangla.is_match(&t) {
+                                        issues.push("Bangla Title Tag".to_string());
+                                        has_non_ascii = true;
+                                    }
+                                }
+                                if let Some(a) = tag.artist() {
+                                    if regex_bangla.is_match(&a) {
+                                        issues.push("Bangla Artist Tag".to_string());
+                                        has_non_ascii = true;
+                                    }
+                                }
+                            }
+                        }
+
+                        if !has_non_ascii && rel_path_str.chars().any(|c| c as u32 > 127) {
+                            issues.push("Non-ASCII Characters".to_string());
+                            has_non_ascii = true;
+                        }
+
+                        if has_non_ascii {
+                            let option1_text = "Keep Bangla + Write ID3v2.3 UTF-16".to_string();
+                            let latin_stem = any_ascii(&file_stem);
+                            let option2_text = if ext_str.is_empty() {
+                                latin_stem
+                            } else {
+                                format!("{}.{}", latin_stem, ext_str)
+                            };
+
+                            local_items.push(FontIssueItem {
+                                file_path: abs_path_str,
+                                relative_path: rel_path_str,
+                                detected_issue: issues.join(", "),
+                                option1_preview: option1_text,
+                                option2_preview: option2_text,
+                            });
+                        }
+
+                        let cur = processed_ref.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        let mut should_emit = cur == total;
+                        if !should_emit {
+                            if let Ok(mut last) = last_emit_ref.try_lock() {
+                                if last.elapsed() >= std::time::Duration::from_secs(1) {
+                                    *last = std::time::Instant::now();
+                                    should_emit = true;
+                                }
+                            }
+                        }
+                        if should_emit {
+                            let _ = app_ref.emit(
+                                "task-progress",
+                                crate::sanitizer::TaskProgress {
+                                    task_id: task_id_ref.clone(),
+                                    task_name: "Scan Font Issues".to_string(),
+                                    index: cur.saturating_sub(1),
+                                    total,
+                                    status: if cur == total { "completed".to_string() } else { "running".to_string() },
+                                    message: path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                                    file_path: None,
+                                },
+                            );
+                        }
+                    }
+
+                    if let Ok(mut guard) = items_ref.lock() {
+                        guard.extend(local_items);
+                    }
+                });
+            }
+        });
+
+        let items = items_mutex.into_inner().unwrap_or_default();
+        Ok(items)
+    })
+    .await
+    .map_err(|e| format!("Thread execution error: {}", e))?
 }
 
 #[tauri::command]
-pub async fn apply_font_issue_option1(file_paths: Vec<String>) -> Result<usize, String> {
-    let mut updated_count = 0;
-    for file_path_str in file_paths {
-        let path = Path::new(&file_path_str);
-        if path.exists() {
-            if let Ok(mut tagged_file) = Probe::open(path).and_then(|f| f.read()) {
-                let tag_type = tagged_file.primary_tag_type();
-                let _tag = if tagged_file.primary_tag().is_some() {
-                    tagged_file.primary_tag_mut().unwrap()
-                } else {
-                    tagged_file.insert_tag(Tag::new(tag_type));
-                    tagged_file.primary_tag_mut().unwrap()
-                };
+pub async fn apply_font_issue_option1(file_paths: Vec<String>) -> Result<crate::sanitizer::ExecutionReport, String> {
+    tokio::task::spawn_blocking(move || {
+        let mut success_count = 0;
+        let mut failure_count = 0;
+        let mut errors = Vec::new();
 
-                // Saving tag with lofty automatically formats ID3v2 text frames to UTF-16 when non-ASCII text is present
-                if tagged_file.save_to_path(path, lofty::config::WriteOptions::default()).is_ok() {
-                    updated_count += 1;
+        for file_path_str in file_paths {
+            let path = Path::new(&file_path_str);
+            if !path.exists() {
+                failure_count += 1;
+                errors.push(format!("File does not exist: {}", file_path_str));
+                continue;
+            }
+
+            let file_path_str_clone = file_path_str.clone();
+            let save_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // Strip legacy ID3v1 tag to prevent lofty 30-byte split_at panic on Unicode strings
+                let _ = TagType::Id3v1.remove_from_path(path);
+
+                match Probe::open(path).and_then(|f| f.read()) {
+                    Ok(mut tagged_file) => {
+                        tagged_file.remove(TagType::Id3v1);
+
+                        let tag_type = match tagged_file.primary_tag_type() {
+                            TagType::Id3v1 => TagType::Id3v2,
+                            other => other,
+                        };
+                        let tag = if tagged_file.primary_tag().is_some() {
+                            tagged_file.primary_tag_mut().unwrap()
+                        } else {
+                            tagged_file.insert_tag(Tag::new(tag_type));
+                            tagged_file.primary_tag_mut().unwrap()
+                        };
+
+                        // Re-set title, artist, album
+                        if let Some(t) = tag.title().map(|s| s.to_string()) {
+                            tag.set_title(t);
+                        }
+                        if let Some(a) = tag.artist().map(|s| s.to_string()) {
+                            tag.set_artist(a);
+                        }
+                        if let Some(alb) = tag.album().map(|s| s.to_string()) {
+                            tag.set_album(alb);
+                        }
+
+                        tagged_file.save_to_path(path, lofty::config::WriteOptions::default())
+                            .map_err(|e| format!("Failed to save ID3v2 tag: {}", e))
+                    }
+                    Err(e) => Err(format!("Failed to read tags: {}", e)),
+                }
+            }));
+
+            match save_res {
+                Ok(Ok(_)) => success_count += 1,
+                Ok(Err(e)) => {
+                    failure_count += 1;
+                    errors.push(format!("Error on '{}': {}", file_path_str_clone, e));
+                }
+                Err(_) => {
+                    failure_count += 1;
+                    errors.push(format!("Internal codec error on '{}'", file_path_str_clone));
                 }
             }
         }
-    }
-    Ok(updated_count)
+
+        Ok(crate::sanitizer::ExecutionReport {
+            success_count,
+            failure_count,
+            errors,
+        })
+    })
+    .await
+    .map_err(|e| format!("Thread execution error: {}", e))?
 }
 
 #[tauri::command]
 pub async fn apply_font_issue_option2(
     file_paths: Vec<String>,
     target_type: String,
-) -> Result<usize, String> {
-    let mut updated_count = 0;
+) -> Result<crate::sanitizer::ExecutionReport, String> {
+    tokio::task::spawn_blocking(move || {
+        let mut success_count = 0;
+        let mut failure_count = 0;
+        let mut errors = Vec::new();
 
-    for file_path_str in &file_paths {
-        let path = Path::new(file_path_str);
-        if !path.exists() {
-            continue;
-        }
-
-        if target_type == "tags" {
-            // Transliterate metadata tags only
-            if let Ok(mut tagged_file) = Probe::open(path).and_then(|f| f.read()) {
-                let tag_type = tagged_file.primary_tag_type();
-                let tag = if tagged_file.primary_tag().is_some() {
-                    tagged_file.primary_tag_mut().unwrap()
-                } else {
-                    tagged_file.insert_tag(Tag::new(tag_type));
-                    tagged_file.primary_tag_mut().unwrap()
-                };
-
-                if let Some(t) = tag.title() {
-                    tag.set_title(any_ascii(&t));
-                }
-                if let Some(a) = tag.artist() {
-                    tag.set_artist(any_ascii(&a));
-                }
-                if let Some(alb) = tag.album() {
-                    tag.set_album(any_ascii(&alb));
-                }
-                if tagged_file.save_to_path(path, lofty::config::WriteOptions::default()).is_ok() {
-                    updated_count += 1;
-                }
+        for file_path_str in &file_paths {
+            let path = Path::new(file_path_str);
+            if !path.exists() {
+                failure_count += 1;
+                errors.push(format!("File does not exist: {}", file_path_str));
+                continue;
             }
-        } else if target_type == "filenames" {
-            // Transliterate filenames on disk only
-            if let Some(parent) = path.parent() {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    let latin_stem = any_ascii(stem);
-                    let ext_str = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                    let new_name = if ext_str.is_empty() {
-                        latin_stem
-                    } else {
-                        format!("{}.{}", latin_stem, ext_str)
-                    };
 
-                    let new_path = parent.join(&new_name);
-                    if new_path != path {
-                        if fs::rename(path, new_path).is_ok() {
-                            updated_count += 1;
+            let mut file_ok = true;
+
+            // 1. Tags transliteration
+            if target_type == "tags" || target_type == "both" {
+                let file_path_str_clone = file_path_str.clone();
+                let tag_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _ = TagType::Id3v1.remove_from_path(path);
+
+                    match Probe::open(path).and_then(|f| f.read()) {
+                        Ok(mut tagged_file) => {
+                            tagged_file.remove(TagType::Id3v1);
+
+                            let tag_type = match tagged_file.primary_tag_type() {
+                                TagType::Id3v1 => TagType::Id3v2,
+                                other => other,
+                            };
+                            let tag = if tagged_file.primary_tag().is_some() {
+                                tagged_file.primary_tag_mut().unwrap()
+                            } else {
+                                tagged_file.insert_tag(Tag::new(tag_type));
+                                tagged_file.primary_tag_mut().unwrap()
+                            };
+
+                            if let Some(t) = tag.title().map(|s| s.to_string()) {
+                                tag.set_title(any_ascii(&t));
+                            }
+                            if let Some(a) = tag.artist().map(|s| s.to_string()) {
+                                tag.set_artist(any_ascii(&a));
+                            }
+                            if let Some(alb) = tag.album().map(|s| s.to_string()) {
+                                tag.set_album(any_ascii(&alb));
+                            }
+                            if let Some(c) = tag.comment().map(|s| s.to_string()) {
+                                tag.set_comment(any_ascii(&c));
+                            }
+
+                            tagged_file.save_to_path(path, lofty::config::WriteOptions::default())
+                                .map_err(|e| format!("Failed to save tags: {}", e))
                         }
-                    } else {
-                        updated_count += 1;
+                        Err(e) => Err(format!("Failed to open tags: {}", e)),
+                    }
+                }));
+
+                match tag_res {
+                    Ok(Ok(_)) => {},
+                    Ok(Err(e)) => {
+                        file_ok = false;
+                        errors.push(format!("Failed to transliterate tags for '{}': {}", file_path_str_clone, e));
+                    }
+                    Err(_) => {
+                        file_ok = false;
+                        errors.push(format!("Tag processing error on '{}'", file_path_str_clone));
                     }
                 }
             }
-        }
-    }
 
-    Ok(updated_count)
+            // 2. Filename transliteration
+            if (target_type == "filenames" || target_type == "both") && file_ok {
+                if let Some(parent) = path.parent() {
+                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                        let latin_stem = any_ascii(stem);
+                        let ext_str = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                        let new_name = if ext_str.is_empty() {
+                            latin_stem
+                        } else {
+                            format!("{}.{}", latin_stem, ext_str)
+                        };
+
+                        let new_path = parent.join(&new_name);
+                        if new_path != path {
+                            if let Err(e) = fs::rename(path, &new_path) {
+                                file_ok = false;
+                                errors.push(format!("Failed to rename '{}' to '{}': {}", file_path_str, new_name, e));
+                            }
+                        }
+                    }
+                }
+            }
+
+            if file_ok {
+                success_count += 1;
+            } else {
+                failure_count += 1;
+            }
+        }
+
+        Ok(crate::sanitizer::ExecutionReport {
+            success_count,
+            failure_count,
+            errors,
+        })
+    })
+    .await
+    .map_err(|e| format!("Thread execution error: {}", e))?
 }

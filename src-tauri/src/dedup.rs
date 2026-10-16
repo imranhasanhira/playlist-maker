@@ -85,6 +85,14 @@ pub struct PruneCacheReport {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DeleteDuplicatesResult {
+    pub deleted_count: usize,
+    pub failed_count: usize,
+    pub freed_bytes: u64,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DuplicateProgressPayload {
     pub phase: String,
     pub phase_label: String,
@@ -1057,6 +1065,7 @@ pub fn analyze_candidates(
     max_acoustic_secs: u32,
     auto_prune: bool,
     app: Option<&AppHandle>,
+    task_id: Option<&str>,
 ) -> (
     Vec<PathBuf>,              // Winning deduplicated files
     HashMap<String, PathBuf>,  // Map: canonical_path of any track -> winning PathBuf (for superior replacement!)
@@ -1229,6 +1238,11 @@ pub fn analyze_candidates(
                 let to_compute_ref = &to_compute;
                 s.spawn(move || {
                     loop {
+                        if let Some(tid) = task_id {
+                            if crate::sanitizer::is_task_cancelled(tid) {
+                                break;
+                            }
+                        }
                         let i = work_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         if i >= to_compute_ref.len() {
                             break;
@@ -1245,6 +1259,11 @@ pub fn analyze_candidates(
             let mut completed_computed = 0usize;
 
             while completed_computed < total_to_compute {
+                if let Some(tid) = task_id {
+                    if crate::sanitizer::is_task_cancelled(tid) {
+                        break;
+                    }
+                }
                 match rx.recv_timeout(std::time::Duration::from_millis(200)) {
                     Ok((orig_idx, rec)) => {
                         let fname = Path::new(&rec.file_path)
@@ -1428,24 +1447,121 @@ pub fn analyze_candidates(
         i
     }
 
-    for i in 0..n {
-        for j in (i + 1)..n {
+    // Step 1: Instant O(N) indexing for Tier 1A (exact audio stream hash) and Tier 1B (YouTube ID)
+    let mut hash_groups: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut yt_groups: HashMap<&str, Vec<usize>> = HashMap::new();
+
+    for (idx, rec) in records.iter().enumerate() {
+        if rec.size_bytes > 1024 && !rec.audio_hash.is_empty() {
+            hash_groups.entry(&rec.audio_hash).or_default().push(idx);
+        }
+        if let Some(ref ytid) = rec.youtube_id {
+            if !ytid.is_empty() {
+                yt_groups.entry(ytid.as_str()).or_default().push(idx);
+            }
+        }
+    }
+
+    for group in hash_groups.values() {
+        for a_idx in 0..group.len() {
+            for b_idx in (a_idx + 1)..group.len() {
+                let i = group[a_idx];
+                let j = group[b_idx];
+                let root_i = find(&mut parent, i);
+                let root_j = find(&mut parent, j);
+                if root_i != root_j {
+                    parent[root_j] = root_i;
+                }
+                let pair = if i < j { (i, j) } else { (j, i) };
+                edge_info.entry(pair).or_insert_with(|| MatchEdge {
+                    tier: "exact_hash",
+                    label: "Exact Audio Stream Match".to_string(),
+                    confidence: 100,
+                    offset_secs: Some(0.0),
+                });
+            }
+        }
+    }
+
+    for (ytid, group) in yt_groups {
+        for a_idx in 0..group.len() {
+            for b_idx in (a_idx + 1)..group.len() {
+                let i = group[a_idx];
+                let j = group[b_idx];
+                let root_i = find(&mut parent, i);
+                let root_j = find(&mut parent, j);
+                if root_i != root_j {
+                    parent[root_j] = root_i;
+                }
+                let pair = if i < j { (i, j) } else { (j, i) };
+                let diff = (records[i].duration_secs as f32) - (records[j].duration_secs as f32);
+                edge_info.entry(pair).or_insert_with(|| MatchEdge {
+                    tier: "youtube_id",
+                    label: format!("Same YouTube ID ({})", ytid),
+                    confidence: 99,
+                    offset_secs: if diff.abs() >= 1.0 { Some(-diff) } else { None },
+                });
+            }
+        }
+    }
+
+    // Step 2: Duration-windowed candidate comparison for Tier 2 (Metadata) & Tier 3 (Acoustic)
+    // Both Tier 2 and Tier 3 strictly require dur_diff <= 26s.
+    // By sorting tracks by duration_secs, we only compare candidates within [dur_i, dur_i + 26s],
+    // reducing comparisons from 50,000,000+ down to ~100k (500x speedup).
+    let mut sorted_indices: Vec<usize> = (0..n).collect();
+    sorted_indices.sort_by_key(|&idx| records[idx].duration_secs);
+
+    let cluster_start = std::time::Instant::now();
+    for (step, &i) in sorted_indices.iter().enumerate() {
+        if let Some(tid) = task_id {
+            if crate::sanitizer::is_task_cancelled(tid) {
+                break;
+            }
+        }
+
+        let dur_i = records[i].duration_secs;
+        for &j in &sorted_indices[(step + 1)..] {
+            let dur_j = records[j].duration_secs;
+            if dur_j > dur_i + 26 {
+                break;
+            }
+
+            let root_i = find(&mut parent, i);
+            let root_j = find(&mut parent, j);
+            if root_i == root_j {
+                continue;
+            }
+
             if let Some(edge) = check_pair_duplicate(&records[i], &records[j], max_acoustic_secs) {
                 let root_i = find(&mut parent, i);
                 let root_j = find(&mut parent, j);
                 if root_i != root_j {
                     parent[root_j] = root_i;
                 }
-                edge_info.insert((i, j), edge);
+                let pair = if i < j { (i, j) } else { (j, i) };
+                edge_info.insert(pair, edge);
             }
         }
 
         if let Some(app) = app {
-            if (i % 25 == 0 || i + 1 == n)
-                && last_emit.elapsed() >= std::time::Duration::from_secs(1)
+            if (step % 25 == 0 || step + 1 == n)
+                && last_emit.elapsed() >= std::time::Duration::from_millis(500)
             {
+                let elapsed = cluster_start.elapsed().as_secs_f64();
+                let speed = if elapsed > 0.05 && step > 0 {
+                    (step + 1) as f64 / elapsed
+                } else {
+                    0.0
+                };
+                let remaining = (n.saturating_sub(step + 1)) as f64;
+                let eta_secs = if speed > 0.1 {
+                    Some(remaining / speed)
+                } else {
+                    None
+                };
                 let pct = if n > 0 {
-                    89.0 + ((i as f64) / (n as f64) * 9.0)
+                    89.0 + ((step as f64) / (n as f64) * 9.0)
                 } else {
                     98.0
                 };
@@ -1454,12 +1570,12 @@ pub fn analyze_candidates(
                     DuplicateProgressPayload {
                         phase: "clustering".to_string(),
                         phase_label: "Comparing candidates & clustering duplicate groups...".to_string(),
-                        current: i + 1,
+                        current: step + 1,
                         total: n,
                         progress: pct.clamp(89.0, 98.0),
                         current_file: None,
-                        eta_secs: Some(0.1),
-                        speed: 0.0,
+                        eta_secs,
+                        speed,
                     },
                 );
                 last_emit = std::time::Instant::now();
@@ -1755,6 +1871,7 @@ pub fn gather_playlist_candidates(
 #[tauri::command]
 pub async fn analyze_playlist_duplicates(
     app: AppHandle,
+    taskId: Option<String>,
     configPath: String,
     sourceDirOverride: Option<String>,
     playlistIndex: Option<usize>,
@@ -1763,6 +1880,9 @@ pub async fn analyze_playlist_duplicates(
     maxAcousticSeconds: Option<u32>,
 ) -> Result<DuplicateAnalysisReport, String> {
     tokio::task::spawn_blocking(move || {
+        let effective_task_id = taskId.as_deref().unwrap_or("duplicate_analysis");
+        crate::sanitizer::clear_task_cancel(effective_task_id);
+
         let config_file = Path::new(&configPath);
         let config = playlist::read_config_file(config_file)?;
         let resolved_source_dir = playlist::find_right_dir(
@@ -1789,7 +1909,7 @@ pub async fn analyze_playlist_duplicates(
             let (candidates, _) =
                 gather_playlist_candidates(pl, pl_idx, &resolved_source_dir, &formats_set);
             let (_, _, mut report) =
-                analyze_candidates(&candidates, &resolved_source_dir, run_acoustic, max_acoustic_secs, false, Some(&app));
+                analyze_candidates(&candidates, &resolved_source_dir, run_acoustic, max_acoustic_secs, false, Some(&app), Some(effective_task_id));
             report.scope_name = format!("Playlist: {}", pl.name);
             Ok(report)
         } else {
@@ -1817,7 +1937,7 @@ pub async fn analyze_playlist_duplicates(
             }
 
             let (_, _, mut report) =
-                analyze_candidates(&all_candidates, &resolved_source_dir, run_acoustic, max_acoustic_secs, true, Some(&app));
+                analyze_candidates(&all_candidates, &resolved_source_dir, run_acoustic, max_acoustic_secs, true, Some(&app), Some(effective_task_id));
             report.scope_name = "All Playlists & Workspace".to_string();
             Ok(report)
         }
@@ -1841,6 +1961,62 @@ pub async fn prune_fingerprint_cache(clearAll: Option<bool>) -> Result<PruneCach
     .map_err(|e| format!("Thread execution error: {}", e))?
 }
 
+#[tauri::command]
+pub async fn delete_duplicate_files(
+    filePaths: Vec<String>,
+) -> Result<DeleteDuplicatesResult, String> {
+    tokio::task::spawn_blocking(move || {
+        let mut deleted_count = 0;
+        let mut failed_count = 0;
+        let mut freed_bytes = 0u64;
+        let mut errors = Vec::new();
+
+        let mut conn_opt = open_cache_db();
+
+        for path_str in &filePaths {
+            let path = Path::new(path_str);
+            if path.exists() {
+                if let Ok(meta) = path.metadata() {
+                    freed_bytes += meta.len();
+                }
+                match std::fs::remove_file(path) {
+                    Ok(_) => {
+                        deleted_count += 1;
+                        if let Some(ref mut conn) = conn_opt {
+                            let _ = conn.execute(
+                                "DELETE FROM track_fingerprints WHERE file_path = ?1",
+                                rusqlite::params![path_str],
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        failed_count += 1;
+                        errors.push(format!("Failed to delete '{}': {}", path_str, e));
+                    }
+                }
+            } else {
+                // File does not exist anymore (already deleted)
+                deleted_count += 1;
+                if let Some(ref mut conn) = conn_opt {
+                    let _ = conn.execute(
+                        "DELETE FROM track_fingerprints WHERE file_path = ?1",
+                        rusqlite::params![path_str],
+                    );
+                }
+            }
+        }
+
+        Ok(DeleteDuplicatesResult {
+            deleted_count,
+            failed_count,
+            freed_bytes,
+            errors,
+        })
+    })
+    .await
+    .map_err(|e| format!("Thread execution error: {}", e))?
+}
+
 /// Build a cross-playlist canonical replacement map for Smart Sync Export (Rule 1 + Superior Substitution):
 /// When Playlist A and Playlist B reference different duplicate files of the same song,
 /// maps every inferior file path to the Superior Winner's `PathBuf` so all playlists keep the song
@@ -1856,7 +2032,7 @@ pub fn build_export_superior_replacement_map(
         all_candidates.extend(cands);
     }
 
-    let (_, replacement_map, _) = analyze_candidates(&all_candidates, source_dir, false, 60, true, None);
+    let (_, replacement_map, _) = analyze_candidates(&all_candidates, source_dir, false, 60, true, None, None);
     replacement_map
 }
 
@@ -1894,7 +2070,7 @@ mod tests {
             .collect();
 
         // Test with acoustic fingerprinting enabled (the mode that previously failed)
-        let (_, _, report_with) = analyze_candidates(&candidates, souls_dir, true, 60, false, None);
+        let (_, _, report_with) = analyze_candidates(&candidates, souls_dir, true, 60, false, None, None);
 
         // Crucial requirement: only ONE song is duplicated ("Ami Are Bhabbona"),
         // and all other 39 songs must remain unique!
@@ -1920,7 +2096,7 @@ mod tests {
         assert_eq!(report_with.redundant_files_count, 1);
 
         // Also test with acoustic fingerprinting disabled
-        let (_, _, report_without) = analyze_candidates(&candidates, souls_dir, false, 60, false, None);
+        let (_, _, report_without) = analyze_candidates(&candidates, souls_dir, false, 60, false, None, None);
         assert_eq!(
             report_without.duplicate_groups.len(),
             1,

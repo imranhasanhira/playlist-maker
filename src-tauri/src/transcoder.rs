@@ -169,49 +169,93 @@ fn copy_metadata(flac_path: &Path, mp3_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-// Background queue runner
+// Background queue runner with parallel workers
 pub fn run_transcode_queue(app: AppHandle, jobs: Vec<TranscodeJob>) {
     tokio::spawn(async move {
+        crate::sanitizer::clear_task_cancel("flac_transcode");
         let total = jobs.len();
-        for (index, job) in jobs.into_iter().enumerate() {
-            let input_path = Path::new(&job.file_path);
-            let output_dir = Path::new(&job.output_dir);
-            
-            // Create target filename
-            let file_stem = input_path.file_stem().unwrap_or_else(|| std::ffi::OsStr::new("output"));
-            let output_filename = format!("{}.mp3", file_stem.to_string_lossy());
-            let output_path = output_dir.join(output_filename);
+        if total == 0 {
+            return;
+        }
 
-            // Make sure target dir exists
-            if !output_dir.exists() {
-                let _ = std::fs::create_dir_all(output_dir);
-            }
+        let num_workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .min(8);
 
-            let result = transcode_flac_to_mp3(input_path, &output_path, job.bitrate);
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(num_workers));
+        let processed_counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut task_handles = Vec::new();
 
-            let (success, error_msg) = match result {
-                Ok(_) => (true, None),
-                Err(e) => (false, Some(e)),
-            };
+        for job in jobs {
+            let sem = semaphore.clone();
+            let app_clone = app.clone();
+            let counter = processed_counter.clone();
 
-            let message = if success {
-                format!("Converted: {}", file_stem.to_string_lossy())
-            } else {
-                format!("Failed: {}", error_msg.as_deref().unwrap_or(""))
-            };
+            let handle = tokio::spawn(async move {
+                let _permit = match sem.acquire_owned().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                if crate::sanitizer::is_task_cancelled("flac_transcode") {
+                    return;
+                }
 
-            let _ = app.emit(
-                "task-progress",
-                TaskProgress {
-                    task_id: "flac_transcode".to_string(),
-                    task_name: "FLAC Transcoding".to_string(),
-                    index,
-                    total,
-                    status: if index + 1 == total { "completed".to_string() } else { "running".to_string() },
-                    message,
-                    file_path: Some(job.file_path.clone()),
-                },
-            );
+                let input_path = std::path::PathBuf::from(&job.file_path);
+                let output_dir = std::path::PathBuf::from(&job.output_dir);
+                let file_stem = input_path
+                    .file_stem()
+                    .unwrap_or_else(|| std::ffi::OsStr::new("output"))
+                    .to_string_lossy()
+                    .to_string();
+                let output_filename = format!("{}.mp3", file_stem);
+                let output_path = output_dir.join(output_filename);
+
+                if !output_dir.exists() {
+                    let _ = std::fs::create_dir_all(&output_dir);
+                }
+
+                let in_path = input_path.clone();
+                let out_path = output_path.clone();
+                let bitrate = job.bitrate;
+
+                let result = tokio::task::spawn_blocking(move || {
+                    transcode_flac_to_mp3(&in_path, &out_path, bitrate)
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("Task error: {}", e)));
+
+                let (success, error_msg) = match result {
+                    Ok(_) => (true, None),
+                    Err(e) => (false, Some(e)),
+                };
+
+                let cur = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                let message = if success {
+                    format!("Converted: {}", file_stem)
+                } else {
+                    format!("Failed: {}", error_msg.as_deref().unwrap_or(""))
+                };
+
+                let _ = app_clone.emit(
+                    "task-progress",
+                    TaskProgress {
+                        task_id: "flac_transcode".to_string(),
+                        task_name: "FLAC Transcoding".to_string(),
+                        index: cur.saturating_sub(1),
+                        total,
+                        status: if cur == total { "completed".to_string() } else { "running".to_string() },
+                        message,
+                        file_path: Some(job.file_path),
+                    },
+                );
+            });
+
+            task_handles.push(handle);
+        }
+
+        for handle in task_handles {
+            let _ = handle.await;
         }
     });
 }

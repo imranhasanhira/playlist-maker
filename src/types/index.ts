@@ -22,12 +22,13 @@ export interface YearSplitConfig {
   split_5y?: number[];
   split_1y?: number[];
   custom_merges?: [number, number][];
+  split_unknown_parts?: number;
 }
 
 export interface YearBucketSummary {
   key: string;
   label: string;
-  bucket_type: "10y" | "5y" | "1y" | "custom" | "unknown";
+  bucket_type: "10y" | "5y" | "1y" | "custom" | "unknown" | "unknown_split";
   parent_key: string | null;
   track_count: number;
   is_split: boolean;
@@ -315,6 +316,13 @@ export interface DuplicateAnalysisProgressPayload {
   current_file?: string | null;
   eta_secs?: number | null;
   speed: number;
+}
+
+export interface DeleteDuplicatesResult {
+  deleted_count: number;
+  failed_count: number;
+  freed_bytes: number;
+  errors: string[];
 }
 
 

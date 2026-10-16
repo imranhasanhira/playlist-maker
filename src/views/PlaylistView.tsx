@@ -15,6 +15,7 @@ type PlaylistViewProps = {
   onPlayTrack: (track: AudioTrack, queue: AudioTrack[], playlistName: string) => void;
   onPlayQueue?: (queue: AudioTrack[], playlistName: string, shuffle?: boolean) => void;
   relativeToConfig: boolean;
+  addBackgroundTask?: (id: string, name: string, taskPromise: Promise<any>) => void;
 };
 
 export const PlaylistView: React.FC<PlaylistViewProps> = ({
@@ -25,6 +26,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   onPlayTrack,
   onPlayQueue,
   relativeToConfig,
+  addBackgroundTask,
 }) => {
   const [selectedPlaylistIndex, setSelectedPlaylistIndex] = useState<number | null>(null);
   const [selectedBucketKey, setSelectedBucketKey] = useState<string>("all");
@@ -122,6 +124,20 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   const [plSortBy, setPlSortBy] = useState<PlSortBy>("config");
   const [plSortOrder, setPlSortOrder] = useState<PlSortOrder>("asc");
   const [showPlSortMenu, setShowPlSortMenu] = useState<boolean>(false);
+  const [pinYearSplitAtTop, setPinYearSplitAtTop] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem("pl_pin_year_split");
+      return saved !== null ? JSON.parse(saved) : true;
+    } catch (e) {
+      return true;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("pl_pin_year_split", JSON.stringify(pinYearSplitAtTop));
+    } catch (e) {}
+  }, [pinYearSplitAtTop]);
 
   useEffect(() => {
     try {
@@ -131,15 +147,29 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
 
   const sortedPlaylistsWithIndex = useMemo(() => {
     if (!config) return [];
-    const indexed = config.playlists.map((pl, originalIdx) => ({ pl, originalIdx }));
-    if (plSortBy === "config") {
-      return indexed;
+    let indexed = config.playlists.map((pl, originalIdx) => ({ pl, originalIdx }));
+    if (plSortBy !== "config") {
+      indexed = [...indexed].sort((a, b) => {
+        const result = a.pl.name.toLowerCase().localeCompare(b.pl.name.toLowerCase());
+        return plSortOrder === "asc" ? result : -result;
+      });
     }
-    return indexed.sort((a, b) => {
-      const result = a.pl.name.toLowerCase().localeCompare(b.pl.name.toLowerCase());
-      return plSortOrder === "asc" ? result : -result;
-    });
-  }, [config, plSortBy, plSortOrder]);
+
+    if (pinYearSplitAtTop) {
+      const yearSplitList: typeof indexed = [];
+      const regularList: typeof indexed = [];
+      for (const item of indexed) {
+        if (item.pl.year_split?.enabled) {
+          yearSplitList.push(item);
+        } else {
+          regularList.push(item);
+        }
+      }
+      return [...yearSplitList, ...regularList];
+    }
+
+    return indexed;
+  }, [config, plSortBy, plSortOrder, pinYearSplitAtTop]);
 
   const handleSaveSortedOrderToConfig = () => {
     if (!config) return;
@@ -205,7 +235,6 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     rules: (activePlaylist as any).rules,
     sort_by: (activePlaylist as any).sort_by,
     limit: (activePlaylist as any).limit,
-    year_split: activePlaylist.year_split,
     sourceDir: config?.sourceDir,
     relativeToConfig,
   }) : "";
@@ -223,16 +252,94 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     });
   };
 
-  const fetchSummaries = async () => {
+  const [yearAnalysisProgress, setYearAnalysisProgress] = useState<{
+    current: number;
+    total: number;
+    percent: number;
+    message: string;
+  } | null>(null);
+
+  const [isRefreshingSingle, setIsRefreshingSingle] = useState<boolean>(false);
+  const runningAnalysisRef = useRef<number | null>(null);
+  const selectedPlaylistIndexRef = useRef<number | null>(selectedPlaylistIndex);
+  selectedPlaylistIndexRef.current = selectedPlaylistIndex;
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let unlistenGen: (() => void) | null = null;
+    const setupListener = async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        unlisten = await listen<any>("task-progress", (event) => {
+          if (event.payload.task_id?.startsWith("year_analysis_")) {
+            const { index, total, message, status } = event.payload;
+            if (status === "completed") {
+              setYearAnalysisProgress(null);
+            } else if (index === 0 && total === 100 && message === "Resolving playlist files...") {
+              setYearAnalysisProgress({ current: 0, total: 0, percent: 0, message });
+            } else {
+              const current = Math.min(index + 1, total);
+              const percent = total > 0 ? Math.min(100, Math.round((current / total) * 100)) : 0;
+              setYearAnalysisProgress({ current, total, percent, message: message || "" });
+            }
+          }
+        });
+
+        unlistenGen = await listen<string>("playlist-generation-log", (event) => {
+          setGenerationLogs((prev) => [...prev, event.payload]);
+        });
+      } catch (e) {}
+    };
+    setupListener();
+
+    const handleTaskCancelled = (e: Event) => {
+      const customEvent = e as CustomEvent<{ taskId?: string }>;
+      const tid = customEvent.detail?.taskId;
+      if (tid && tid.startsWith("year_analysis_")) {
+        runningAnalysisRef.current = null;
+        setIsRefreshingSingle(false);
+        setYearAnalysisProgress(null);
+      }
+    };
+    window.addEventListener("bg-task-cancelled", handleTaskCancelled);
+
+    return () => {
+      if (unlisten) unlisten();
+      if (unlistenGen) unlistenGen();
+      window.removeEventListener("bg-task-cancelled", handleTaskCancelled);
+    };
+  }, []);
+
+  const fetchSummaries = async (configOverrideParam?: MainConfig | null) => {
     if (!configPath) return;
+    const activeCfg = configOverrideParam !== undefined ? configOverrideParam : config;
     setIsScanningSummary(true);
     try {
       const result = await invoke<PlaylistSummaryItem[]>("get_playlists_summary", {
+        taskId: null,
         configPath,
+        configOverride: activeCfg || null,
         sourceDirOverride: null,
         formats,
       });
-      setSummaries(result);
+      setSummaries((prev) => {
+        return result.map((newItem) => {
+          const prevItem = prev.find((p) => p.index === newItem.index && p.name === newItem.name);
+          if (
+            prevItem &&
+            newItem.year_split_enabled &&
+            newItem.buckets.length === 0 &&
+            prevItem.buckets.length > 0
+          ) {
+            return {
+              ...newItem,
+              buckets: prevItem.buckets,
+              warning_exceeds_max: prevItem.warning_exceeds_max,
+            };
+          }
+          return newItem;
+        });
+      });
     } catch (e) {
       console.warn("Failed to fetch playlist summaries:", e);
     } finally {
@@ -240,18 +347,44 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     }
   };
 
-  const [isRefreshingSingle, setIsRefreshingSingle] = useState<boolean>(false);
-
-  const fetchSinglePlaylistSummary = async (idx: number) => {
+  const fetchSinglePlaylistSummary = async (
+    idx: number,
+    configOverrideParam?: MainConfig | null,
+    showProgress = true
+  ) => {
     if (!configPath) return;
-    setIsRefreshingSingle(true);
+    const activeCfg = configOverrideParam !== undefined ? configOverrideParam : config;
+    const pl = activeCfg?.playlists?.[idx];
+    const isYearSplit = pl?.year_split?.enabled ?? false;
+
+    if (isYearSplit && showProgress) {
+      if (runningAnalysisRef.current === idx) {
+        return;
+      }
+      runningAnalysisRef.current = idx;
+      setIsRefreshingSingle(true);
+      setYearAnalysisProgress({
+        current: 0,
+        total: 0,
+        percent: 0,
+        message: "Resolving playlist files...",
+      });
+    }
+    const taskId = isYearSplit && showProgress ? `year_analysis_${idx}` : undefined;
     try {
-      const single = await invoke<PlaylistSummaryItem>("get_single_playlist_summary", {
+      const promise = invoke<PlaylistSummaryItem>("get_single_playlist_summary", {
+        taskId,
         configPath,
+        configOverride: activeCfg || null,
         sourceDirOverride: null,
         formats,
         playlistIndex: idx,
       });
+      if (isYearSplit && showProgress && addBackgroundTask && taskId) {
+        const plName = pl?.name || `Playlist #${idx + 1}`;
+        addBackgroundTask(taskId, `Analyzing Year Distribution: ${plName}`, promise);
+      }
+      const single = await promise;
       setSummaries((prev) => {
         const copy = [...prev];
         const existingIdx = copy.findIndex((s) => s.index === idx);
@@ -262,10 +395,21 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
         }
         return copy;
       });
+      // Once year analysis finishes, metadata cache is populated in memory; refresh track preview silently
+      invalidateCacheFor(idx);
+      if (selectedPlaylistIndexRef.current === idx) {
+        loadPreview(true, undefined, activeCfg, true);
+      }
     } catch (e) {
       console.warn("Failed to fetch single playlist summary:", e);
     } finally {
-      setIsRefreshingSingle(false);
+      if (isYearSplit && showProgress) {
+        if (runningAnalysisRef.current === idx) {
+          runningAnalysisRef.current = null;
+        }
+        setIsRefreshingSingle(false);
+        setYearAnalysisProgress(null);
+      }
     }
   };
 
@@ -280,8 +424,6 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     setSelectedBucketKey("all");
     if (activePlaylist && selectedPlaylistIndex !== null) {
       loadPreview(false, "all");
-      // Auto-load bucket summary for the selected playlist immediately!
-      fetchSinglePlaylistSummary(selectedPlaylistIndex);
     } else {
       setPreviews([]);
     }
@@ -295,11 +437,18 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     return "…/" + parts.slice(-3).join('/');
   };
 
-  const loadPreview = async (forceRefresh = false, bucketKeyOverride?: string) => {
-    if (!configPath || activePlaylist === null || selectedPlaylistIndex === null) return;
+  const loadPreview = async (
+    forceRefresh = false,
+    bucketKeyOverride?: string,
+    configOverrideParam?: MainConfig | null,
+    silent = false
+  ) => {
+    const activeCfg = configOverrideParam !== undefined ? configOverrideParam : config;
+    const plIdx = selectedPlaylistIndexRef.current;
+    if (!configPath || !activeCfg || plIdx === null || !activeCfg.playlists[plIdx]) return;
 
     const targetBucket = bucketKeyOverride !== undefined ? bucketKeyOverride : selectedBucketKey;
-    const cacheKey = `${selectedPlaylistIndex}_${targetBucket}`;
+    const cacheKey = `${plIdx}_${targetBucket}`;
 
     if (!forceRefresh && previewsCache[cacheKey]) {
       setPreviews(previewsCache[cacheKey]);
@@ -307,23 +456,62 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
       return;
     }
 
-    setIsLoadingPreview(true);
+    if (!silent) {
+      setIsLoadingPreview(true);
+    }
     setPreviewError("");
     try {
+      const isAllBucket = targetBucket === "all";
       const result = await invoke<TrackPreview[]>("preview_playlist_tracks", {
         configPath,
+        configOverride: activeCfg,
         sourceDirOverride: null,
-        playlistIndex: selectedPlaylistIndex,
+        playlistIndex: plIdx,
         formats,
-        bucketKey: targetBucket === "all" ? null : targetBucket,
+        bucketKey: isAllBucket ? null : targetBucket,
+        probeUncached: isAllBucket ? false : true,
       });
-      setPreviews(result);
+      if (selectedPlaylistIndexRef.current === plIdx) {
+        setPreviews(result);
+      }
       setPreviewsCache((prev) => ({ ...prev, [cacheKey]: result }));
+      if (!silent) {
+        setIsLoadingPreview(false);
+      }
+
+      // If viewing "all" tracks and some tracks had uncached metadata (duration === 0),
+      // hydrate metadata silently in the background if year analysis isn't already probing them
+      if (
+        isAllBucket &&
+        result.some((t) => t.duration === 0) &&
+        runningAnalysisRef.current !== plIdx
+      ) {
+        invoke<TrackPreview[]>("preview_playlist_tracks", {
+          configPath,
+          configOverride: activeCfg,
+          sourceDirOverride: null,
+          playlistIndex: plIdx,
+          formats,
+          bucketKey: null,
+          probeUncached: true,
+        })
+          .then((hydrated) => {
+            setPreviewsCache((prev) => ({ ...prev, [cacheKey]: hydrated }));
+            if (selectedPlaylistIndexRef.current === plIdx) {
+              setPreviews(hydrated);
+            }
+          })
+          .catch(() => {});
+      }
     } catch (e) {
-      setPreviews([]);
-      setPreviewError(String(e));
+      if (selectedPlaylistIndexRef.current === plIdx) {
+        setPreviews([]);
+        setPreviewError(String(e));
+      }
     } finally {
-      setIsLoadingPreview(false);
+      if (!silent) {
+        setIsLoadingPreview(false);
+      }
     }
   };
 
@@ -405,13 +593,17 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
       include_unknown: false,
     };
     const updatedMerges = addCustomMerge(cur.custom_merges || [], [newStart, newEnd]);
-    newPlaylists[selectedPlaylistIndex].year_split = {
-      ...cur,
-      custom_merges: updatedMerges,
+    newPlaylists[selectedPlaylistIndex] = {
+      ...newPlaylists[selectedPlaylistIndex],
+      year_split: {
+        ...cur,
+        custom_merges: updatedMerges,
+      },
     };
-    setConfig({ ...config, playlists: newPlaylists });
+    const updatedConfig = { ...config, playlists: newPlaylists };
+    setConfig(updatedConfig);
     invalidateCacheFor(selectedPlaylistIndex);
-    setTimeout(() => fetchSinglePlaylistSummary(selectedPlaylistIndex), 100);
+    fetchSinglePlaylistSummary(selectedPlaylistIndex, updatedConfig, false);
   };
 
   const handleUnmergeCustomBucket = (start: number, end: number) => {
@@ -419,13 +611,17 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     const newPlaylists = [...config.playlists];
     const cur = newPlaylists[selectedPlaylistIndex].year_split!;
     const updatedMerges = removeCustomMerge(cur.custom_merges || [], [start, end]);
-    newPlaylists[selectedPlaylistIndex].year_split = {
-      ...cur,
-      custom_merges: updatedMerges,
+    newPlaylists[selectedPlaylistIndex] = {
+      ...newPlaylists[selectedPlaylistIndex],
+      year_split: {
+        ...cur,
+        custom_merges: updatedMerges,
+      },
     };
-    setConfig({ ...config, playlists: newPlaylists });
+    const updatedConfig = { ...config, playlists: newPlaylists };
+    setConfig(updatedConfig);
     invalidateCacheFor(selectedPlaylistIndex);
-    setTimeout(() => fetchSinglePlaylistSummary(selectedPlaylistIndex), 100);
+    fetchSinglePlaylistSummary(selectedPlaylistIndex, updatedConfig, false);
   };
 
   const selectAndAddSource = async () => {
@@ -609,8 +805,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     setShowLogsModal(true);
     isCompilationAutoScrollRef.current = true;
     setIsCompilationAutoScroll(true);
-    const cmdStr = `$ generate-playlists --config "${configPath}" --formats "${formats}"${relativeToConfig ? " --relative-to-config" : ""}`;
-    setGenerationLogs([cmdStr, "Starting playlist compilation..."]);
+    setGenerationLogs([]);
     try {
       const logs = await invoke<string[]>("generate_all_playlists", {
         configPath,
@@ -619,9 +814,11 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
         relativeToConfig,
         formats,
       });
-      setGenerationLogs(logs);
+      if (logs && logs.length > 0) {
+        setGenerationLogs(logs);
+      }
     } catch (e) {
-      setGenerationLogs((prev) => [...prev, `ERROR: ${e}`]);
+      setGenerationLogs((prev) => [...prev, `❌ ERROR: ${e}`]);
     } finally {
       setIsGenerating(false);
     }
@@ -712,7 +909,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
               </div>
               <button
                 type="button"
-                onClick={fetchSummaries}
+                onClick={() => fetchSummaries()}
                 disabled={isScanningSummary}
                 style={{
                   padding: "3px 6px",
@@ -750,8 +947,40 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
               </button>
             </div>
 
-            {/* Small sort button right top */}
-            <div style={{ position: "relative" }}>
+            {/* Small sort and pin year-split buttons right top */}
+            <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+              <button
+                type="button"
+                onClick={() => setPinYearSplitAtTop((prev) => !prev)}
+                style={{
+                  padding: "2px 5px",
+                  borderRadius: "6px",
+                  border: pinYearSplitAtTop ? "1px solid var(--accent-purple)" : "1px solid var(--border-color)",
+                  backgroundColor: pinYearSplitAtTop ? "rgba(138, 92, 246, 0.16)" : "var(--bg-tertiary)",
+                  color: pinYearSplitAtTop ? "var(--accent-purple)" : "var(--text-secondary)",
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "2px",
+                  fontSize: "0.68rem",
+                  lineHeight: 1,
+                  transition: "all 0.15s ease",
+                }}
+                title={pinYearSplitAtTop ? "Year-split playlists pinned at top (Active - click to disable)" : "Pin year-split playlists at top"}
+              >
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                  <line x1="16" y1="2" x2="16" y2="6"></line>
+                  <line x1="8" y1="2" x2="8" y2="6"></line>
+                  <line x1="3" y1="10" x2="21" y2="10"></line>
+                </svg>
+                <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="12" y1="19" x2="12" y2="5"></line>
+                  <polyline points="5 12 12 5 19 12"></polyline>
+                </svg>
+              </button>
+
+              <div style={{ position: "relative" }}>
               <button
                 type="button"
                 onClick={() => setShowPlSortMenu(!showPlSortMenu)}
@@ -894,6 +1123,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                 </>
               )}
             </div>
+            </div>
           </div>
 
           <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden", margin: "2px 0 6px 0", minHeight: 0 }}>
@@ -983,28 +1213,6 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                               <line x1="3" y1="10" x2="21" y2="10"></line>
                             </svg>
                             {activeBucketsCount > 0 ? `${activeBucketsCount} splits` : "Auto-Year"}
-                          </span>
-                        )}
-
-                        {pl.exclusions && pl.exclusions.length > 0 && (
-                          <span
-                            style={{
-                              fontSize: "0.66rem",
-                              padding: "1px 6px",
-                              borderRadius: "4px",
-                              backgroundColor: "rgba(239, 68, 68, 0.12)",
-                              color: "var(--danger)",
-                              border: "1px solid rgba(239, 68, 68, 0.25)",
-                              display: "inline-flex",
-                              alignItems: "center",
-                              gap: "3px",
-                            }}
-                          >
-                            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                              <circle cx="12" cy="12" r="10"></circle>
-                              <line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line>
-                            </svg>
-                            {pl.exclusions.length} excls
                           </span>
                         )}
 
@@ -1431,29 +1639,84 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                       >
                         Yearly Auto-Split Filter
                       </div>
-                      <input
-                        type="checkbox"
-                        checked={activePlaylist.year_split?.enabled || false}
-                        onChange={(e) => {
-                          if (!config || selectedPlaylistIndex === null) return;
-                          const newPlaylists = [...config.playlists];
-                          const cur = newPlaylists[selectedPlaylistIndex].year_split || {
-                            enabled: false,
-                            min_tracks: 10,
-                            include_unknown: false,
-                            split_5y: [],
-                            split_1y: [],
-                          };
-                          newPlaylists[selectedPlaylistIndex].year_split = {
-                            ...cur,
-                            enabled: e.target.checked,
-                          };
-                          setConfig({ ...config, playlists: newPlaylists });
-                          invalidateCacheFor(selectedPlaylistIndex);
-                        }}
-                        style={{ cursor: "pointer", width: "16px", height: "16px" }}
-                        title="Toggle Yearly Auto-Split"
-                      />
+                      <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        {activePlaylist.year_split?.enabled && (
+                          <button
+                            type="button"
+                            className="btn btn-secondary"
+                            onClick={() => {
+                              if (selectedPlaylistIndex !== null) {
+                                fetchSinglePlaylistSummary(selectedPlaylistIndex);
+                              }
+                            }}
+                            disabled={isRefreshingSingle}
+                            style={{
+                              width: "22px",
+                              height: "22px",
+                              padding: 0,
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              borderRadius: "4px",
+                              cursor: isRefreshingSingle ? "not-allowed" : "pointer",
+                              opacity: isRefreshingSingle ? 0.6 : 1,
+                              backgroundColor: "var(--bg-secondary)",
+                              color: "var(--text-primary)",
+                              border: "1px solid var(--border-color)",
+                            }}
+                            title={isRefreshingSingle ? "Analyzing year distribution..." : "Analyze year distribution"}
+                          >
+                            <svg
+                              width="12"
+                              height="12"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2.2"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              style={isRefreshingSingle ? { animation: "spin 1s linear infinite" } : undefined}
+                            >
+                              <path d="M23 4v6h-6" />
+                              <path d="M1 20v-6h6" />
+                              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+                            </svg>
+                          </button>
+                        )}
+                        <input
+                          type="checkbox"
+                          checked={activePlaylist.year_split?.enabled || false}
+                          onChange={(e) => {
+                            if (!config || selectedPlaylistIndex === null) return;
+                            const newPlaylists = [...config.playlists];
+                            const cur = newPlaylists[selectedPlaylistIndex].year_split || {
+                              enabled: false,
+                              min_tracks: 10,
+                              include_unknown: false,
+                              split_5y: [],
+                              split_1y: [],
+                            };
+                            const isEnabling = e.target.checked;
+                            newPlaylists[selectedPlaylistIndex] = {
+                              ...newPlaylists[selectedPlaylistIndex],
+                              year_split: {
+                                ...cur,
+                                enabled: isEnabling,
+                              },
+                            };
+                            const updatedConfig = { ...config, playlists: newPlaylists };
+                            setConfig(updatedConfig);
+                            invalidateCacheFor(selectedPlaylistIndex);
+                            if (isEnabling) {
+                              fetchSinglePlaylistSummary(selectedPlaylistIndex, updatedConfig);
+                            } else {
+                              setSelectedBucketKey("all");
+                            }
+                          }}
+                          style={{ cursor: "pointer", width: "16px", height: "16px" }}
+                          title="Toggle Yearly Auto-Split"
+                        />
+                      </div>
                     </div>
 
                     {activePlaylist.year_split?.enabled && (
@@ -1478,9 +1741,14 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                                 const newPlaylists = [...config.playlists];
                                 const cur = { ...newPlaylists[selectedPlaylistIndex].year_split! };
                                 delete cur.min_tracks;
-                                newPlaylists[selectedPlaylistIndex].year_split = cur;
-                                setConfig({ ...config, playlists: newPlaylists });
+                                newPlaylists[selectedPlaylistIndex] = {
+                                  ...newPlaylists[selectedPlaylistIndex],
+                                  year_split: cur,
+                                };
+                                const updatedConfig = { ...config, playlists: newPlaylists };
+                                setConfig(updatedConfig);
                                 invalidateCacheFor(selectedPlaylistIndex);
+                                fetchSinglePlaylistSummary(selectedPlaylistIndex, updatedConfig, true);
                               }}
                               style={{ padding: "2px 6px", fontSize: "0.65rem" }}
                               title="Reset to global setting"
@@ -1521,23 +1789,37 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
 
                             if (isRefreshingSingle && buckets.length === 0) {
                               return (
-                                <div style={{ display: "flex", alignItems: "center", gap: "6px", padding: "8px", fontSize: "0.75rem", color: "var(--text-secondary)" }}>
-                                  <svg
-                                    width="12"
-                                    height="12"
-                                    viewBox="0 0 24 24"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    strokeWidth="2.2"
-                                    strokeLinecap="round"
-                                    strokeLinejoin="round"
-                                    style={{ animation: "spin 1s linear infinite" }}
-                                  >
-                                    <path d="M23 4v6h-6" />
-                                    <path d="M1 20v-6h6" />
-                                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-                                  </svg>
-                                  <span>Analyzing year distribution...</span>
+                                <div style={{ display: "flex", flexDirection: "column", gap: "6px", padding: "10px", fontSize: "0.76rem", color: "var(--text-secondary)", background: "var(--card-bg-subtle, rgba(128,128,128,0.06))", borderRadius: "6px", border: "1px solid var(--border-color)" }}>
+                                  <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                                    <svg
+                                      width="12"
+                                      height="12"
+                                      viewBox="0 0 24 24"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      strokeWidth="2.2"
+                                      strokeLinecap="round"
+                                      strokeLinejoin="round"
+                                      style={{ animation: "spin 1s linear infinite", flexShrink: 0 }}
+                                    >
+                                      <path d="M23 4v6h-6" />
+                                      <path d="M1 20v-6h6" />
+                                      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+                                    </svg>
+                                    <span style={{ fontWeight: 500, color: "var(--text-primary)" }}>
+                                      Analyzing year distribution... {yearAnalysisProgress ? `${yearAnalysisProgress.current} / ${yearAnalysisProgress.total} (${yearAnalysisProgress.percent}%)` : ""}
+                                    </span>
+                                  </div>
+                                  {yearAnalysisProgress && (
+                                    <div style={{ width: "100%", background: "var(--border-color)", borderRadius: "4px", height: "4px", overflow: "hidden" }}>
+                                      <div style={{ width: `${yearAnalysisProgress.percent}%`, height: "100%", background: "var(--accent-purple)", transition: "width 0.15s ease" }} />
+                                    </div>
+                                  )}
+                                  {yearAnalysisProgress?.message && (
+                                    <div style={{ fontSize: "0.7rem", color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={yearAnalysisProgress.message}>
+                                      {yearAnalysisProgress.message}
+                                    </div>
+                                  )}
                                 </div>
                               );
                             }
@@ -1552,14 +1834,43 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
 
                             return (
                               <div style={{ display: "flex", flexDirection: "column", gap: "5px" }}>
+                                {isRefreshingSingle && (
+                                  <div style={{ display: "flex", flexDirection: "column", gap: "4px", padding: "6px 8px", fontSize: "0.72rem", color: "var(--text-secondary)", background: "var(--card-bg-subtle, rgba(128,128,128,0.06))", borderRadius: "5px", marginBottom: "4px", border: "1px solid var(--border-color)" }}>
+                                    <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                                      <svg
+                                        width="11"
+                                        height="11"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        strokeWidth="2.2"
+                                        strokeLinecap="round"
+                                        strokeLinejoin="round"
+                                        style={{ animation: "spin 1s linear infinite", flexShrink: 0 }}
+                                      >
+                                        <path d="M23 4v6h-6" />
+                                        <path d="M1 20v-6h6" />
+                                        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+                                      </svg>
+                                      <span>Refreshing year distribution... {yearAnalysisProgress ? `${yearAnalysisProgress.current} / ${yearAnalysisProgress.total} (${yearAnalysisProgress.percent}%)` : ""}</span>
+                                    </div>
+                                    {yearAnalysisProgress && (
+                                      <div style={{ width: "100%", background: "var(--border-color)", borderRadius: "3px", height: "3px", overflow: "hidden" }}>
+                                        <div style={{ width: `${yearAnalysisProgress.percent}%`, height: "100%", background: "var(--accent-purple)", transition: "width 0.15s ease" }} />
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
                                 {(() => {
-                                  const yearBuckets = buckets.filter((x) => x.bucket_type !== "unknown" && x.start_year !== null && x.end_year !== null);
+                                  const yearBuckets = buckets.filter((x) => x.bucket_type !== "unknown" && x.bucket_type !== "unknown_split" && x.start_year !== null && x.end_year !== null);
 
                                   return buckets.map((b) => {
                                     const isSelected = selectedBucketKey === b.key;
                                     const exceedsMax = b.track_count > maxLimit;
                                     const minLimit = activePlaylist.year_split?.min_tracks ?? config.minTracksPerYearPlaylist ?? 10;
-                                    const isUnknown = b.bucket_type === "unknown";
+                                    const isUnknown = b.bucket_type === "unknown" || b.bucket_type === "unknown_split";
+                                    const isSplitUnknown = b.bucket_type === "unknown_split";
+                                    const isSingleUnknown = b.bucket_type === "unknown";
                                     const isBelowMin = !isUnknown && (b.below_min_tracks ?? (b.track_count < minLimit));
                                     const yearIdx = !isUnknown && b.start_year !== null ? yearBuckets.findIndex((x) => x.key === b.key) : -1;
                                     const canMergeUp = yearIdx > 0;
@@ -1742,7 +2053,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                                             <div style={{ width: "22px", height: "22px" }} />
                                           )}
 
-                                          {/* Column 3: Split (10y to 5y or 5y to 1y) */}
+                                          {/* Column 3: Split (10y to 5y, 5y to 1y, or Unknown into equal parts) */}
                                           {b.bucket_type === "10y" && b.start_year !== null ? (
                                             <button
                                               type="button"
@@ -1752,10 +2063,14 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                                                 const newPlaylists = [...config.playlists];
                                                 const cur = newPlaylists[selectedPlaylistIndex].year_split!;
                                                 const split5 = Array.from(new Set([...(cur.split_5y || []), b.start_year!]));
-                                                newPlaylists[selectedPlaylistIndex].year_split = { ...cur, split_5y: split5 };
-                                                setConfig({ ...config, playlists: newPlaylists });
+                                                newPlaylists[selectedPlaylistIndex] = {
+                                                  ...newPlaylists[selectedPlaylistIndex],
+                                                  year_split: { ...cur, split_5y: split5 },
+                                                };
+                                                const updatedConfig = { ...config, playlists: newPlaylists };
+                                                setConfig(updatedConfig);
                                                 invalidateCacheFor(selectedPlaylistIndex);
-                                                setTimeout(() => fetchSinglePlaylistSummary(selectedPlaylistIndex), 100);
+                                                fetchSinglePlaylistSummary(selectedPlaylistIndex, updatedConfig, true);
                                               }}
                                               style={{
                                                 width: "22px",
@@ -1782,10 +2097,14 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                                                 const newPlaylists = [...config.playlists];
                                                 const cur = newPlaylists[selectedPlaylistIndex].year_split!;
                                                 const split1 = Array.from(new Set([...(cur.split_1y || []), b.start_year!]));
-                                                newPlaylists[selectedPlaylistIndex].year_split = { ...cur, split_1y: split1 };
-                                                setConfig({ ...config, playlists: newPlaylists });
+                                                newPlaylists[selectedPlaylistIndex] = {
+                                                  ...newPlaylists[selectedPlaylistIndex],
+                                                  year_split: { ...cur, split_1y: split1 },
+                                                };
+                                                const updatedConfig = { ...config, playlists: newPlaylists };
+                                                setConfig(updatedConfig);
                                                 invalidateCacheFor(selectedPlaylistIndex);
-                                                setTimeout(() => fetchSinglePlaylistSummary(selectedPlaylistIndex), 100);
+                                                fetchSinglePlaylistSummary(selectedPlaylistIndex, updatedConfig, true);
                                               }}
                                               style={{
                                                 width: "22px",
@@ -1807,11 +2126,90 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                                                 <circle cx="4" cy="18" r="1.5" fill="currentColor"/>
                                               </svg>
                                             </button>
+                                          ) : isSingleUnknown && b.track_count > 0 ? (
+                                            <button
+                                              type="button"
+                                              className="btn btn-secondary"
+                                              onClick={() => {
+                                                if (!config || selectedPlaylistIndex === null) return;
+                                                const newPlaylists = [...config.playlists];
+                                                const cur = newPlaylists[selectedPlaylistIndex].year_split!;
+                                                const partsToSplit = Math.max(2, Math.ceil(b.track_count / maxLimit));
+                                                newPlaylists[selectedPlaylistIndex] = {
+                                                  ...newPlaylists[selectedPlaylistIndex],
+                                                  year_split: {
+                                                    ...cur,
+                                                    split_unknown_parts: partsToSplit,
+                                                  },
+                                                };
+                                                const updatedConfig = { ...config, playlists: newPlaylists };
+                                                setConfig(updatedConfig);
+                                                invalidateCacheFor(selectedPlaylistIndex);
+                                                fetchSinglePlaylistSummary(selectedPlaylistIndex, updatedConfig, true);
+                                              }}
+                                              style={{
+                                                width: "22px",
+                                                height: "22px",
+                                                padding: 0,
+                                                display: "flex",
+                                                alignItems: "center",
+                                                justifyContent: "center",
+                                                borderRadius: "4px",
+                                              }}
+                                              title={`Split unknown tracks into ${Math.max(2, Math.ceil(b.track_count / maxLimit))} equal buckets (max ${maxLimit} tracks each)`}
+                                            >
+                                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                                                <rect x="3" y="3" width="8" height="18" rx="1.5"/>
+                                                <rect x="13" y="3" width="8" height="18" rx="1.5"/>
+                                              </svg>
+                                            </button>
+                                          ) : isSplitUnknown ? (
+                                            <button
+                                              type="button"
+                                              className="btn btn-secondary"
+                                              onClick={() => {
+                                                if (!config || selectedPlaylistIndex === null) return;
+                                                const newPlaylists = [...config.playlists];
+                                                const cur = newPlaylists[selectedPlaylistIndex].year_split!;
+                                                newPlaylists[selectedPlaylistIndex] = {
+                                                  ...newPlaylists[selectedPlaylistIndex],
+                                                  year_split: {
+                                                    ...cur,
+                                                    include_unknown: !cur.include_unknown,
+                                                  },
+                                                };
+                                                const updatedConfig = { ...config, playlists: newPlaylists };
+                                                setConfig(updatedConfig);
+                                                invalidateCacheFor(selectedPlaylistIndex);
+                                                fetchSinglePlaylistSummary(selectedPlaylistIndex, updatedConfig, true);
+                                              }}
+                                              style={{
+                                                width: "22px",
+                                                height: "22px",
+                                                padding: 0,
+                                                display: "flex",
+                                                alignItems: "center",
+                                                justifyContent: "center",
+                                                borderRadius: "4px",
+                                              }}
+                                              title={activePlaylist.year_split?.include_unknown ? "Ignore untagged songs" : "Include untagged songs as Unknown playlist"}
+                                            >
+                                              {activePlaylist.year_split?.include_unknown ? (
+                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--danger)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                                  <line x1="18" y1="6" x2="6" y2="18"></line>
+                                                  <line x1="6" y1="6" x2="18" y2="18"></line>
+                                                </svg>
+                                              ) : (
+                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--success)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                                  <polyline points="20 6 9 17 4 12"></polyline>
+                                                </svg>
+                                              )}
+                                            </button>
                                           ) : (
                                             <div style={{ width: "22px", height: "22px" }} />
                                           )}
 
-                                          {/* Column 4: Unmerge / Revert to Parent / Unknown Toggle */}
+                                          {/* Column 4: Unmerge / Revert to Parent / Unknown Toggle / Unknown Merge-Back */}
                                           {b.bucket_type === "custom" && b.start_year !== null && b.end_year !== null ? (
                                             <button
                                               type="button"
@@ -1844,10 +2242,14 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                                                 const cur = newPlaylists[selectedPlaylistIndex].year_split!;
                                                 const split5 = (cur.split_5y || []).filter((d) => d !== decade);
                                                 const split1 = (cur.split_1y || []).filter((h) => Math.floor(h / 10) * 10 !== decade);
-                                                newPlaylists[selectedPlaylistIndex].year_split = { ...cur, split_5y: split5, split_1y: split1 };
-                                                setConfig({ ...config, playlists: newPlaylists });
+                                                newPlaylists[selectedPlaylistIndex] = {
+                                                  ...newPlaylists[selectedPlaylistIndex],
+                                                  year_split: { ...cur, split_5y: split5, split_1y: split1 },
+                                                };
+                                                const updatedConfig = { ...config, playlists: newPlaylists };
+                                                setConfig(updatedConfig);
                                                 invalidateCacheFor(selectedPlaylistIndex);
-                                                setTimeout(() => fetchSinglePlaylistSummary(selectedPlaylistIndex), 100);
+                                                fetchSinglePlaylistSummary(selectedPlaylistIndex, updatedConfig, true);
                                               }}
                                               style={{
                                                 width: "22px",
@@ -1877,10 +2279,14 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                                                 const newPlaylists = [...config.playlists];
                                                 const cur = newPlaylists[selectedPlaylistIndex].year_split!;
                                                 const split1 = (cur.split_1y || []).filter((h) => h !== half);
-                                                newPlaylists[selectedPlaylistIndex].year_split = { ...cur, split_1y: split1 };
-                                                setConfig({ ...config, playlists: newPlaylists });
+                                                newPlaylists[selectedPlaylistIndex] = {
+                                                  ...newPlaylists[selectedPlaylistIndex],
+                                                  year_split: { ...cur, split_1y: split1 },
+                                                };
+                                                const updatedConfig = { ...config, playlists: newPlaylists };
+                                                setConfig(updatedConfig);
                                                 invalidateCacheFor(selectedPlaylistIndex);
-                                                setTimeout(() => fetchSinglePlaylistSummary(selectedPlaylistIndex), 100);
+                                                fetchSinglePlaylistSummary(selectedPlaylistIndex, updatedConfig, true);
                                               }}
                                               style={{
                                                 width: "22px",
@@ -1898,7 +2304,41 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                                                 <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
                                               </svg>
                                             </button>
-                                          ) : isUnknown ? (
+                                          ) : isSplitUnknown ? (
+                                            <button
+                                              type="button"
+                                              className="btn btn-secondary"
+                                              onClick={() => {
+                                                if (!config || selectedPlaylistIndex === null) return;
+                                                const newPlaylists = [...config.playlists];
+                                                const cur = { ...newPlaylists[selectedPlaylistIndex].year_split! };
+                                                delete cur.split_unknown_parts;
+                                                newPlaylists[selectedPlaylistIndex] = {
+                                                  ...newPlaylists[selectedPlaylistIndex],
+                                                  year_split: cur,
+                                                };
+                                                const updatedConfig = { ...config, playlists: newPlaylists };
+                                                setConfig(updatedConfig);
+                                                invalidateCacheFor(selectedPlaylistIndex);
+                                                fetchSinglePlaylistSummary(selectedPlaylistIndex, updatedConfig, true);
+                                              }}
+                                              style={{
+                                                width: "22px",
+                                                height: "22px",
+                                                padding: 0,
+                                                display: "flex",
+                                                alignItems: "center",
+                                                justifyContent: "center",
+                                                borderRadius: "4px",
+                                              }}
+                                              title="Merge back to single Unknown Year bucket"
+                                            >
+                                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                                                <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                                                <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                                              </svg>
+                                            </button>
+                                          ) : isSingleUnknown ? (
                                             <button
                                               type="button"
                                               className="btn btn-secondary"
@@ -1906,13 +2346,17 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                                                 if (!config || selectedPlaylistIndex === null) return;
                                                 const newPlaylists = [...config.playlists];
                                                 const cur = newPlaylists[selectedPlaylistIndex].year_split!;
-                                                newPlaylists[selectedPlaylistIndex].year_split = {
-                                                  ...cur,
-                                                  include_unknown: !cur.include_unknown,
+                                                newPlaylists[selectedPlaylistIndex] = {
+                                                  ...newPlaylists[selectedPlaylistIndex],
+                                                  year_split: {
+                                                    ...cur,
+                                                    include_unknown: !cur.include_unknown,
+                                                  },
                                                 };
-                                                setConfig({ ...config, playlists: newPlaylists });
+                                                const updatedConfig = { ...config, playlists: newPlaylists };
+                                                setConfig(updatedConfig);
                                                 invalidateCacheFor(selectedPlaylistIndex);
-                                                setTimeout(() => fetchSinglePlaylistSummary(selectedPlaylistIndex), 100);
+                                                fetchSinglePlaylistSummary(selectedPlaylistIndex, updatedConfig, true);
                                               }}
                                               style={{
                                                 width: "22px",

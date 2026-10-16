@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   AudioTrack,
+  DeleteDuplicatesResult,
   DuplicateAnalysisProgressPayload,
   DuplicateAnalysisReport,
   DuplicateGroup,
@@ -73,6 +74,8 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
   const [tierFilter, setTierFilter] = useState<string>("all");
   const [pruneStatus, setPruneStatus] = useState<string>("");
   const [isPruning, setIsPruning] = useState<boolean>(false);
+  const [isDeleting, setIsDeleting] = useState<boolean>(false);
+  const [actionStatus, setActionStatus] = useState<string>("");
 
   useEffect(() => {
     if (!isOpen) return;
@@ -106,8 +109,16 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
       if (unlisten) {
         unlisten();
       }
+      invoke("cancel_any_task", { taskId: "duplicate_analysis" }).catch(() => {});
     };
   }, [isOpen]);
+
+  const handleClose = () => {
+    if (isLoading) {
+      invoke("cancel_any_task", { taskId: "duplicate_analysis" }).catch(() => {});
+    }
+    onClose();
+  };
 
   const runAnalysis = async (acousticOverride?: boolean, maxSecsOverride?: number) => {
     if (!configPath) return;
@@ -119,6 +130,7 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
       const useAcoustic = acousticOverride !== undefined ? acousticOverride : computeAcoustic;
       const maxSecs = maxSecsOverride !== undefined ? maxSecsOverride : maxAcousticSecs;
       const res = await invoke<DuplicateAnalysisReport>("analyze_playlist_duplicates", {
+        taskId: "duplicate_analysis",
         configPath,
         sourceDirOverride: null,
         playlistIndex: playlistIndex,
@@ -167,6 +179,93 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
       await invoke("reveal_in_finder", { filePath });
     } catch (e) {
       alert("Error revealing file: " + e);
+    }
+  };
+
+  const handleDeleteAllDuplicates = async () => {
+    if (!report || report.redundant_files_count === 0 || isDeleting) return;
+
+    const toDelete: string[] = [];
+    let totalBytes = 0;
+    for (const group of report.duplicate_groups) {
+      for (const track of group.tracks) {
+        if (!track.is_winner) {
+          toDelete.push(track.file_path);
+          totalBytes += track.size_bytes;
+        }
+      }
+    }
+
+    if (toDelete.length === 0) return;
+
+    const confirmMsg = `Permanently delete all ${toDelete.length} redundant duplicate copies (${formatSize(totalBytes)}) from disk?\n\nThe kept winner of each group will be preserved. This operation cannot be undone.`;
+    if (!window.confirm(confirmMsg)) return;
+
+    setIsDeleting(true);
+    setActionStatus("");
+    try {
+      const res = await invoke<DeleteDuplicatesResult>("delete_duplicate_files", {
+        filePaths: toDelete,
+      });
+
+      if (res.errors.length > 0) {
+        alert(
+          `Deleted ${res.deleted_count} duplicate files (${formatSize(res.freed_bytes)} freed), but encountered ${res.failed_count} errors:\n\n${res.errors.slice(0, 5).join("\n")}`
+        );
+      }
+
+      setActionStatus(`Deleted ${res.deleted_count} duplicate file(s) and freed ${formatSize(res.freed_bytes)} of disk space.`);
+      await runAnalysis();
+    } catch (e) {
+      alert(`Error deleting duplicates: ${e}`);
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  const handleKeepThisAndDeleteOthers = async (group: DuplicateGroup, keepTrack: DuplicateTrackEntry) => {
+    if (isDeleting) return;
+    const otherTracks = group.tracks.filter((t) => t.file_path !== keepTrack.file_path);
+    if (otherTracks.length === 0) return;
+
+    const fileName = keepTrack.file_path.split(/[/\\]/).pop() || keepTrack.title;
+    const otherFilesList = otherTracks
+      .map((t) => `• ${t.file_path.split(/[/\\]/).pop() || t.title} (${formatSize(t.size_bytes)})`)
+      .join("\n");
+    const otherBytes = otherTracks.reduce((sum, t) => sum + t.size_bytes, 0);
+
+    const confirmMsg = `Keep this track and permanently delete the other ${otherTracks.length} duplicate copy(ies) from disk?\n\nKEPT:\n• ${fileName}\n\nDELETE FROM DISK (${formatSize(otherBytes)} freed):\n${otherFilesList}`;
+    if (!window.confirm(confirmMsg)) return;
+
+    setIsDeleting(true);
+    setActionStatus("");
+    try {
+      const filePaths = otherTracks.map((t) => t.file_path);
+      const res = await invoke<DeleteDuplicatesResult>("delete_duplicate_files", {
+        filePaths,
+      });
+
+      if (res.errors.length > 0) {
+        alert(`Failed to delete some files:\n\n${res.errors.join("\n")}`);
+      }
+
+      setActionStatus(`Kept "${fileName}" and deleted ${res.deleted_count} duplicate file(s) (${formatSize(res.freed_bytes)} freed).`);
+
+      // Immediately remove this group from the report view
+      setReport((prev) => {
+        if (!prev) return null;
+        const remainingGroups = prev.duplicate_groups.filter((g) => g.group_id !== group.group_id);
+        return {
+          ...prev,
+          duplicate_groups: remainingGroups,
+          redundant_files_count: Math.max(0, prev.redundant_files_count - otherTracks.length),
+          redundant_bytes: Math.max(0, prev.redundant_bytes - otherBytes),
+        };
+      });
+    } catch (e) {
+      alert(`Error deleting duplicate files: ${e}`);
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -262,7 +361,7 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
         zIndex: 1100,
         padding: "20px",
       }}
-      onClick={onClose}
+      onClick={handleClose}
     >
       <div
         className="card"
@@ -428,11 +527,41 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
               </svg>
             </button>
 
+            {report && report.redundant_files_count > 0 && (
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={handleDeleteAllDuplicates}
+                disabled={isLoading || isDeleting}
+                style={{
+                  width: "30px",
+                  height: "30px",
+                  padding: 0,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  borderRadius: "6px",
+                  backgroundColor: "rgba(239, 68, 68, 0.15)",
+                  border: "1px solid var(--danger)",
+                  color: "var(--danger)",
+                  cursor: isDeleting ? "not-allowed" : "pointer",
+                }}
+                title={`Delete all dups found: Permanently delete all ${report.redundant_files_count} redundant duplicate copies (${formatSize(report.redundant_bytes)}) from disk, preserving the chosen winner of each group`}
+              >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="3 6 5 6 21 6"></polyline>
+                  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                  <line x1="10" y1="11" x2="10" y2="17"></line>
+                  <line x1="14" y1="11" x2="14" y2="17"></line>
+                </svg>
+              </button>
+            )}
+
             <button
               type="button"
               className="btn btn-secondary"
               onClick={() => runAnalysis()}
-              disabled={isLoading}
+              disabled={isLoading || isDeleting}
               style={{
                 width: "30px",
                 height: "30px",
@@ -464,7 +593,7 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
             <button
               type="button"
               className="btn btn-secondary"
-              onClick={onClose}
+              onClick={handleClose}
               style={{
                 width: "30px",
                 height: "30px",
@@ -534,8 +663,35 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
                 padding: "8px 12px",
               }}
             >
-              <div style={{ fontSize: "0.7rem", color: "var(--text-secondary)", textTransform: "uppercase", fontWeight: 600 }}>
-                Skipped Redundant Copies
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ fontSize: "0.7rem", color: "var(--text-secondary)", textTransform: "uppercase", fontWeight: 600 }}>
+                  Skipped Redundant Copies
+                </span>
+                {report.redundant_files_count > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleDeleteAllDuplicates}
+                    disabled={isLoading || isDeleting}
+                    style={{
+                      background: "rgba(239, 68, 68, 0.15)",
+                      border: "1px solid var(--danger)",
+                      color: "var(--danger)",
+                      borderRadius: "4px",
+                      cursor: isDeleting ? "not-allowed" : "pointer",
+                      padding: "2px 5px",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      lineHeight: 1,
+                    }}
+                    title={`Delete all duplicates found: Permanently delete all ${report.redundant_files_count} redundant duplicate copies (${formatSize(report.redundant_bytes)}) from disk, preserving the kept winner of each group`}
+                  >
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="3 6 5 6 21 6"></polyline>
+                      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                    </svg>
+                  </button>
+                )}
               </div>
               <div style={{ fontSize: "1.05rem", fontWeight: 700, color: "var(--text-primary)", marginTop: "2px" }}>
                 {report.redundant_files_count} files ({formatSize(report.redundant_bytes)})
@@ -559,6 +715,40 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
                 {report.cache_stale_pruned > 0 ? ` (${report.cache_stale_pruned} pruned)` : ""}
               </div>
             </div>
+          </div>
+        )}
+
+        {actionStatus && (
+          <div
+            style={{
+              fontSize: "0.78rem",
+              padding: "6px 12px",
+              borderRadius: "6px",
+              backgroundColor: "rgba(34, 197, 94, 0.12)",
+              border: "1px solid rgba(34, 197, 94, 0.3)",
+              color: "var(--success)",
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+            }}
+          >
+            <span>{actionStatus}</span>
+            <button
+              type="button"
+              onClick={() => setActionStatus("")}
+              style={{
+                background: "none",
+                border: "none",
+                color: "var(--text-secondary)",
+                cursor: "pointer",
+                padding: "0 4px",
+                fontSize: "0.85rem",
+                lineHeight: 1,
+              }}
+              title="Dismiss notification"
+            >
+              ✕
+            </button>
           </div>
         )}
 
@@ -1009,7 +1199,7 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
                           <th style={{ width: "125px", padding: "6px 8px", textAlign: "right" }}>Format</th>
                           <th style={{ width: "65px", padding: "6px 8px", textAlign: "right" }}>Duration</th>
                           <th style={{ width: "75px", padding: "6px 8px", textAlign: "right" }}>Size</th>
-                          <th style={{ width: "36px", padding: "6px 8px", textAlign: "center" }}></th>
+                          <th style={{ width: "68px", padding: "6px 8px", textAlign: "center" }}>Actions</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1018,10 +1208,10 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
                           return (
                             <tr
                               key={tIdx}
+                              className={t.is_winner ? "row-winner" : undefined}
+                              data-winner={t.is_winner}
                               style={{
                                 borderBottom: tIdx < group.tracks.length - 1 ? "1px solid var(--border-color)" : "none",
-                                backgroundColor: t.is_winner ? "rgba(34, 197, 94, 0.08)" : "transparent",
-                                transition: "background-color 0.15s ease",
                               }}
                             >
                               {/* 1. Play Button */}
@@ -1206,27 +1396,54 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
                                 {formatSize(t.size_bytes)}
                               </td>
 
-                              {/* 8. Finder Button */}
-                              <td style={{ padding: "6px 8px", textAlign: "center", verticalAlign: "middle" }}>
-                                <button
-                                  type="button"
-                                  className="btn btn-secondary"
-                                  onClick={() => handleRevealInFinder(t.file_path)}
-                                  style={{
-                                    width: "24px",
-                                    height: "24px",
-                                    padding: 0,
-                                    display: "inline-flex",
-                                    alignItems: "center",
-                                    justifyContent: "center",
-                                    borderRadius: "4px",
-                                  }}
-                                  title={`Reveal in Finder: ${t.file_path}`}
-                                >
-                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
-                                  </svg>
-                                </button>
+                              {/* 8. Actions: Keep this & delete others, Reveal in Finder */}
+                              <td style={{ padding: "6px 8px", textAlign: "center", verticalAlign: "middle", whiteSpace: "nowrap" }}>
+                                <div style={{ display: "inline-flex", alignItems: "center", gap: "5px" }}>
+                                  <button
+                                    type="button"
+                                    className="btn btn-secondary"
+                                    onClick={() => handleKeepThisAndDeleteOthers(group, t)}
+                                    disabled={isDeleting || group.tracks.length <= 1}
+                                    style={{
+                                      width: "24px",
+                                      height: "24px",
+                                      padding: 0,
+                                      display: "inline-flex",
+                                      alignItems: "center",
+                                      justifyContent: "center",
+                                      borderRadius: "4px",
+                                      backgroundColor: t.is_winner ? "rgba(34, 197, 94, 0.18)" : "rgba(139, 92, 246, 0.12)",
+                                      borderColor: t.is_winner ? "rgba(34, 197, 94, 0.45)" : "rgba(139, 92, 246, 0.35)",
+                                      color: t.is_winner ? "var(--success)" : "var(--accent-purple)",
+                                      cursor: isDeleting ? "not-allowed" : "pointer",
+                                    }}
+                                    title={`Keep this, and delete others: Keep "${fileName}" and permanently delete the other ${group.tracks.length - 1} duplicate copy(ies) in this group from disk`}
+                                  >
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                      <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+                                      <polyline points="22 4 12 14.01 9 11.01" />
+                                    </svg>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="btn btn-secondary"
+                                    onClick={() => handleRevealInFinder(t.file_path)}
+                                    style={{
+                                      width: "24px",
+                                      height: "24px",
+                                      padding: 0,
+                                      display: "inline-flex",
+                                      alignItems: "center",
+                                      justifyContent: "center",
+                                      borderRadius: "4px",
+                                    }}
+                                    title={`Reveal in Finder: ${t.file_path}`}
+                                  >
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                                      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                                    </svg>
+                                  </button>
+                                </div>
                               </td>
                             </tr>
                           );

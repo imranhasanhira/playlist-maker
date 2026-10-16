@@ -4,6 +4,20 @@ import { SanitizeItem, HiddenFileItem, MetadataSanitizeItem, FontIssueItem } fro
 import { formatSize } from "../utils/formatters";
 import { ConfirmModal } from "../components/common/ConfirmModal";
 
+type ExecutionReport = {
+  success_count: number;
+  failure_count: number;
+  errors: string[];
+};
+
+type UnifiedScanResult = {
+  filename_items: SanitizeItem[];
+  metadata_items: MetadataSanitizeItem[];
+  font_issue_items: FontIssueItem[];
+  hidden_items: HiddenFileItem[];
+  total_scanned_files: number;
+};
+
 type SanitizerViewProps = {
   formats: string;
   stripPhrases: string[];
@@ -175,11 +189,16 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
     if (selectedFontIssuePaths.size === 0) return;
     setIsApplyingOption1(true);
     try {
-      const count = await invoke<number>("apply_font_issue_option1", {
+      const res = await invoke<ExecutionReport>("apply_font_issue_option1", {
         filePaths: Array.from(selectedFontIssuePaths),
       });
-      alert(`Successfully updated ID3v2.3 UTF-16 tags for ${count} file(s).`);
-      handleScanFontIssues(scanFolder);
+      if (res.failure_count > 0) {
+        alert(`Updated ID3v2.3 UTF-16 tags for ${res.success_count} file(s). Warning: ${res.failure_count} file(s) failed:\n${res.errors.slice(0, 5).join("\n")}`);
+      } else {
+        alert(`Successfully updated ID3v2.3 UTF-16 tags for ${res.success_count} file(s)!`);
+      }
+      setFontIssueItems((prev) => prev.filter((i) => !selectedFontIssuePaths.has(i.file_path)));
+      setSelectedFontIssuePaths(new Set());
     } catch (e) {
       alert("Error updating tags: " + e);
     } finally {
@@ -187,19 +206,24 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
     }
   };
 
-  const handleApplyTransliterate = async (targetType: "tags" | "filenames") => {
+  const handleApplyTransliterate = async (targetType: "both" | "tags" | "filenames") => {
     if (selectedFontIssuePaths.size === 0) return;
     setIsApplyingOption2(true);
     try {
-      const count = await invoke<number>("apply_font_issue_option2", {
+      const res = await invoke<ExecutionReport>("apply_font_issue_option2", {
         filePaths: Array.from(selectedFontIssuePaths),
         targetType,
       });
-      const msg = targetType === "filenames"
-        ? `Successfully transliterated & renamed ${count} file(s) on disk to Romanized Banglish.`
-        : `Successfully transliterated ID3 tags for ${count} file(s) to Romanized Banglish.`;
-      alert(msg);
-      handleScanFontIssues(scanFolder);
+      const typeLabel = targetType === "both" ? "both tags & filenames" : targetType === "filenames" ? "filenames" : "tags";
+      if (res.failure_count > 0) {
+        alert(`Transliterated ${typeLabel} for ${res.success_count} file(s). Warning: ${res.failure_count} file(s) failed:\n${res.errors.slice(0, 5).join("\n")}`);
+      } else {
+        alert(`Successfully transliterated ${typeLabel} for ${res.success_count} file(s) to Romanized Banglish!`);
+      }
+      if (targetType === "both" || targetType === "filenames") {
+        setFontIssueItems((prev) => prev.filter((i) => !selectedFontIssuePaths.has(i.file_path)));
+        setSelectedFontIssuePaths(new Set());
+      }
     } catch (e) {
       alert("Error applying transliteration: " + e);
     } finally {
@@ -207,12 +231,40 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
     }
   };
 
-  const handleScanAll = (folder: string) => {
+  const handleScanAll = async (folder: string) => {
     if (!folder) return;
-    handleScanFilenames(folder);
-    handleScanHidden(folder);
-    handleScanMetadata(folder);
-    handleScanFontIssues(folder);
+    setIsScanningFilenames(true);
+    setIsScanningHidden(true);
+    setIsScanningMetadata(true);
+    setIsScanningFontIssues(true);
+    try {
+      const formatsList = formats.split(",").map((f) => f.trim());
+      const activePhrases = stripPhrases.filter((p) => !uncheckedPhrases.has(p));
+      const taskId = `unified_scan_${Date.now()}`;
+      const promise = invoke<UnifiedScanResult>("scan_all_unified", {
+        taskId,
+        folder,
+        formats: formatsList,
+        stripPhrases: activePhrases,
+      });
+      addBackgroundTask(taskId, "Unified Library Scan (Single Pass)", promise);
+      const res = await promise;
+      setSanitizeItems(res.filename_items);
+      setSelectedRenamePaths(new Set(res.filename_items.map((i) => i.original_path)));
+      setMetadataItems(res.metadata_items);
+      setSelectedMetadataIndices(new Set(res.metadata_items.map((_, idx) => idx)));
+      setFontIssueItems(res.font_issue_items);
+      setSelectedFontIssuePaths(new Set(res.font_issue_items.map((i) => i.file_path)));
+      setHiddenItems(res.hidden_items);
+      setSelectedDeletePaths(new Set(res.hidden_items.map((i) => i.file_path)));
+    } catch (e) {
+      alert("Error during unified scan: " + e);
+    } finally {
+      setIsScanningFilenames(false);
+      setIsScanningHidden(false);
+      setIsScanningMetadata(false);
+      setIsScanningFontIssues(false);
+    }
   };
 
   const handleToggleRenameSelect = (path: string) => {
@@ -312,11 +364,16 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
     const taskId = `rename_${Date.now()}`;
     setIsRenaming(true);
     try {
-      const promise = invoke("execute_sanitizer", { taskId, items: itemsToRename });
+      const promise = invoke<ExecutionReport>("execute_sanitizer", { taskId, items: itemsToRename });
       addBackgroundTask(taskId, `Sanitize ${itemsToRename.length} filenames`, promise);
-      await promise;
-      alert(`Successfully sanitized ${itemsToRename.length} files!`);
-      handleScanFilenames(scanFolder);
+      const res = await promise;
+      if (res.failure_count > 0) {
+        alert(`Renamed ${res.success_count} file(s). Warning: ${res.failure_count} file(s) failed:\n${res.errors.slice(0, 5).join("\n")}`);
+      } else {
+        alert(`Successfully sanitized & renamed ${res.success_count} file(s)!`);
+      }
+      setSanitizeItems(sanitizeItems.filter((i) => !selectedRenamePaths.has(i.original_path)));
+      setSelectedRenamePaths(new Set());
     } catch (e) {
       alert("Error executing sanitization: " + e);
     } finally {
@@ -340,11 +397,16 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
     const taskId = `delete_${Date.now()}`;
     setIsDeleting(true);
     try {
-      const promise = invoke("delete_hidden", { taskId, filePaths: Array.from(selectedDeletePaths) });
+      const promise = invoke<ExecutionReport>("delete_hidden", { taskId, filePaths: Array.from(selectedDeletePaths) });
       addBackgroundTask(taskId, `Delete ${selectedDeletePaths.size} hidden files`, promise);
-      await promise;
-      alert(`Successfully deleted ${selectedDeletePaths.size} hidden files!`);
-      handleScanHidden(scanFolder);
+      const res = await promise;
+      if (res.failure_count > 0) {
+        alert(`Deleted ${res.success_count} file(s). Warning: ${res.failure_count} file(s) failed:\n${res.errors.slice(0, 5).join("\n")}`);
+      } else {
+        alert(`Successfully deleted ${res.success_count} hidden file(s)!`);
+      }
+      setHiddenItems(hiddenItems.filter((i) => !selectedDeletePaths.has(i.file_path)));
+      setSelectedDeletePaths(new Set());
     } catch (e) {
       alert("Error deleting hidden files: " + e);
     } finally {
@@ -370,11 +432,16 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
     const taskId = `clean_metadata_${Date.now()}`;
     setIsCleaningMetadata(true);
     try {
-      const promise = invoke("execute_metadata_sanitizer", { taskId, items: itemsToClean });
+      const promise = invoke<ExecutionReport>("execute_metadata_sanitizer", { taskId, items: itemsToClean });
       addBackgroundTask(taskId, `Clean tags of ${itemsToClean.length} files`, promise);
-      await promise;
-      alert("Metadata tags cleaned successfully!");
-      handleScanMetadata(scanFolder);
+      const res = await promise;
+      if (res.failure_count > 0) {
+        alert(`Cleaned ${res.success_count} tag field(s). Warning: ${res.failure_count} field(s) failed:\n${res.errors.slice(0, 5).join("\n")}`);
+      } else {
+        alert(`Successfully cleaned ${res.success_count} metadata tag field(s)!`);
+      }
+      setMetadataItems(metadataItems.filter((_, idx) => !selectedMetadataIndices.has(idx)));
+      setSelectedMetadataIndices(new Set());
     } catch (e) {
       alert("Error cleaning metadata tags: " + e);
     } finally {
@@ -697,13 +764,22 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
                   {isApplyingOption2 ? "Applying..." : "Transliterate Tags to Banglish"}
                 </button>
                 <button
-                  className="btn btn-primary"
+                  className="btn btn-secondary"
                   onClick={() => handleApplyTransliterate("filenames")}
                   disabled={selectedFontIssuePaths.size === 0 || isApplyingOption2 || isScanningFontIssues}
                   style={{ padding: "6px 12px", fontSize: "0.82rem" }}
                   title="Transliterates Bangla script in physical file names on disk to clean phonetic Romanized Banglish (ASCII)"
                 >
                   {isApplyingOption2 ? "Applying..." : "Transliterate Filenames to Banglish"}
+                </button>
+                <button
+                  className="btn btn-primary"
+                  onClick={() => handleApplyTransliterate("both")}
+                  disabled={selectedFontIssuePaths.size === 0 || isApplyingOption2 || isScanningFontIssues}
+                  style={{ padding: "6px 12px", fontSize: "0.82rem" }}
+                  title="Transliterates Bangla script in both ID3 metadata tags AND physical filenames on disk to clean phonetic Romanized Banglish (ASCII), fully resolving font issues"
+                >
+                  {isApplyingOption2 ? "Applying..." : "Transliterate Both (Tags & Filenames)"}
                 </button>
               </>
             )}
@@ -804,7 +880,7 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
                             />
                           </td>
                           <td>
-                            <div style={{ fontWeight: 600, color: "var(--text-secondary)" }}>
+                            <div style={{ fontWeight: 600, color: "var(--text-primary)" }}>
                               {item.file_path.split("/").pop()}
                             </div>
                             <div className="text-secondary" style={{ fontSize: "0.75rem", fontFamily: "var(--font-mono)" }}>
@@ -924,7 +1000,7 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
                             />
                           </td>
                           <td>
-                            <div style={{ fontWeight: 600, color: "var(--text-secondary)" }}>{item.file_name}</div>
+                            <div style={{ fontWeight: 600, color: "var(--text-primary)" }}>{item.file_name}</div>
                             <div className="text-secondary" style={{ fontSize: "0.75rem", fontFamily: "var(--font-mono)" }}>
                               {item.relative_path}
                             </div>

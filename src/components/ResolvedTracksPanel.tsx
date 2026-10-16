@@ -254,11 +254,12 @@ export const ResolvedTracksPanel: React.FC<ResolvedTracksPanelProps> = ({
                 return (
                   <tr
                     key={trackIdx}
+                    className={isSelected ? "selected" : undefined}
+                    data-selected={isSelected}
                     onClick={() => onSelectTrack && onSelectTrack(track)}
                     title={track.file_path}
                     style={{
                       cursor: onSelectTrack ? "pointer" : "default",
-                      backgroundColor: isSelected ? "var(--bg-tertiary)" : undefined,
                       borderLeft: isSelected ? "3px solid var(--accent-purple)" : "none",
                     }}
                   >
