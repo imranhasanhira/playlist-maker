@@ -448,7 +448,7 @@ tr:hover td {
   justify-content: space-between;
   padding: 0 24px;
   box-shadow: 0 -4px 10px rgba(0, 0, 0, 0.3);
-  z-index: 100;
+  z-index: 1500;
 }
 
 .player-track-info {

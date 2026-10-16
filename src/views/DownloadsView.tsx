@@ -11,6 +11,7 @@ import {
   DownloadProgressPayload,
   SystemBinariesStatus,
   PlaylistMetadata,
+  ReconcilePlaylistReport,
 } from "../types";
 
 
@@ -215,6 +216,32 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
             return j;
           })
         );
+
+        if (job_id) {
+          const match = job_id.match(/^dl_([^_]+)/);
+          const entryId = match ? match[1] : null;
+          if (entryId) {
+            setEntries((prev) =>
+              prev.map((e) => {
+                if (e.id === entryId) {
+                  let updated = false;
+                  let newTotal = e.total_songs;
+                  let newCount = e.songs_on_disk;
+                  if (total_items && total_items > 0 && e.total_songs !== total_items) {
+                    newTotal = total_items;
+                    updated = true;
+                  }
+                  if (current_item && current_item > 1 && current_item - 1 > e.songs_on_disk) {
+                    newCount = current_item - 1;
+                    updated = true;
+                  }
+                  return updated ? { ...e, total_songs: newTotal, songs_on_disk: newCount } : e;
+                }
+                return e;
+              })
+            );
+          }
+        }
       });
     };
 
@@ -559,7 +586,30 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
 
   const monitorJobCompletion = (targetJobId: string, targetEntry: DownloadEntry): Promise<"completed" | "cancelled" | "failed"> => {
     return new Promise((resolve) => {
+      let lastDiskPoll = 0;
       const checkInterval = setInterval(async () => {
+        const now = Date.now();
+        // Periodically refresh songs on disk every 1.5s while download runs
+        if (now - lastDiskPoll > 1500) {
+          lastDiskPoll = now;
+          try {
+            const diskCount = await invoke<number>("dl_count_songs_on_disk", {
+              outputDir: targetEntry.output_dir,
+              playlistTitle: targetEntry.playlist_title || targetEntry.name,
+              formats: [],
+            });
+            setEntries((prev) =>
+              prev.map((e) =>
+                e.id === targetEntry.id && e.songs_on_disk < diskCount
+                  ? { ...e, songs_on_disk: diskCount }
+                  : e
+              )
+            );
+          } catch {
+            // ignore background disk check race conditions
+          }
+        }
+
         setJobs((latestJobs) => {
           const currentJob = latestJobs.find((j) => j.id === targetJobId);
           if (currentJob && currentJob.status !== "running") {
@@ -615,6 +665,180 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
     } catch (e) {
       console.error("Error cancelling job:", e);
     }
+  };
+
+  // Reconcile single entry archive with disk
+  const [reconcilingEntryIds, setReconcilingEntryIds] = useState<string[]>([]);
+  const [isReconcilingAll, setIsReconcilingAll] = useState<boolean>(false);
+
+  const handleReconcileEntry = async (targetEntry: DownloadEntry) => {
+    setReconcilingEntryIds((prev) => [...prev, targetEntry.id]);
+    setConsoleTab("logs");
+
+    const jobId = `dl_${targetEntry.id}_${Date.now()}`;
+    const audioFormat = targetEntry.audio_format || globalSettings.default_audio_format;
+    const useArchive = targetEntry.use_archive !== null ? targetEntry.use_archive : globalSettings.default_use_archive;
+    const ignoreErrors = targetEntry.ignore_errors !== null ? targetEntry.ignore_errors : globalSettings.default_ignore_errors;
+
+    // Check if an existing job for this entry already had logs to create a clear gap
+    const existingJob = jobs.slice().reverse().find((j) => j.id.startsWith(`dl_${targetEntry.id}`));
+    const initialLogs: string[] = [];
+    if (existingJob && existingJob.logs.length > 0) {
+      initialLogs.push("", "--------------------------------------------------------------------------------", "");
+    }
+
+    const newJob: DownloadJob = {
+      id: jobId,
+      url: targetEntry.url,
+      output_dir: targetEntry.output_dir,
+      audio_format: audioFormat,
+      use_archive: useArchive,
+      archive_path: globalSettings.archive_path,
+      ignore_errors: ignoreErrors,
+      status: "running",
+      progress: 0,
+      logs: initialLogs,
+      start_time: Date.now(),
+      title: targetEntry.name,
+    };
+
+    setJobs((prev) => [...prev, newJob]);
+
+    try {
+      const report = await invoke<ReconcilePlaylistReport>("dl_reconcile_playlist_archive", {
+        jobId,
+        url: targetEntry.url,
+        outputDir: targetEntry.output_dir,
+        playlistTitle: targetEntry.playlist_title || targetEntry.name,
+        archivePath: globalSettings.archive_path,
+      });
+
+      setJobs((prev) =>
+        prev.map((j) => (j.id === jobId ? { ...j, status: "completed", progress: 100 } : j))
+      );
+
+      // Refresh metadata and songs on disk count
+      await handleRefreshMetadata(targetEntry);
+
+      if (report.missing_count > 0) {
+        alert(
+          `Reconciliation Complete for "${report.playlist_title}":\n\n` +
+          `• Total Online: ${report.total_online}\n` +
+          `• Verified on Disk: ${report.matched_on_disk}\n` +
+          `• Missing from Disk: ${report.missing_count}\n` +
+          `• Pruned from Archive: ${report.pruned_from_archive}\n\n` +
+          `Click "Download" to fetch the ${report.missing_count} missing track(s)!`
+        );
+      } else {
+        alert(
+          `Reconciliation Complete for "${report.playlist_title}":\n\n` +
+          `All ${report.matched_on_disk} track(s) are already present on disk.\n` +
+          `The archive has been verified and fully synchronized.`
+        );
+      }
+    } catch (e) {
+      console.error("Error reconciling archive:", e);
+      setJobs((prev) =>
+        prev.map((j) => (j.id === jobId ? { ...j, status: "failed", logs: [...j.logs, `❌ Reconcile Error: ${e}`] } : j))
+      );
+      alert(`Error reconciling archive: ${e}`);
+    } finally {
+      setReconcilingEntryIds((prev) => prev.filter((id) => id !== targetEntry.id));
+    }
+  };
+
+  const handleReconcileAllPlaylists = async () => {
+    if (entries.length === 0) {
+      alert("No playlist entries available to reconcile.");
+      return;
+    }
+
+    if (!confirm(`Reconcile archives for all ${entries.length} playlist entries?\n\nThis will scan local folders for each playlist, verify existing songs against YouTube, and prune missing songs from the archive so Download will fetch only the missing tracks.`)) {
+      return;
+    }
+
+    setIsReconcilingAll(true);
+    setConsoleTab("logs");
+
+    const globalJobId = selectedEntry
+      ? `dl_${selectedEntry.id}_reconcile_all_${Date.now()}`
+      : `dl_reconcile_all_${Date.now()}`;
+
+    const newJob: DownloadJob = {
+      id: globalJobId,
+      url: selectedEntry?.url || "",
+      output_dir: selectedEntry?.output_dir || globalSettings.default_output_dir,
+      audio_format: globalSettings.default_audio_format,
+      use_archive: globalSettings.default_use_archive,
+      archive_path: globalSettings.archive_path,
+      ignore_errors: globalSettings.default_ignore_errors,
+      status: "running",
+      progress: 0,
+      logs: [
+        "",
+        "================================================================================",
+        `🔄 RECONCILING ARCHIVES FOR ALL PLAYLISTS (${entries.length} total)`,
+        "================================================================================",
+      ],
+      start_time: Date.now(),
+      title: "All Playlists Archive Reconciliation",
+    };
+
+    setJobs((prev) => [...prev, newJob]);
+
+    let totalMissingAcrossAll = 0;
+    let reconciledCount = 0;
+
+    for (const entry of entries) {
+      try {
+        const report = await invoke<ReconcilePlaylistReport>("dl_reconcile_playlist_archive", {
+          jobId: globalJobId,
+          url: entry.url,
+          outputDir: entry.output_dir,
+          playlistTitle: entry.playlist_title || entry.name,
+          archivePath: globalSettings.archive_path,
+        });
+        totalMissingAcrossAll += report.missing_count;
+        reconciledCount++;
+      } catch (e) {
+        setJobs((prev) =>
+          prev.map((j) => (j.id === globalJobId ? { ...j, logs: [...j.logs, `❌ Failed to reconcile "${entry.name}": ${e}`] } : j))
+        );
+      }
+    }
+
+    setJobs((prev) =>
+      prev.map((j) =>
+        j.id === globalJobId
+          ? {
+              ...j,
+              status: "completed",
+              progress: 100,
+              logs: [
+                ...j.logs,
+                "",
+                "================================================================================",
+                `🎉 All ${reconciledCount} playlist(s) reconciled successfully!`,
+                `Total missing track(s) across all playlists: ${totalMissingAcrossAll}`,
+                "================================================================================\n",
+              ],
+            }
+          : j
+      )
+    );
+
+    // Refresh store entries to update songs_on_disk counts
+    try {
+      const loadedEntries = await invoke<DownloadEntry[]>("dl_store_get_all_entries");
+      setEntries(loadedEntries);
+    } catch (e) {}
+
+    setIsReconcilingAll(false);
+    alert(
+      `All ${reconciledCount} playlist(s) reconciled!\n\n` +
+      `Total missing tracks across all playlists: ${totalMissingAcrossAll}\n` +
+      `You can now click "Download All" or download individual entries to fetch missing tracks.`
+    );
   };
 
   // Batch "Download All" Queue Engine
@@ -822,6 +1046,8 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
         settings={globalSettings}
         onSaveSettings={handleSaveGlobalSettings}
         onClose={() => setShowGlobalSettings(false)}
+        onReconcileAll={handleReconcileAllPlaylists}
+        isReconcilingAll={isReconcilingAll}
       />
 
       {/* Main Two-Panel Layout */}
@@ -952,10 +1178,12 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
               allExistingLabels={allExistingLabels}
               activeJob={selectedEntryJob}
               isRefreshingEntry={selectedEntry ? refreshingEntryIds.includes(selectedEntry.id) : false}
+              isReconciling={selectedEntry ? reconcilingEntryIds.includes(selectedEntry.id) : false}
               onSaveEntry={handleSaveEntry}
               onRefreshMetadata={handleRefreshMetadata}
               onStartDownload={handleStartSingleDownload}
               onCancelDownload={handleCancelJob}
+              onReconcileArchive={handleReconcileEntry}
               onDeleteEntry={handleDeleteEntry}
               onDeleteFilesExecuted={handleDeleteFilesExecuted}
             />

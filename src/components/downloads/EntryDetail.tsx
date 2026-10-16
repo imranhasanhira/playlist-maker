@@ -8,10 +8,12 @@ type EntryDetailProps = {
   allExistingLabels: string[];
   activeJob?: DownloadJob;
   isRefreshingEntry?: boolean;
+  isReconciling?: boolean;
   onSaveEntry: (updated: DownloadEntry) => Promise<void>;
   onRefreshMetadata: (entry: DownloadEntry) => Promise<void>;
   onStartDownload: (entry: DownloadEntry) => Promise<void>;
   onCancelDownload?: (jobId: string) => Promise<void>;
+  onReconcileArchive?: (entry: DownloadEntry) => Promise<void>;
   onDeleteEntry: (entryId: string) => void;
   onDeleteFilesExecuted: (entryId: string) => Promise<void>;
 };
@@ -22,10 +24,12 @@ export const EntryDetail: React.FC<EntryDetailProps> = ({
   allExistingLabels,
   activeJob,
   isRefreshingEntry = false,
+  isReconciling = false,
   onSaveEntry,
   onRefreshMetadata,
   onStartDownload,
   onCancelDownload,
+  onReconcileArchive,
   onDeleteEntry,
   onDeleteFilesExecuted,
 }) => {
@@ -188,6 +192,17 @@ export const EntryDetail: React.FC<EntryDetailProps> = ({
           <button
             type="button"
             className="btn btn-secondary"
+            onClick={() => onReconcileArchive && onReconcileArchive(formData)}
+            disabled={isRefreshing || isDownloading || isReconciling}
+            style={{ padding: "4px 10px", fontSize: "0.78rem" }}
+            title="Reconcile: Scans local files, compares against YouTube playlist, and syncs archive so Download only fetches missing songs"
+          >
+            {isReconciling ? "Reconciling..." : "Reconcile"}
+          </button>
+
+          <button
+            type="button"
+            className="btn btn-secondary"
             onClick={() => onDeleteEntry(formData.id)}
             style={{ padding: "4px 10px", fontSize: "0.78rem", color: "var(--text-secondary)" }}
             title="Delete: Removes only this entry from downloads management list. Files remain safe on disk."
@@ -337,11 +352,27 @@ export const EntryDetail: React.FC<EntryDetailProps> = ({
         <div>
           <span className="text-secondary">Songs Count: </span>
           <strong style={{ color: "var(--text-primary)" }}>
-            {formData.total_songs > 0
-              ? formData.songs_on_disk > formData.total_songs
-                ? `${formData.songs_on_disk} downloaded (${formData.total_songs} in playlist)`
-                : `${formData.songs_on_disk} / ${formData.total_songs} downloaded`
-              : `${formData.songs_on_disk} downloaded`}
+            {(() => {
+              const liveSongsOnDisk =
+                activeJob && activeJob.status === "running" && activeJob.current_item
+                  ? Math.max(
+                      entry?.songs_on_disk || 0,
+                      formData.songs_on_disk || 0,
+                      activeJob.current_item > 1 ? activeJob.current_item - 1 : 0
+                    )
+                  : (entry?.songs_on_disk ?? formData.songs_on_disk ?? 0);
+              const liveTotalSongs =
+                activeJob && activeJob.total_items && activeJob.total_items > 0
+                  ? activeJob.total_items
+                  : (entry?.total_songs || formData.total_songs || 0);
+
+              if (liveTotalSongs > 0) {
+                return liveSongsOnDisk > liveTotalSongs
+                  ? `${liveSongsOnDisk} downloaded (${liveTotalSongs} in playlist)`
+                  : `${liveSongsOnDisk} / ${liveTotalSongs} downloaded`;
+              }
+              return `${liveSongsOnDisk} downloaded`;
+            })()}
           </strong>
         </div>
 

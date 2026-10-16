@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState, useMemo } from "react";
 import { AudioTrack, TrackPreview } from "../types";
 import { formatSize, formatDuration, cleanDisplayPath } from "../utils/formatters";
 
@@ -20,6 +20,9 @@ export interface ResolvedTracksPanelProps {
   style?: React.CSSProperties;
 }
 
+type SortField = "title" | "artist" | "year" | "duration" | "size";
+type SortOrder = "asc" | "desc";
+
 export const ResolvedTracksPanel: React.FC<ResolvedTracksPanelProps> = ({
   previews,
   isLoadingPreview,
@@ -35,10 +38,76 @@ export const ResolvedTracksPanel: React.FC<ResolvedTracksPanelProps> = ({
   title,
   style,
 }) => {
+  const [sortField, setSortField] = useState<SortField | null>(null);
+  const [sortOrder, setSortOrder] = useState<SortOrder>("asc");
+
+  const handleToggleSort = (field: SortField) => {
+    if (sortField === field) {
+      if (sortOrder === "asc") {
+        setSortOrder("desc");
+      } else {
+        // Toggle back to default order
+        setSortField(null);
+        setSortOrder("asc");
+      }
+    } else {
+      setSortField(field);
+      setSortOrder("asc");
+    }
+  };
+
+  const sortedPreviews = useMemo(() => {
+    if (!sortField) return previews;
+
+    return [...previews].sort((a, b) => {
+      let comparison = 0;
+      switch (sortField) {
+        case "title":
+          comparison = (a.title || "").toLowerCase().localeCompare((b.title || "").toLowerCase());
+          break;
+        case "artist":
+          comparison = (a.artist || "").toLowerCase().localeCompare((b.artist || "").toLowerCase());
+          break;
+        case "year": {
+          const yA = a.year ?? 0;
+          const yB = b.year ?? 0;
+          comparison = yA - yB;
+          break;
+        }
+        case "duration":
+          comparison = a.duration - b.duration;
+          break;
+        case "size":
+          comparison = a.size_bytes - b.size_bytes;
+          break;
+      }
+      return sortOrder === "asc" ? comparison : -comparison;
+    });
+  }, [previews, sortField, sortOrder]);
+
+  const renderSortIndicator = (field: SortField) => {
+    if (sortField !== field) {
+      return (
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.3, marginLeft: "4px", verticalAlign: "middle" }}>
+          <path d="M7 15l5 5 5-5M7 9l5-5 5 5"/>
+        </svg>
+      );
+    }
+    return (
+      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="var(--accent-purple-hover)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ marginLeft: "4px", verticalAlign: "middle" }}>
+        {sortOrder === "asc" ? (
+          <path d="M18 15l-6-6-6 6"/>
+        ) : (
+          <path d="M6 9l6 6 6-6"/>
+        )}
+      </svg>
+    );
+  };
+
   const handlePlaySingle = (track: TrackPreview, e: React.MouseEvent) => {
     e.stopPropagation();
     if (!onPlayTrack) return;
-    const audioTracks: AudioTrack[] = previews.map((t) => ({
+    const audioTracks: AudioTrack[] = sortedPreviews.map((t) => ({
       file_path: t.file_path,
       title: t.title,
       artist: t.artist,
@@ -59,8 +128,8 @@ export const ResolvedTracksPanel: React.FC<ResolvedTracksPanelProps> = ({
   const handlePlayAllClick = () => {
     if (onPlayAll) {
       onPlayAll();
-    } else if (onPlayTrack && previews.length > 0) {
-      const audioTracks: AudioTrack[] = previews.map((t) => ({
+    } else if (onPlayTrack && sortedPreviews.length > 0) {
+      const audioTracks: AudioTrack[] = sortedPreviews.map((t) => ({
         file_path: t.file_path,
         title: t.title,
         artist: t.artist,
@@ -121,20 +190,66 @@ export const ResolvedTracksPanel: React.FC<ResolvedTracksPanelProps> = ({
 
       {isLoadingPreview ? (
         <div className="no-data">Loading resolved file list...</div>
-      ) : previews.length > 0 ? (
+      ) : sortedPreviews.length > 0 ? (
         <div className="table-container" style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
           <table style={{ tableLayout: "fixed", width: "100%" }}>
             <thead>
               <tr>
                 <th style={{ width: "42px", textAlign: "center" }}>Play</th>
-                <th style={{ width: "52%" }}>Title</th>
-                <th style={{ width: "24%" }}>Artist</th>
-                <th style={{ width: "65px", textAlign: "right" }}>Duration</th>
-                <th style={{ width: "70px", textAlign: "right" }}>Size</th>
+                <th
+                  onClick={() => handleToggleSort("title")}
+                  style={{ width: "45%", cursor: "pointer", userSelect: "none" }}
+                  title="Click to sort by Title"
+                >
+                  <div style={{ display: "inline-flex", alignItems: "center" }}>
+                    <span>Title</span>
+                    {renderSortIndicator("title")}
+                  </div>
+                </th>
+                <th
+                  onClick={() => handleToggleSort("artist")}
+                  style={{ width: "23%", cursor: "pointer", userSelect: "none" }}
+                  title="Click to sort by Artist"
+                >
+                  <div style={{ display: "inline-flex", alignItems: "center" }}>
+                    <span>Artist</span>
+                    {renderSortIndicator("artist")}
+                  </div>
+                </th>
+                <th
+                  onClick={() => handleToggleSort("year")}
+                  style={{ width: "55px", textAlign: "center", cursor: "pointer", userSelect: "none" }}
+                  title="Click to sort by Year"
+                >
+                  <div style={{ display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+                    <span>Year</span>
+                    {renderSortIndicator("year")}
+                  </div>
+                </th>
+                <th
+                  onClick={() => handleToggleSort("duration")}
+                  style={{ width: "65px", textAlign: "right", cursor: "pointer", userSelect: "none" }}
+                  title="Click to sort by Duration"
+                >
+                  <div style={{ display: "inline-flex", alignItems: "center", justifyContent: "flex-end" }}>
+                    <span>Duration</span>
+                    {renderSortIndicator("duration")}
+                  </div>
+                </th>
+                <th
+                  onClick={() => handleToggleSort("size")}
+                  style={{ width: "70px", textAlign: "right", cursor: "pointer", userSelect: "none" }}
+                  title="Click to sort by File Size"
+                >
+                  <div style={{ display: "inline-flex", alignItems: "center", justifyContent: "flex-end" }}>
+                    <span>Size</span>
+                    {renderSortIndicator("size")}
+                  </div>
+                </th>
               </tr>
             </thead>
             <tbody>
-              {previews.map((track, trackIdx) => {
+              {sortedPreviews.map((track, trackIdx) => {
                 const isSelected = selectedFilePath === track.file_path;
                 return (
                   <tr
@@ -191,6 +306,22 @@ export const ResolvedTracksPanel: React.FC<ResolvedTracksPanelProps> = ({
                       title={track.artist || "—"}
                     >
                       {track.artist || "—"}
+                    </td>
+                    <td style={{ fontFamily: "var(--font-mono)", textAlign: "center", fontSize: "0.78rem" }}>
+                      {track.year ? (
+                        <span style={{
+                          padding: "1px 5px",
+                          borderRadius: "4px",
+                          backgroundColor: "rgba(138, 92, 246, 0.12)",
+                          color: "var(--accent-purple-hover)",
+                          border: "1px solid rgba(138, 92, 246, 0.25)",
+                          fontWeight: 600
+                        }}>
+                          {track.year}
+                        </span>
+                      ) : (
+                        <span style={{ color: "var(--text-secondary)", opacity: 0.6 }}>—</span>
+                      )}
                     </td>
                     <td style={{ fontFamily: "var(--font-mono)", textAlign: "right", fontSize: "0.78rem" }}>
                       {formatDuration(track.duration)}

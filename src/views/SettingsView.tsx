@@ -362,6 +362,52 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 </button>
               </div>
             </div>
+
+            <div className="form-group" style={{ marginBottom: 0 }}>
+              <label className="form-label">Max Tracks per Playlist Threshold</label>
+              <div className="form-row" style={{ maxWidth: "260px" }}>
+                <input
+                  type="number"
+                  min="10"
+                  max="5000"
+                  value={config.maxTracksPerPlaylist ?? 400}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value, 10);
+                    setConfig({ ...config, maxTracksPerPlaylist: isNaN(val) ? 400 : val });
+                  }}
+                  placeholder="400"
+                />
+                <span style={{ fontSize: "0.85rem", color: "var(--text-secondary)", whiteSpace: "nowrap", alignSelf: "center" }}>
+                  tracks max
+                </span>
+              </div>
+              <p className="text-secondary" style={{ fontSize: "0.8rem", marginTop: "4px" }}>
+                Playlists or year splits exceeding this capacity will be highlighted with a warning badge (⚠️).
+              </p>
+            </div>
+
+            <div className="form-group" style={{ marginBottom: 0, marginTop: "16px" }}>
+              <label className="form-label">Year-Split: Min Tracks per Single Year</label>
+              <div className="form-row" style={{ maxWidth: "260px" }}>
+                <input
+                  type="number"
+                  min="1"
+                  max="100"
+                  value={config.minTracksPerYearPlaylist ?? 10}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value, 10);
+                    setConfig({ ...config, minTracksPerYearPlaylist: isNaN(val) ? 10 : val });
+                  }}
+                  placeholder="10"
+                />
+                <span style={{ fontSize: "0.85rem", color: "var(--text-secondary)", whiteSpace: "nowrap", alignSelf: "center" }}>
+                  tracks min
+                </span>
+              </div>
+              <p className="text-secondary" style={{ fontSize: "0.8rem", marginTop: "4px" }}>
+                For playlists using Yearly Auto-Split: sparse release years with fewer tracks than this will automatically roll back and stay grouped in their 5-year half-decade bucket.
+              </p>
+            </div>
           </div>
 
           {/* Allowed Extensions Card */}
