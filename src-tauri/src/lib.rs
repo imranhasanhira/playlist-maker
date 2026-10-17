@@ -697,6 +697,7 @@ pub fn run() {
             export::reveal_in_finder,
             export::delete_export_files,
             export::cancel_export,
+            export::clean_export_hidden_files,
             watcher::start_fs_watcher,
             watcher::stop_fs_watcher,
             downloader::start_download_job,

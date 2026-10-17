@@ -51,7 +51,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [exportLogs, setExportLogs] = useState<string[]>([]);
   const [showLogsModal, setShowLogsModal] = useState<boolean>(false);
-  const [activeTab, setActiveTab] = useState<"new" | "uptodate" | "orphans" | "warnings">("new");
+  const [activeTab, setActiveTab] = useState<"new" | "renamed" | "uptodate" | "orphans" | "warnings">("new");
   const [searchQuery, setSearchQuery] = useState<string>("");
   const debouncedSearchQuery = useDebounce(searchQuery, 250);
   const [visibleLimit, setVisibleLimit] = useState<number>(100);
@@ -69,13 +69,15 @@ export const ExportView: React.FC<ExportViewProps> = ({
   };
 
   const filteredItems = useMemo(() => {
-    if (!diffReport) return { newFiles: [], upToDateFiles: [], orphanFiles: [], warningItems: [] };
+    if (!diffReport) return { newFiles: [], renamedFiles: [], upToDateFiles: [], orphanFiles: [], warningItems: [] };
     const q = debouncedSearchQuery.trim().toLowerCase();
     const warnings = diffReport.warnings || [];
+    const renamed = diffReport.renamed_files || [];
     
     if (!q) {
       return {
         newFiles: diffReport.new_files,
+        renamedFiles: renamed,
         upToDateFiles: diffReport.up_to_date_files,
         orphanFiles: diffReport.orphan_files,
         warningItems: warnings,
@@ -85,6 +87,9 @@ export const ExportView: React.FC<ExportViewProps> = ({
     return {
       newFiles: diffReport.new_files.filter(
         (item) => item.relative_path.toLowerCase().includes(q) || item.dest_relative_path.toLowerCase().includes(q)
+      ),
+      renamedFiles: renamed.filter(
+        (item) => item.relative_path.toLowerCase().includes(q) || item.dest_relative_path.toLowerCase().includes(q) || (item.old_dest_relative_path || "").toLowerCase().includes(q)
       ),
       upToDateFiles: diffReport.up_to_date_files.filter(
         (item) => item.relative_path.toLowerCase().includes(q) || item.dest_relative_path.toLowerCase().includes(q)
@@ -160,6 +165,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
 
     return {
       newFiles: sortList(filteredItems.newFiles),
+      renamedFiles: sortList(filteredItems.renamedFiles),
       upToDateFiles: sortList(filteredItems.upToDateFiles),
       orphanFiles: sortList(filteredItems.orphanFiles),
       warningItems: filteredItems.warningItems,
@@ -278,6 +284,24 @@ export const ExportView: React.FC<ExportViewProps> = ({
       handleAnalyzeDiff();
     } catch (e) {
       alert("Error deleting files: " + e);
+    }
+  };
+
+  const [isCleaningHidden, setIsCleaningHidden] = useState<boolean>(false);
+
+  const handleCleanHiddenFiles = async (destPath: string) => {
+    if (!window.confirm(`Are you sure you want to clean all hidden system files (._*) from "${destPath}"?`)) {
+      return;
+    }
+    setIsCleaningHidden(true);
+    try {
+      const count = await invoke<number>("clean_export_hidden_files", { destination: destPath });
+      alert(`Successfully cleaned ${count} hidden system file(s)!`);
+      handleAnalyzeDiff();
+    } catch (e) {
+      alert("Error cleaning hidden files: " + e);
+    } finally {
+      setIsCleaningHidden(false);
     }
   };
 
@@ -604,7 +628,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
 
       {/* Summary Cards */}
       {diffReport && (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "12px" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: "10px" }}>
           <div className="card" style={{ padding: "12px 14px", margin: 0 }}>
             <div className="text-secondary" style={{ fontSize: "0.75rem", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>
               🟢 New / Modified
@@ -614,6 +638,18 @@ export const ExportView: React.FC<ExportViewProps> = ({
             </div>
             <div className="text-secondary" style={{ fontSize: "0.78rem", fontFamily: "var(--font-mono)", marginTop: "2px" }}>
               {formatSize(diffReport.total_bytes_to_copy)}
+            </div>
+          </div>
+
+          <div className="card" style={{ padding: "12px 14px", margin: 0 }}>
+            <div className="text-secondary" style={{ fontSize: "0.75rem", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>
+              🔄 Renamed (Instant)
+            </div>
+            <div style={{ fontSize: "1.2rem", fontWeight: 700, marginTop: "4px", color: (diffReport.renamed_files?.length || 0) > 0 ? "var(--accent-blue)" : "var(--text-primary)" }}>
+              {diffReport.renamed_files?.length || 0} files
+            </div>
+            <div className="text-secondary" style={{ fontSize: "0.78rem", fontFamily: "var(--font-mono)", marginTop: "2px" }}>
+              {formatSize(diffReport.total_bytes_renamed || 0)} (0s USB copy)
             </div>
           </div>
 
@@ -666,7 +702,19 @@ export const ExportView: React.FC<ExportViewProps> = ({
                 onClick={() => setActiveTab("new")}
                 style={{ padding: "4px 12px", fontSize: "0.8rem" }}
               >
-                🟢 New / Modified ({filteredItems.newFiles.length})
+                🟢 New ({filteredItems.newFiles.length})
+              </button>
+              <button
+                className={`btn ${activeTab === "renamed" ? "btn-primary" : "btn-secondary"}`}
+                onClick={() => setActiveTab("renamed")}
+                style={{
+                  padding: "4px 12px",
+                  fontSize: "0.8rem",
+                  borderColor: filteredItems.renamedFiles.length > 0 ? "var(--accent-blue)" : undefined,
+                  color: filteredItems.renamedFiles.length > 0 && activeTab !== "renamed" ? "var(--accent-blue)" : undefined,
+                }}
+              >
+                🔄 Renamed ({filteredItems.renamedFiles.length})
               </button>
               <button
                 className={`btn ${activeTab === "uptodate" ? "btn-primary" : "btn-secondary"}`}
@@ -694,6 +742,25 @@ export const ExportView: React.FC<ExportViewProps> = ({
               >
                 ⚠️ Warnings ({filteredItems.warningItems.length})
               </button>
+
+              {activeTab === "warnings" && diffReport?.warnings?.some((w) => w.warning_type === "apple_double") && (
+                <button
+                  className="btn btn-secondary"
+                  disabled={isCleaningHidden}
+                  onClick={() => handleCleanHiddenFiles(exportDir)}
+                  style={{
+                    padding: "4px 10px",
+                    fontSize: "0.8rem",
+                    borderColor: "var(--danger)",
+                    color: "var(--danger)",
+                    marginLeft: "4px",
+                    fontWeight: 600,
+                  }}
+                  title="Clean all hidden macOS resource fork files (._*) in destination"
+                >
+                  {isCleaningHidden ? "Cleaning..." : "🧹 Clean Hidden Files"}
+                </button>
+              )}
 
               {/* Action Panel right of Orphan Files tab */}
               {selectedItemPaths.size > 0 && (
@@ -850,6 +917,119 @@ export const ExportView: React.FC<ExportViewProps> = ({
               ) : (
                 <div className="no-data">
                   {searchQuery ? "No matching files found." : "All audio files in destination are already up-to-date!"}
+                </div>
+              )
+            )}
+
+            {activeTab === "renamed" && (
+              sortedItems.renamedFiles.length > 0 ? (
+                <>
+                  <table style={{ tableLayout: "fixed", width: "100%" }}>
+                    <thead>
+                      <tr>
+                        <th style={{ width: "36px", textAlign: "center" }}>
+                          <input
+                            type="checkbox"
+                            checked={
+                              sortedItems.renamedFiles.length > 0 &&
+                              sortedItems.renamedFiles.every((item) => selectedItemPaths.has(item.relative_path))
+                            }
+                            onChange={() => handleToggleSelectAll(sortedItems.renamedFiles)}
+                            style={{ cursor: "pointer" }}
+                          />
+                        </th>
+                        <th
+                          style={{ width: "110px", cursor: "pointer", userSelect: "none" }}
+                          onClick={() => handleToggleSort("status")}
+                          title="Click to sort by Status"
+                        >
+                          <div style={{ display: "inline-flex", alignItems: "center" }}>
+                            <span>Status</span>
+                            {renderSortIndicator("status")}
+                          </div>
+                        </th>
+                        <th
+                          style={{ width: "42%", cursor: "pointer", userSelect: "none" }}
+                          onClick={() => handleToggleSort("source")}
+                          title="Click to sort by Source Path"
+                        >
+                          <div style={{ display: "inline-flex", alignItems: "center" }}>
+                            <span>Source Relative Path (New Name)</span>
+                            {renderSortIndicator("source")}
+                          </div>
+                        </th>
+                        <th
+                          style={{ width: "38%", cursor: "pointer", userSelect: "none" }}
+                          onClick={() => handleToggleSort("dest")}
+                          title="Click to sort by Destination Rename"
+                        >
+                          <div style={{ display: "inline-flex", alignItems: "center" }}>
+                            <span>Destination Rename (Old → New)</span>
+                            {renderSortIndicator("dest")}
+                          </div>
+                        </th>
+                        <th
+                          style={{ width: "90px", textAlign: "right", cursor: "pointer", userSelect: "none" }}
+                          onClick={() => handleToggleSort("size")}
+                          title="Click to sort by File Size"
+                        >
+                          <div style={{ display: "inline-flex", alignItems: "center", justifyContent: "flex-end" }}>
+                            <span>Size</span>
+                            {renderSortIndicator("size")}
+                          </div>
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sortedItems.renamedFiles.slice(0, visibleLimit).map((item, idx) => {
+                        const isSelected = selectedItemPaths.has(item.relative_path);
+                        return (
+                          <tr
+                            key={idx}
+                            className={isSelected ? "selected" : undefined}
+                            data-selected={isSelected}
+                            title={item.file_path}
+                            onClick={(e) => handleToggleSelectItem(item.relative_path, idx, e.shiftKey, sortedItems.renamedFiles)}
+                            style={{ cursor: "pointer", userSelect: "none" }}
+                          >
+                            <td style={{ textAlign: "center" }} onClick={(e) => e.stopPropagation()}>
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={(e) => handleToggleSelectItem(item.relative_path, idx, (e.nativeEvent as MouseEvent).shiftKey, sortedItems.renamedFiles)}
+                                style={{ cursor: "pointer" }}
+                              />
+                            </td>
+                            <td>
+                              <span className="badge" style={{ backgroundColor: "rgba(59, 130, 246, 0.15)", color: "var(--accent-blue)", border: "1px solid var(--accent-blue)", padding: "2px 6px", borderRadius: "4px", fontSize: "0.72rem", fontWeight: 600 }}>
+                                🔄 RENAMED
+                              </span>
+                            </td>
+                            <td style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={item.file_path}>
+                              {item.relative_path}
+                            </td>
+                            <td className="text-secondary" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--font-mono)", fontSize: "0.78rem" }}>
+                              <span style={{ textDecoration: "line-through", opacity: 0.65 }}>{item.old_dest_relative_path}</span>
+                              <span style={{ margin: "0 6px", color: "var(--accent-blue)" }}>→</span>
+                              <span style={{ color: "var(--success)", fontWeight: 600 }}>{item.dest_relative_path}</span>
+                            </td>
+                            <td style={{ fontFamily: "var(--font-mono)", textAlign: "right", fontSize: "0.78rem" }}>
+                              {formatSize(item.size_bytes)}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                  {sortedItems.renamedFiles.length > visibleLimit && (
+                    <div className="text-secondary" style={{ textAlign: "center", padding: "8px", fontSize: "0.75rem", fontFamily: "var(--font-mono)" }}>
+                      Showing {visibleLimit} of {sortedItems.renamedFiles.length} files (Scroll down to load more)
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="no-data">
+                  {searchQuery ? "No matching renamed files found." : "No renamed files detected. All tracks already match target destination paths."}
                 </div>
               )
             )}
@@ -1114,6 +1294,25 @@ export const ExportView: React.FC<ExportViewProps> = ({
                                     style={{ marginTop: "4px", padding: "2px 8px", fontSize: "0.72rem" }}
                                   >
                                     {isExpanded ? "▾ Hide sample files" : `▸ Show sample files (${warn.sample_files.length})`}
+                                  </button>
+                                )}
+                                {warn.warning_type === "apple_double" && (
+                                  <button
+                                    className="btn btn-secondary"
+                                    disabled={isCleaningHidden}
+                                    onClick={() => handleCleanHiddenFiles(warn.target_path)}
+                                    style={{
+                                      marginTop: "4px",
+                                      marginLeft: warn.sample_files && warn.sample_files.length > 0 ? "6px" : "0",
+                                      padding: "2px 8px",
+                                      fontSize: "0.72rem",
+                                      color: "var(--danger)",
+                                      borderColor: "var(--danger)",
+                                      fontWeight: 600,
+                                    }}
+                                    title="Delete all hidden macOS resource fork files (._*) from this destination"
+                                  >
+                                    {isCleaningHidden ? "Cleaning..." : "🧹 Clean Hidden Files"}
                                   </button>
                                 )}
                               </td>

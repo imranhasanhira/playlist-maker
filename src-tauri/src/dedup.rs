@@ -127,7 +127,7 @@ fn fnv1a_64(bytes: &[u8], seed: u64) -> u64 {
 }
 
 /// Compute quick_hash (first 16KB + middle 16KB + last 16KB) and audio_hash (audio stream payload)
-fn compute_file_hashes(path: &Path, size_bytes: u64) -> (String, String) {
+pub fn compute_file_hashes(path: &Path, size_bytes: u64) -> (String, String) {
     let mut file = match File::open(path) {
         Ok(f) => f,
         Err(_) => return (format!("sz_{}", size_bytes), format!("sz_{}", size_bytes)),

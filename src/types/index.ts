@@ -74,12 +74,13 @@ export interface MainConfig {
   playlists: PlaylistConfig[];
 }
 
-export type ExportStatus = "New" | "Modified" | "UpToDate";
+export type ExportStatus = "New" | "Modified" | "UpToDate" | "Renamed";
 
 export interface ExportTrackItem {
   file_path: string;
   relative_path: string;
   dest_relative_path: string;
+  old_dest_relative_path?: string | null;
   size_bytes: number;
   mtime_secs: number;
   status: ExportStatus;
@@ -119,11 +120,13 @@ export interface ExportDiffReport {
   destination: string;
   new_files: ExportTrackItem[];
   up_to_date_files: ExportTrackItem[];
+  renamed_files?: ExportTrackItem[];
   orphan_files: ExportOrphanItem[];
   playlists: ExportPlaylistItem[];
   warnings?: ExportWarningItem[];
   total_bytes_to_copy: number;
   total_bytes_up_to_date: number;
+  total_bytes_renamed?: number;
   total_bytes_orphans: number;
 }
 
