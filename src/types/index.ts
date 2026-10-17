@@ -23,12 +23,13 @@ export interface YearSplitConfig {
   split_1y?: number[];
   custom_merges?: [number, number][];
   split_unknown_parts?: number;
+  split_single_years?: Record<string | number, number>;
 }
 
 export interface YearBucketSummary {
   key: string;
   label: string;
-  bucket_type: "10y" | "5y" | "1y" | "custom" | "unknown" | "unknown_split";
+  bucket_type: "10y" | "5y" | "1y" | "1y_split" | "custom" | "unknown" | "unknown_split";
   parent_key: string | null;
   track_count: number;
   is_split: boolean;
