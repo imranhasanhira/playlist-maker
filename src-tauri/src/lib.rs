@@ -89,7 +89,9 @@ async fn preview_playlist_tracks(
                     let year_cfg = playlist_config.year_split.as_ref();
                     let split_parts = year_cfg.and_then(|y| y.split_unknown_parts).unwrap_or(0);
                     if split_parts >= 2 && target_bucket.starts_with("unknown_") {
-                        if let Ok(idx_1based) = target_bucket["unknown_".len()..].parse::<usize>() {
+                        let suffix = &target_bucket["unknown_".len()..];
+                        let num_str = suffix.trim_start_matches('p');
+                        if let Ok(idx_1based) = num_str.parse::<usize>() {
                             if idx_1based >= 1 && idx_1based <= split_parts {
                                 let total_u = unknown_files.len();
                                 let base = total_u / split_parts;
@@ -197,6 +199,7 @@ async fn generate_all_playlists(
     targetDirOverride: Option<String>,
     relativeToConfig: bool,
     formats: String,
+    appendTrackCount: Option<bool>,
 ) -> Result<Vec<String>, String> {
     tokio::task::spawn_blocking(move || {
         let config = playlist::read_config_file(Path::new(&configPath))?;
@@ -231,11 +234,14 @@ async fn generate_all_playlists(
             logs.push(msg);
         };
 
+        let should_append_count = appendTrackCount.unwrap_or(true);
+
         emit_log(format!(
-            "$ generate-playlists --config \"{}\" --formats \"{}\"{}",
+            "$ generate-playlists --config \"{}\" --formats \"{}\"{}{}",
             configPath,
             formats,
-            if relativeToConfig { " --relative-to-config" } else { "" }
+            if relativeToConfig { " --relative-to-config" } else { "" },
+            if should_append_count { " --append-track-count" } else { "" }
         ), &mut logs);
         emit_log(format!("Writing all playlist files to {}", resolved_target_dir.display()), &mut logs);
 
@@ -257,12 +263,18 @@ async fn generate_all_playlists(
 
             for sub in sub_playlists {
                 if !sub.files.is_empty() {
-                    let sanitized = sub.name.replace('/', "_").replace('\\', "_");
+                    let count = sub.files.len();
+                    let file_name = if should_append_count {
+                        format!("{} ({})", sub.name, count)
+                    } else {
+                        sub.name
+                    };
+                    let sanitized = file_name.replace('/', "_").replace('\\', "_");
                     let playlist_file_path = resolved_target_dir.join(format!("{}.m3u", sanitized));
                     match playlist::write_playlist_file(&playlist_file_path, &sub.files) {
                         Ok(_) => {
                             total_generated += 1;
-                            emit_log(format!("  ✅ Created: {}.m3u ({} tracks)", sanitized, sub.files.len()), &mut logs);
+                            emit_log(format!("  ✅ Created: {}.m3u ({} tracks)", sanitized, count), &mut logs);
                         }
                         Err(e) => emit_log(format!("  ❌ ERROR: Failed to write {}.m3u: {}", sanitized, e), &mut logs),
                     }
@@ -612,6 +624,42 @@ pub fn run() {
                     let _ = window.set_size(work_area.size);
                 }
             }
+
+            #[cfg(desktop)]
+            {
+                if let Some(tray) = app.tray_by_id("main") {
+                    let quit_item = tauri::menu::MenuItem::with_id(app, "quit", "Quit Diamond Music Manager", true, None::<&str>)?;
+                    let show_item = tauri::menu::MenuItem::with_id(app, "show", "Show Diamond Music Manager", true, None::<&str>)?;
+                    let menu = tauri::menu::Menu::with_items(app, &[&show_item, &quit_item])?;
+                    let _ = tray.set_menu(Some(menu));
+                    let _ = tray.on_menu_event(|app, event| match event.id.as_ref() {
+                        "quit" => {
+                            app.exit(0);
+                        }
+                        "show" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.unminimize();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        _ => {}
+                    });
+                    let _ = tray.on_tray_icon_event(|tray, event| {
+                        if let tauri::tray::TrayIconEvent::Click { button, button_state, .. } = event {
+                            if button == tauri::tray::MouseButton::Left && button_state == tauri::tray::MouseButtonState::Up {
+                                let app = tray.app_handle();
+                                if let Some(window) = app.get_webview_window("main") {
+                                    let _ = window.show();
+                                    let _ = window.unminimize();
+                                    let _ = window.set_focus();
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+
             Ok(())
         })
         .manage(watcher::WatcherState::default())

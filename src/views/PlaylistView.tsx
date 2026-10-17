@@ -117,6 +117,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   const [configWidth, setConfigWidth] = useState<number>(360);
   const [isReordering, setIsReordering] = useState<boolean>(false);
   const [previewsCache, setPreviewsCache] = useState<Record<string, TrackPreview[]>>({});
+  const [appendTrackCount, setAppendTrackCount] = useState<boolean>(true);
 
   // Sorting state for playlist tiles (Config Order vs Name display sort)
   type PlSortBy = "config" | "name";
@@ -813,6 +814,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
         targetDirOverride: null,
         relativeToConfig,
         formats,
+        appendTrackCount,
       });
       if (logs && logs.length > 0) {
         setGenerationLogs(logs);
@@ -888,6 +890,27 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
           >
             {isReordering ? "Done Reordering" : "⇅ Reorder Mode"}
           </button>
+          <label
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "6px",
+              fontSize: "0.82rem",
+              color: "var(--text-secondary)",
+              cursor: "pointer",
+              userSelect: "none",
+              padding: "0 6px",
+            }}
+            title="Append track count in (xx) to the playlist filename, e.g. Rock Classics - 2012 - p01 (450).m3u"
+          >
+            <input
+              type="checkbox"
+              checked={appendTrackCount}
+              onChange={(e) => setAppendTrackCount(e.target.checked)}
+              style={{ accentColor: "var(--accent-purple)", cursor: "pointer" }}
+            />
+            <span>Include count (xx)</span>
+          </label>
           <button
             className="btn btn-primary"
             onClick={handleGeneratePlaylists}
@@ -1826,7 +1849,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                                   </div>
                                 )}
                                 {(() => {
-                                  const yearBuckets = buckets.filter((x) => x.bucket_type !== "unknown" && x.bucket_type !== "unknown_split" && x.start_year !== null && x.end_year !== null);
+                                  const yearBuckets = buckets.filter((x) => x.bucket_type !== "unknown" && x.bucket_type !== "unknown_split" && x.bucket_type !== "1y_split" && x.start_year !== null && x.end_year !== null);
 
                                   return buckets.map((b) => {
                                     const isSelected = selectedBucketKey === b.key;
@@ -1835,8 +1858,10 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                                     const isUnknown = b.bucket_type === "unknown" || b.bucket_type === "unknown_split";
                                     const isSplitUnknown = b.bucket_type === "unknown_split";
                                     const isSingleUnknown = b.bucket_type === "unknown";
-                                    const isBelowMin = !isUnknown && (b.below_min_tracks ?? (b.track_count < minLimit));
-                                    const yearIdx = !isUnknown && b.start_year !== null ? yearBuckets.findIndex((x) => x.key === b.key) : -1;
+                                    const isSplitSingleYear = b.bucket_type === "1y_split";
+                                    const isSingleYear = (b.bucket_type === "1y" || (b.bucket_type === "custom" && b.start_year !== null && b.start_year === b.end_year)) && b.start_year !== null;
+                                    const isBelowMin = !isUnknown && !isSplitSingleYear && (b.below_min_tracks ?? (b.track_count < minLimit));
+                                    const yearIdx = !isUnknown && !isSplitSingleYear && b.start_year !== null ? yearBuckets.findIndex((x) => x.key === b.key) : -1;
                                     const canMergeUp = yearIdx > 0;
                                     const canMergeDown = yearIdx !== -1 && yearIdx < yearBuckets.length - 1;
                                     const prevBucket = canMergeUp ? yearBuckets[yearIdx - 1] : null;
@@ -1880,7 +1905,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                                               fontWeight: 600,
                                               fontFamily: "var(--font-mono)",
                                               color: isUnknown ? "var(--text-secondary)" : "var(--text-primary)",
-                                              width: "82px",
+                                              width: "115px",
                                               flexShrink: 0,
                                               overflow: "hidden",
                                               textOverflow: "ellipsis",
@@ -2090,6 +2115,46 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                                                 <circle cx="4" cy="18" r="1.5" fill="currentColor"/>
                                               </svg>
                                             </button>
+                                          ) : isSingleYear && b.track_count > 0 ? (
+                                            <button
+                                              type="button"
+                                              className="btn btn-secondary"
+                                              onClick={() => {
+                                                if (!config || selectedPlaylistIndex === null || b.start_year === null) return;
+                                                const yr = b.start_year;
+                                                const newPlaylists = [...config.playlists];
+                                                const cur = newPlaylists[selectedPlaylistIndex].year_split!;
+                                                const partsToSplit = Math.max(2, Math.ceil(b.track_count / maxLimit));
+                                                const splitSingleYears = { ...(cur.split_single_years || {}) };
+                                                splitSingleYears[yr] = partsToSplit;
+                                                newPlaylists[selectedPlaylistIndex] = {
+                                                  ...newPlaylists[selectedPlaylistIndex],
+                                                  year_split: {
+                                                    ...cur,
+                                                    split_single_years: splitSingleYears,
+                                                  },
+                                                };
+                                                const updatedConfig = { ...config, playlists: newPlaylists };
+                                                setConfig(updatedConfig);
+                                                invalidateCacheFor(selectedPlaylistIndex);
+                                                fetchSinglePlaylistSummary(selectedPlaylistIndex, updatedConfig, true);
+                                              }}
+                                              style={{
+                                                width: "22px",
+                                                height: "22px",
+                                                padding: 0,
+                                                display: "flex",
+                                                alignItems: "center",
+                                                justifyContent: "center",
+                                                borderRadius: "4px",
+                                              }}
+                                              title={`Split ${b.label} into ${Math.max(2, Math.ceil(b.track_count / maxLimit))} equal buckets (max ${maxLimit} tracks each)`}
+                                            >
+                                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                                                <rect x="3" y="3" width="8" height="18" rx="1.5"/>
+                                                <rect x="13" y="3" width="8" height="18" rx="1.5"/>
+                                              </svg>
+                                            </button>
                                           ) : isSingleUnknown && b.track_count > 0 ? (
                                             <button
                                               type="button"
@@ -2206,9 +2271,14 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                                                 const cur = newPlaylists[selectedPlaylistIndex].year_split!;
                                                 const split5 = (cur.split_5y || []).filter((d) => d !== decade);
                                                 const split1 = (cur.split_1y || []).filter((h) => Math.floor(h / 10) * 10 !== decade);
+                                                const splitSingleYears = { ...(cur.split_single_years || {}) };
+                                                for (let y = decade; y <= decade + 9; y++) {
+                                                  delete splitSingleYears[y];
+                                                  delete splitSingleYears[String(y)];
+                                                }
                                                 newPlaylists[selectedPlaylistIndex] = {
                                                   ...newPlaylists[selectedPlaylistIndex],
-                                                  year_split: { ...cur, split_5y: split5, split_1y: split1 },
+                                                  year_split: { ...cur, split_5y: split5, split_1y: split1, split_single_years: splitSingleYears },
                                                 };
                                                 const updatedConfig = { ...config, playlists: newPlaylists };
                                                 setConfig(updatedConfig);
@@ -2243,9 +2313,14 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                                                 const newPlaylists = [...config.playlists];
                                                 const cur = newPlaylists[selectedPlaylistIndex].year_split!;
                                                 const split1 = (cur.split_1y || []).filter((h) => h !== half);
+                                                const splitSingleYears = { ...(cur.split_single_years || {}) };
+                                                for (let y = half; y <= half + 4; y++) {
+                                                  delete splitSingleYears[y];
+                                                  delete splitSingleYears[String(y)];
+                                                }
                                                 newPlaylists[selectedPlaylistIndex] = {
                                                   ...newPlaylists[selectedPlaylistIndex],
-                                                  year_split: { ...cur, split_1y: split1 },
+                                                  year_split: { ...cur, split_1y: split1, split_single_years: splitSingleYears },
                                                 };
                                                 const updatedConfig = { ...config, playlists: newPlaylists };
                                                 setConfig(updatedConfig);
@@ -2262,6 +2337,46 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                                                 borderRadius: "4px",
                                               }}
                                               title={`Merge back to ${b.parent_key}`}
+                                            >
+                                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                                                <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                                                <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                                              </svg>
+                                            </button>
+                                          ) : isSplitSingleYear && b.start_year !== null ? (
+                                            <button
+                                              type="button"
+                                              className="btn btn-secondary"
+                                              onClick={() => {
+                                                if (!config || selectedPlaylistIndex === null || b.start_year === null) return;
+                                                const yr = b.start_year;
+                                                const newPlaylists = [...config.playlists];
+                                                const cur = { ...newPlaylists[selectedPlaylistIndex].year_split! };
+                                                const splitSingleYears = { ...(cur.split_single_years || {}) };
+                                                delete splitSingleYears[yr];
+                                                delete splitSingleYears[String(yr)];
+                                                newPlaylists[selectedPlaylistIndex] = {
+                                                  ...newPlaylists[selectedPlaylistIndex],
+                                                  year_split: {
+                                                    ...cur,
+                                                    split_single_years: splitSingleYears,
+                                                  },
+                                                };
+                                                const updatedConfig = { ...config, playlists: newPlaylists };
+                                                setConfig(updatedConfig);
+                                                invalidateCacheFor(selectedPlaylistIndex);
+                                                fetchSinglePlaylistSummary(selectedPlaylistIndex, updatedConfig, true);
+                                              }}
+                                              style={{
+                                                width: "22px",
+                                                height: "22px",
+                                                padding: 0,
+                                                display: "flex",
+                                                alignItems: "center",
+                                                justifyContent: "center",
+                                                borderRadius: "4px",
+                                              }}
+                                              title={`Merge back to single ${b.start_year} bucket`}
                                             >
                                               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                                                 <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>

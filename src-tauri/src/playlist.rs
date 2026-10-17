@@ -25,6 +25,8 @@ pub struct YearSplitConfig {
     pub custom_merges: Vec<[u32; 2]>, // [start_year, end_year] spans (e.g. [[1950, 1989], [2011, 2012]])
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split_unknown_parts: Option<usize>,
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub split_single_years: std::collections::HashMap<u32, usize>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -735,11 +737,31 @@ pub fn expand_playlist_buckets(
                 let count = base + if i < rem { 1 } else { 0 };
                 let chunk = unknown_files[offset..offset + count].to_vec();
                 offset += count;
-                let key = format!("unknown_{:02}", i + 1);
+                let key = format!("unknown_p{:02}", i + 1);
                 bucket_files.insert(key, chunk);
             }
         } else {
             bucket_files.insert("unknown".to_string(), unknown_files);
+        }
+    }
+
+    // Split single years into equal buckets if requested
+    for (&yr, &parts) in &year_cfg.split_single_years {
+        if parts >= 2 {
+            let yr_key = format!("{}", yr);
+            if let Some(yr_files) = bucket_files.remove(&yr_key) {
+                let total = yr_files.len();
+                let base = total / parts;
+                let rem = total % parts;
+                let mut offset = 0;
+                for i in 0..parts {
+                    let count = base + if i < rem { 1 } else { 0 };
+                    let chunk = yr_files[offset..offset + count].to_vec();
+                    offset += count;
+                    let key = format!("{}_p{:02}", yr, i + 1);
+                    bucket_files.insert(key, chunk);
+                }
+            }
         }
     }
 
@@ -751,7 +773,11 @@ pub fn expand_playlist_buckets(
         let sub_name = if key == "unknown" {
             format!("{} - Unknown", playlist_config.name)
         } else if let Some(suffix) = key.strip_prefix("unknown_") {
-            format!("{} - Unknown {}", playlist_config.name, suffix)
+            let part_str = if suffix.starts_with('p') { suffix.to_string() } else { format!("p{}", suffix) };
+            format!("{} - Unknown - {}", playlist_config.name, part_str)
+        } else if let Some((yr, suffix)) = parse_single_year_split_key(&key) {
+            let part_str = if suffix.starts_with('p') { suffix.to_string() } else { format!("p{}", suffix) };
+            format!("{} - {} - {}", playlist_config.name, yr, part_str)
         } else {
             format!("{} - {}", playlist_config.name, key)
         };
@@ -763,6 +789,15 @@ pub fn expand_playlist_buckets(
     }
 
     (result, errors)
+}
+
+pub fn parse_single_year_split_key(key: &str) -> Option<(u32, &str)> {
+    if let Some((yr_str, suffix)) = key.split_once('_') {
+        if let Ok(yr) = yr_str.parse::<u32>() {
+            return Some((yr, suffix));
+        }
+    }
+    None
 }
 
 // Compute bucket summaries for a set of file years
@@ -793,6 +828,40 @@ pub fn compute_buckets_summary(
     let effective_min_tracks = year_cfg.min_tracks.or(global_min_tracks).unwrap_or(10);
 
     for (key, (info, count)) in bucket_counts {
+        // If this is a single year that the user chose to split into equal buckets:
+        if (info.bucket_type == "1y" || (info.bucket_type == "custom" && info.start_year == info.end_year))
+            && info.start_year.is_some()
+        {
+            let yr = info.start_year.unwrap();
+            if let Some(&parts) = year_cfg.split_single_years.get(&yr) {
+                if parts >= 2 {
+                    let base = count / parts;
+                    let rem = count % parts;
+                    for i in 0..parts {
+                        let part_count = base + if i < rem { 1 } else { 0 };
+                        let split_key = format!("{}_p{:02}", yr, i + 1);
+                        let split_label = format!("{} - p{:02}", yr, i + 1);
+                        if part_count > max_tracks {
+                            warning_exceeds_max = true;
+                        }
+                        let below_min = part_count < effective_min_tracks;
+                        buckets.push(YearBucketSummary {
+                            key: split_key,
+                            label: split_label,
+                            bucket_type: "1y_split".to_string(),
+                            parent_key: Some(format!("{}", yr)),
+                            track_count: part_count,
+                            is_split: true,
+                            start_year: Some(yr),
+                            end_year: Some(yr),
+                            below_min_tracks: below_min,
+                        });
+                    }
+                    continue;
+                }
+            }
+        }
+
         if count > max_tracks {
             warning_exceeds_max = true;
         }
@@ -830,12 +899,19 @@ pub fn compute_buckets_summary(
         });
     }
 
-    // Sort buckets chronologically: known years first by (start_year, end_year), unknown at the end
-    buckets.sort_by_key(|b| {
-        (
-            b.start_year.unwrap_or(u32::MAX),
-            b.end_year.unwrap_or(u32::MAX),
-        )
+    // Sort buckets chronologically: known years first by (start_year, end_year, key), unknown at the end
+    buckets.sort_by(|a, b| {
+        let a_start = a.start_year.unwrap_or(u32::MAX);
+        let b_start = b.start_year.unwrap_or(u32::MAX);
+        if a_start != b_start {
+            return a_start.cmp(&b_start);
+        }
+        let a_end = a.end_year.unwrap_or(u32::MAX);
+        let b_end = b.end_year.unwrap_or(u32::MAX);
+        if a_end != b_end {
+            return a_end.cmp(&b_end);
+        }
+        a.key.cmp(&b.key)
     });
 
     if unknown_count > 0 {
@@ -845,8 +921,8 @@ pub fn compute_buckets_summary(
             let rem = unknown_count % split_parts;
             for i in 0..split_parts {
                 let count = base + if i < rem { 1 } else { 0 };
-                let key = format!("unknown_{:02}", i + 1);
-                let label = format!("Unknown {:02}", i + 1);
+                let key = format!("unknown_p{:02}", i + 1);
+                let label = format!("Unknown - p{:02}", i + 1);
                 if count > max_tracks && year_cfg.include_unknown {
                     warning_exceeds_max = true;
                 }
@@ -1285,6 +1361,7 @@ mod tests {
             split_1y: vec![2010],
             custom_merges: vec![[1950, 1989], [2011, 2012]],
             split_unknown_parts: None,
+            split_single_years: std::collections::HashMap::new(),
         };
 
         let mut single_year_counts = std::collections::HashMap::new();
@@ -1358,6 +1435,7 @@ mod tests {
             split_1y: vec![],
             custom_merges: vec![],
             split_unknown_parts: None,
+            split_single_years: std::collections::HashMap::new(),
         };
 
         let file_years: Vec<Option<u32>> = vec![None; 10];
@@ -1371,16 +1449,59 @@ mod tests {
         cfg.split_unknown_parts = Some(3);
         let (buckets2, _) = compute_buckets_summary(&file_years, &cfg, &single_year_counts, None, 400);
         assert_eq!(buckets2.len(), 3);
-        assert_eq!(buckets2[0].key, "unknown_01");
-        assert_eq!(buckets2[0].label, "Unknown 01");
+        assert_eq!(buckets2[0].key, "unknown_p01");
+        assert_eq!(buckets2[0].label, "Unknown - p01");
         assert_eq!(buckets2[0].track_count, 4);
 
-        assert_eq!(buckets2[1].key, "unknown_02");
-        assert_eq!(buckets2[1].label, "Unknown 02");
+        assert_eq!(buckets2[1].key, "unknown_p02");
+        assert_eq!(buckets2[1].label, "Unknown - p02");
         assert_eq!(buckets2[1].track_count, 3);
 
-        assert_eq!(buckets2[2].key, "unknown_03");
-        assert_eq!(buckets2[2].label, "Unknown 03");
+        assert_eq!(buckets2[2].key, "unknown_p03");
+        assert_eq!(buckets2[2].label, "Unknown - p03");
+        assert_eq!(buckets2[2].track_count, 3);
+    }
+
+    #[test]
+    fn test_split_single_year_parts() {
+        let mut single_year_counts = std::collections::HashMap::new();
+        single_year_counts.insert(2015, 10);
+
+        let mut cfg = YearSplitConfig {
+            enabled: true,
+            min_tracks: Some(2),
+            include_unknown: false,
+            split_5y: vec![2010],
+            split_1y: vec![2015],
+            custom_merges: vec![],
+            split_unknown_parts: None,
+            split_single_years: std::collections::HashMap::new(),
+        };
+
+        let file_years: Vec<Option<u32>> = vec![Some(2015); 10];
+        let (buckets1, _) = compute_buckets_summary(&file_years, &cfg, &single_year_counts, None, 400);
+        assert_eq!(buckets1.len(), 1);
+        assert_eq!(buckets1[0].key, "2015");
+        assert_eq!(buckets1[0].label, "2015");
+        assert_eq!(buckets1[0].track_count, 10);
+        assert_eq!(buckets1[0].bucket_type, "1y");
+
+        // Split 2015 into 3 parts (10 tracks -> 4, 3, 3)
+        cfg.split_single_years.insert(2015, 3);
+        let (buckets2, _) = compute_buckets_summary(&file_years, &cfg, &single_year_counts, None, 400);
+        assert_eq!(buckets2.len(), 3);
+        assert_eq!(buckets2[0].key, "2015_p01");
+        assert_eq!(buckets2[0].label, "2015 - p01");
+        assert_eq!(buckets2[0].track_count, 4);
+        assert_eq!(buckets2[0].bucket_type, "1y_split");
+        assert_eq!(buckets2[0].parent_key, Some("2015".to_string()));
+
+        assert_eq!(buckets2[1].key, "2015_p02");
+        assert_eq!(buckets2[1].label, "2015 - p02");
+        assert_eq!(buckets2[1].track_count, 3);
+
+        assert_eq!(buckets2[2].key, "2015_p03");
+        assert_eq!(buckets2[2].label, "2015 - p03");
         assert_eq!(buckets2[2].track_count, 3);
     }
 }
