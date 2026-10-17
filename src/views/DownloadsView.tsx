@@ -22,6 +22,7 @@ import { JobConsole } from "../components/downloads/JobConsole";
 import { AddEntryModal } from "../components/downloads/AddEntryModal";
 import { GlobalSettingsPanel } from "../components/downloads/GlobalSettingsPanel";
 import { ConfirmModal } from "../components/common/ConfirmModal";
+import { FileRepairModal } from "../components/FileRepairModal";
 
 type DownloadsViewProps = {
   config: MainConfig | null;
@@ -88,6 +89,11 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
     max_parallel_jobs: 2,
   });
   const [showGlobalSettings, setShowGlobalSettings] = useState(false);
+  const [upgradeModalTarget, setUpgradeModalTarget] = useState<{
+    open: boolean;
+    folder?: string;
+    playlistName?: string;
+  }>({ open: false });
 
   // Entries State
   const [entries, setEntries] = useState<DownloadEntry[]>([]);
@@ -403,6 +409,16 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
       updated_at: Date.now(),
     };
     await handleSaveEntry(updated);
+  };
+
+  const handleUpgradeEntryMp3s = (entry: DownloadEntry) => {
+    const folderPart = entry.name?.trim() ? entry.name.trim() : entry.playlist_title?.trim() || "";
+    const folder = folderPart ? `${entry.output_dir}/${folderPart}`.replace(/\\/g, "/") : entry.output_dir.replace(/\\/g, "/");
+    setUpgradeModalTarget({
+      open: true,
+      folder,
+      playlistName: entry.name || entry.playlist_title,
+    });
   };
 
   const handleRefreshMetadata = async (entry: DownloadEntry) => {
@@ -1053,6 +1069,22 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
           <button
             type="button"
             className="btn btn-secondary"
+            onClick={() =>
+              setUpgradeModalTarget({
+                open: true,
+                folder: defaultDest || config?.workspaceDir?.replace(/\\/g, "/") || config?.sourceDir?.replace(/\\/g, "/") || "",
+                playlistName: undefined,
+              })
+            }
+            style={{ padding: "4px 10px", fontSize: "0.8rem", display: "flex", alignItems: "center", gap: "5px" }}
+            title="Scan folder for audio tracks to repair missing metadata, embedded artwork, parameters, or upgrade formats"
+          >
+            <span>🛠️</span> File Repair
+          </button>
+
+          <button
+            type="button"
+            className="btn btn-secondary"
             onClick={() => setShowGlobalSettings(!showGlobalSettings)}
             style={{ padding: "4px 10px", fontSize: "0.8rem" }}
           >
@@ -1207,6 +1239,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
               onReconcileArchive={handleReconcileEntry}
               onDeleteEntry={handleDeleteEntry}
               onDeleteFilesExecuted={handleDeleteFilesExecuted}
+              onFileRepair={handleUpgradeEntryMp3s}
             />
           </div>
 
@@ -1315,6 +1348,15 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
           />
         );
       })()}
+
+      {/* Audio File Repair Modal */}
+      <FileRepairModal
+        isOpen={upgradeModalTarget.open}
+        onClose={() => setUpgradeModalTarget((prev) => ({ ...prev, open: false }))}
+        config={config}
+        initialFolder={upgradeModalTarget.folder}
+        playlistName={upgradeModalTarget.playlistName}
+      />
     </div>
   );
 };

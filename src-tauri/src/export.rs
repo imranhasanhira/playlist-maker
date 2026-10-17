@@ -280,6 +280,7 @@ fn is_os_system_junk(filename: &str) -> bool {
 
     let regex_pua = regex::Regex::new(r"[\uF000-\uFFFF]").unwrap_or_else(|_| regex::Regex::new(r"$^").unwrap());
     let regex_bangla = regex::Regex::new(r"[\u0980-\u09FF]").unwrap_or_else(|_| regex::Regex::new(r"$^").unwrap());
+    let regex_illegal_fat = regex::Regex::new(r#"[:*?"<>|]"#).unwrap_or_else(|_| regex::Regex::new(r"$^").unwrap());
 
     let mut dir_invalid_symbols: HashMap<String, (usize, Vec<String>)> = HashMap::new();
     let mut group_warnings: HashMap<(String, String), Vec<String>> = HashMap::new();
@@ -299,6 +300,11 @@ fn is_os_system_junk(filename: &str) -> bool {
             if entry.1.len() < 5 {
                 entry.1.push(rel_path.clone());
             }
+        }
+
+        if regex_illegal_fat.is_match(rel_path) {
+            let key = (parent_dir.clone(), "illegal_char".to_string());
+            group_warnings.entry(key).or_default().push(rel_path.clone());
         }
 
         if dest_str.len() > 255 {
@@ -328,6 +334,8 @@ fn is_os_system_junk(filename: &str) -> bool {
     for ((dir_path, w_type), tracks) in group_warnings {
         let msg = if w_type == "path_too_long" {
             "Path lengths in this folder exceed 255 characters (FAT32 limit for car players)".to_string()
+        } else if w_type == "illegal_char" {
+            "Filenames or paths contain forbidden FAT32/exFAT characters (such as '|', ':', '\"', '?', '*') which car infotainment systems cannot read or index".to_string()
         } else {
             "Filenames in this folder contain Bangla script. Ensure ID3v2.3 UTF-16 tags are written so BMW iDrive can render text".to_string()
         };

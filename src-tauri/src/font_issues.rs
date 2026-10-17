@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use lofty::probe::Probe;
-use lofty::tag::{Tag, TagType};
+use lofty::tag::TagType;
 use lofty::prelude::*;
 use regex::Regex;
 use any_ascii::any_ascii;
@@ -17,6 +17,48 @@ pub struct FontIssueItem {
     pub detected_issue: String,
     pub option1_preview: String,
     pub option2_preview: String,
+}
+
+pub fn clean_transliterate(input: &str) -> String {
+    // 1. Strip Private Use Area characters (\u{E000}-\u{F8FF}, \u{F000}-\u{FFFF}, etc.)
+    let no_pua: String = input.chars().filter(|&c| {
+        let u = c as u32;
+        !( (0xE000..=0xF8FF).contains(&u) || (0xF000..=0xFFFF).contains(&u) || (0xF0000..=0x10FFFF).contains(&u) )
+    }).collect();
+
+    // 2. Transliterate Unicode scripts (Bangla, Hindi, Arabic, Russian, etc.) to Latin/ASCII phonetics
+    let ascii_str = any_ascii(&no_pua);
+
+    // 3. Remove/replace illegal filesystem and car player characters
+    let mut cleaned = ascii_str
+        .replace('|', " - ")
+        .replace(':', " - ")
+        .replace('*', "")
+        .replace('?', "")
+        .replace('"', "")
+        .replace('<', "")
+        .replace('>', "")
+        .replace('`', "")
+        .replace('~', "");
+
+    // 4. Normalize multiple dashes and spaces
+    while cleaned.contains("  ") {
+        cleaned = cleaned.replace("  ", " ");
+    }
+    while cleaned.contains("- -") {
+        cleaned = cleaned.replace("- -", "-");
+    }
+    while cleaned.contains(" - - ") {
+        cleaned = cleaned.replace(" - - ", " - ");
+    }
+    while cleaned.contains(" - -") {
+        cleaned = cleaned.replace(" - -", " - ");
+    }
+    while cleaned.contains("--") {
+        cleaned = cleaned.replace("--", "-");
+    }
+
+    cleaned.trim().trim_matches('-').trim().to_string()
 }
 
 #[tauri::command]
@@ -82,56 +124,71 @@ pub async fn scan_font_issues(
                             break;
                         }
                         let abs_path_str = path.to_string_lossy().to_string();
+                        let file_name_str = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                         let rel_path_str = match path.strip_prefix(root_path) {
                             Ok(p) => p.to_string_lossy().to_string(),
-                            Err(_) => path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                            Err(_) => file_name_str.clone(),
                         };
 
                         let file_stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
                         let ext_str = path.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
 
                         let mut issues = Vec::new();
-                        let mut has_non_ascii = false;
+                        let mut has_issue = false;
 
-                        if regex_bangla.is_match(&rel_path_str) {
-                            issues.push("Bangla Unicode Script in Filename".to_string());
-                            has_non_ascii = true;
+                        // 1. Filename checks (check file_name_str directly to avoid parent folder false-positives)
+                        if regex_bangla.is_match(&file_name_str) {
+                            issues.push("Bangla Script in Filename".to_string());
+                            has_issue = true;
                         }
 
-                        if regex_pua.is_match(&rel_path_str) {
+                        if regex_pua.is_match(&file_name_str) {
                             issues.push("Private Use Area Symbol (e.g. )".to_string());
-                            has_non_ascii = true;
+                            has_issue = true;
                         }
 
+                        if !has_issue && file_name_str.chars().any(|c| c as u32 > 127) {
+                            issues.push("Non-ASCII Characters in Filename".to_string());
+                            has_issue = true;
+                        }
+
+                        // 2. Tag checks
                         if let Ok(tagged_file) = Probe::open(path).and_then(|f| f.read()) {
                             if let Some(tag) = tagged_file.primary_tag() {
                                 if let Some(t) = tag.title() {
                                     if regex_bangla.is_match(&t) {
                                         issues.push("Bangla Title Tag".to_string());
-                                        has_non_ascii = true;
+                                        has_issue = true;
+                                    } else if regex_pua.is_match(&t) {
+                                        issues.push("PUA Symbol in Title Tag".to_string());
+                                        has_issue = true;
                                     }
                                 }
                                 if let Some(a) = tag.artist() {
                                     if regex_bangla.is_match(&a) {
                                         issues.push("Bangla Artist Tag".to_string());
-                                        has_non_ascii = true;
+                                        has_issue = true;
+                                    } else if regex_pua.is_match(&a) {
+                                        issues.push("PUA Symbol in Artist Tag".to_string());
+                                        has_issue = true;
+                                    }
+                                }
+                                if let Some(alb) = tag.album() {
+                                    if regex_bangla.is_match(&alb) {
+                                        issues.push("Bangla Album Tag".to_string());
+                                        has_issue = true;
                                     }
                                 }
                             }
                         }
 
-                        if !has_non_ascii && rel_path_str.chars().any(|c| c as u32 > 127) {
-                            issues.push("Non-ASCII Characters".to_string());
-                            has_non_ascii = true;
-                        }
-
-                        if has_non_ascii {
-                            let option1_text = "Keep Bangla + Write ID3v2.3 UTF-16".to_string();
-                            let latin_stem = any_ascii(&file_stem);
+                        if has_issue {
+                            let clean_stem = clean_transliterate(&file_stem);
+                            let option1_text = "Rewrite ID3v2.3 UTF-16 Tags".to_string();
                             let option2_text = if ext_str.is_empty() {
-                                latin_stem
+                                clean_stem
                             } else {
-                                format!("{}.{}", latin_stem, ext_str)
+                                format!("{}.{}", clean_stem, ext_str)
                             };
 
                             local_items.push(FontIssueItem {
@@ -200,39 +257,42 @@ pub async fn apply_font_issue_option1(file_paths: Vec<String>) -> Result<crate::
 
             let file_path_str_clone = file_path_str.clone();
             let save_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                // Strip legacy ID3v1 tag to prevent lofty 30-byte split_at panic on Unicode strings
                 let _ = TagType::Id3v1.remove_from_path(path);
 
                 match Probe::open(path).and_then(|f| f.read()) {
                     Ok(mut tagged_file) => {
-                        tagged_file.remove(TagType::Id3v1);
+                        let _ = tagged_file.remove(TagType::Id3v1);
 
-                        let tag_type = match tagged_file.primary_tag_type() {
-                            TagType::Id3v1 => TagType::Id3v2,
-                            other => other,
-                        };
-                        let tag = if tagged_file.primary_tag().is_some() {
-                            tagged_file.primary_tag_mut().unwrap()
+                        if let Some(tag) = tagged_file.primary_tag_mut() {
+                            // Strip PUA characters even when preserving Bangla
+                            if let Some(t) = tag.title().map(|s| s.to_string()) {
+                                let no_pua: String = t.chars().filter(|&c| {
+                                    let u = c as u32;
+                                    !( (0xE000..=0xF8FF).contains(&u) || (0xF000..=0xFFFF).contains(&u) || (0xF0000..=0x10FFFF).contains(&u) )
+                                }).collect();
+                                tag.set_title(no_pua);
+                            }
+                            if let Some(a) = tag.artist().map(|s| s.to_string()) {
+                                let no_pua: String = a.chars().filter(|&c| {
+                                    let u = c as u32;
+                                    !( (0xE000..=0xF8FF).contains(&u) || (0xF000..=0xFFFF).contains(&u) || (0xF0000..=0x10FFFF).contains(&u) )
+                                }).collect();
+                                tag.set_artist(no_pua);
+                            }
+                            if let Some(alb) = tag.album().map(|s| s.to_string()) {
+                                let no_pua: String = alb.chars().filter(|&c| {
+                                    let u = c as u32;
+                                    !( (0xE000..=0xF8FF).contains(&u) || (0xF000..=0xFFFF).contains(&u) )
+                                }).collect();
+                                tag.set_album(no_pua);
+                            }
+                            tagged_file.save_to_path(path, lofty::config::WriteOptions::default())
+                                .map_err(|e| format!("Failed to save tags: {}", e))
                         } else {
-                            tagged_file.insert_tag(Tag::new(tag_type));
-                            tagged_file.primary_tag_mut().unwrap()
-                        };
-
-                        // Re-set title, artist, album
-                        if let Some(t) = tag.title().map(|s| s.to_string()) {
-                            tag.set_title(t);
+                            Ok(())
                         }
-                        if let Some(a) = tag.artist().map(|s| s.to_string()) {
-                            tag.set_artist(a);
-                        }
-                        if let Some(alb) = tag.album().map(|s| s.to_string()) {
-                            tag.set_album(alb);
-                        }
-
-                        tagged_file.save_to_path(path, lofty::config::WriteOptions::default())
-                            .map_err(|e| format!("Failed to save ID3v2 tag: {}", e))
                     }
-                    Err(e) => Err(format!("Failed to read tags: {}", e)),
+                    Err(e) => Err(format!("Failed to open tags: {}", e)),
                 }
             }));
 
@@ -277,44 +337,82 @@ pub async fn apply_font_issue_option2(
                 continue;
             }
 
-            let mut file_ok = true;
+            let file_path_str_clone = file_path_str.clone();
+            let mut tag_success = true;
+            let mut rename_success = true;
 
             // 1. Tags transliteration
             if target_type == "tags" || target_type == "both" {
-                let file_path_str_clone = file_path_str.clone();
                 let tag_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let _ = TagType::Id3v1.remove_from_path(path);
 
                     match Probe::open(path).and_then(|f| f.read()) {
                         Ok(mut tagged_file) => {
-                            tagged_file.remove(TagType::Id3v1);
+                            let _ = tagged_file.remove(TagType::Id3v1);
 
-                            let tag_type = match tagged_file.primary_tag_type() {
-                                TagType::Id3v1 => TagType::Id3v2,
-                                other => other,
-                            };
-                            let tag = if tagged_file.primary_tag().is_some() {
-                                tagged_file.primary_tag_mut().unwrap()
+                            let mut modified = false;
+                            if let Some(tag) = tagged_file.primary_tag_mut() {
+                                if let Some(t) = tag.title().map(|s| s.to_string()) {
+                                    let clean = clean_transliterate(&t);
+                                    if clean != t && !clean.is_empty() {
+                                        tag.set_title(clean);
+                                        modified = true;
+                                    }
+                                }
+                                if let Some(a) = tag.artist().map(|s| s.to_string()) {
+                                    let clean = clean_transliterate(&a);
+                                    if clean != a && !clean.is_empty() {
+                                        tag.set_artist(clean);
+                                        modified = true;
+                                    }
+                                }
+                                if let Some(alb) = tag.album().map(|s| s.to_string()) {
+                                    let clean = clean_transliterate(&alb);
+                                    if clean != alb && !clean.is_empty() {
+                                        tag.set_album(clean);
+                                        modified = true;
+                                    }
+                                }
+                                if let Some(c) = tag.comment().map(|s| s.to_string()) {
+                                    let trimmed = c.trim();
+                                    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+                                        // Strip PUA characters only, preserving URLs completely intact
+                                        let no_pua: String = trimmed.chars().filter(|&ch| {
+                                            let u = ch as u32;
+                                            !( (0xE000..=0xF8FF).contains(&u) || (0xF000..=0xFFFF).contains(&u) || (0xF0000..=0x10FFFF).contains(&u) )
+                                        }).collect();
+                                        if no_pua != c && !no_pua.is_empty() {
+                                            tag.set_comment(no_pua);
+                                            modified = true;
+                                        }
+                                    } else {
+                                        // Protect embedded URLs before transliterating comment text
+                                        let re_http = Regex::new(r#"https?://[^\s)\]}'"<]+"#).unwrap();
+                                        let mut urls = Vec::new();
+                                        let protected = re_http.replace_all(&c, |caps: &regex::Captures| {
+                                            let idx = urls.len();
+                                            urls.push(caps[0].to_string());
+                                            format!("__URL_PROTECTED_{}__", idx)
+                                        }).to_string();
+
+                                        let mut clean = clean_transliterate(&protected);
+                                        for (idx, orig_url) in urls.iter().enumerate() {
+                                            clean = clean.replace(&format!("__URL_PROTECTED_{}__", idx), orig_url);
+                                        }
+                                        if clean != c && !clean.is_empty() {
+                                            tag.set_comment(clean);
+                                            modified = true;
+                                        }
+                                    }
+                                }
+                            }
+
+                            if modified {
+                                tagged_file.save_to_path(path, lofty::config::WriteOptions::default())
+                                    .map_err(|e| format!("Failed to save tags: {}", e))
                             } else {
-                                tagged_file.insert_tag(Tag::new(tag_type));
-                                tagged_file.primary_tag_mut().unwrap()
-                            };
-
-                            if let Some(t) = tag.title().map(|s| s.to_string()) {
-                                tag.set_title(any_ascii(&t));
+                                Ok(())
                             }
-                            if let Some(a) = tag.artist().map(|s| s.to_string()) {
-                                tag.set_artist(any_ascii(&a));
-                            }
-                            if let Some(alb) = tag.album().map(|s| s.to_string()) {
-                                tag.set_album(any_ascii(&alb));
-                            }
-                            if let Some(c) = tag.comment().map(|s| s.to_string()) {
-                                tag.set_comment(any_ascii(&c));
-                            }
-
-                            tagged_file.save_to_path(path, lofty::config::WriteOptions::default())
-                                .map_err(|e| format!("Failed to save tags: {}", e))
                         }
                         Err(e) => Err(format!("Failed to open tags: {}", e)),
                     }
@@ -323,32 +421,32 @@ pub async fn apply_font_issue_option2(
                 match tag_res {
                     Ok(Ok(_)) => {},
                     Ok(Err(e)) => {
-                        file_ok = false;
-                        errors.push(format!("Failed to transliterate tags for '{}': {}", file_path_str_clone, e));
+                        tag_success = false;
+                        errors.push(format!("Tag update warning on '{}': {}", file_path_str_clone, e));
                     }
                     Err(_) => {
-                        file_ok = false;
-                        errors.push(format!("Tag processing error on '{}'", file_path_str_clone));
+                        tag_success = false;
+                        errors.push(format!("Tag processing crash on '{}'", file_path_str_clone));
                     }
                 }
             }
 
             // 2. Filename transliteration
-            if (target_type == "filenames" || target_type == "both") && file_ok {
-                if let Some(parent) = path.parent() {
-                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        let latin_stem = any_ascii(stem);
-                        let ext_str = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                        let new_name = if ext_str.is_empty() {
-                            latin_stem
-                        } else {
-                            format!("{}.{}", latin_stem, ext_str)
-                        };
+            if target_type == "filenames" || target_type == "both" {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    let clean_stem = clean_transliterate(stem);
+                    let ext_str = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                    let new_name = if ext_str.is_empty() {
+                        clean_stem
+                    } else {
+                        format!("{}.{}", clean_stem, ext_str)
+                    };
 
+                    if let Some(parent) = path.parent() {
                         let new_path = parent.join(&new_name);
                         if new_path != path {
                             if let Err(e) = fs::rename(path, &new_path) {
-                                file_ok = false;
+                                rename_success = false;
                                 errors.push(format!("Failed to rename '{}' to '{}': {}", file_path_str, new_name, e));
                             }
                         }
@@ -356,7 +454,14 @@ pub async fn apply_font_issue_option2(
                 }
             }
 
-            if file_ok {
+            let op_ok = match target_type.as_str() {
+                "tags" => tag_success,
+                "filenames" => rename_success,
+                "both" => tag_success && rename_success,
+                _ => tag_success || rename_success,
+            };
+
+            if op_ok {
                 success_count += 1;
             } else {
                 failure_count += 1;

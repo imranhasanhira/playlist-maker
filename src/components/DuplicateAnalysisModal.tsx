@@ -11,6 +11,7 @@ import {
   PruneCacheReport,
 } from "../types";
 import { formatDuration, formatSize } from "../utils/formatters";
+import { ConfirmModal } from "./common/ConfirmModal";
 
 const formatEta = (seconds: number | null | undefined): string => {
   if (seconds === null || seconds === undefined || isNaN(seconds) || seconds < 0) {
@@ -76,6 +77,96 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
   const [isPruning, setIsPruning] = useState<boolean>(false);
   const [isDeleting, setIsDeleting] = useState<boolean>(false);
   const [actionStatus, setActionStatus] = useState<string>("");
+  const [confirmModal, setConfirmModal] = useState<{
+    title: string;
+    message: string;
+    confirmText: string;
+    onConfirm: () => void;
+  } | null>(null);
+  const [excludedTrackPaths, setExcludedTrackPaths] = useState<Set<string>>(new Set());
+
+  const handleToggleExcludeTrack = (filePath: string) => {
+    setExcludedTrackPaths((prev) => {
+      const next = new Set(prev);
+      if (next.has(filePath)) {
+        next.delete(filePath);
+      } else {
+        next.add(filePath);
+      }
+      return next;
+    });
+  };
+
+  const handleDetachTrack = (group: DuplicateGroup, track: DuplicateTrackEntry) => {
+    const fileName = track.file_path.split(/[/\\]/).pop() || track.title;
+    setReport((prev) => {
+      if (!prev) return null;
+      const groupToUpdate = prev.duplicate_groups.find((g) => g.group_id === group.group_id);
+      if (!groupToUpdate) return prev;
+
+      const remainingTracks = groupToUpdate.tracks.filter((t) => t.file_path !== track.file_path);
+      if (remainingTracks.length <= 1) {
+        // Group dissolved because only 1 or 0 tracks remain
+        const newGroups = prev.duplicate_groups.filter((g) => g.group_id !== group.group_id);
+        const lostRedundant = Math.max(0, groupToUpdate.tracks.length - 1);
+        const lostBytes = groupToUpdate.tracks.filter((t) => !t.is_winner).reduce((sum, t) => sum + t.size_bytes, 0);
+        return {
+          ...prev,
+          duplicate_groups: newGroups,
+          redundant_files_count: Math.max(0, prev.redundant_files_count - lostRedundant),
+          redundant_bytes: Math.max(0, prev.redundant_bytes - lostBytes),
+        };
+      }
+
+      // If the detached track was the winner, promote the first remaining track as winner
+      if (track.is_winner && remainingTracks.length > 0) {
+        remainingTracks[0].is_winner = true;
+        remainingTracks[0].winner_reason = "Promoted as kept winner after detachment";
+      }
+
+      const updatedGroups = prev.duplicate_groups.map((g) => {
+        if (g.group_id !== group.group_id) return g;
+        return {
+          ...g,
+          tracks: remainingTracks,
+        };
+      });
+
+      const lostBytes = track.is_winner ? 0 : track.size_bytes;
+      return {
+        ...prev,
+        duplicate_groups: updatedGroups,
+        redundant_files_count: Math.max(0, prev.redundant_files_count - (track.is_winner ? 0 : 1)),
+        redundant_bytes: Math.max(0, prev.redundant_bytes - lostBytes),
+      };
+    });
+    setActionStatus(`Detached "${fileName}" from duplicate group. It is now kept and preserved.`);
+  };
+
+  const handleMakeWinner = (group: DuplicateGroup, track: DuplicateTrackEntry) => {
+    setReport((prev) => {
+      if (!prev) return null;
+      const updatedGroups = prev.duplicate_groups.map((g) => {
+        if (g.group_id !== group.group_id) return g;
+        const updatedTracks = g.tracks.map((t) => ({
+          ...t,
+          is_winner: t.file_path === track.file_path,
+          winner_reason: t.file_path === track.file_path ? "User selected as preferred winner" : "Alternative duplicate",
+        }));
+        updatedTracks.sort((a, b) => (b.is_winner ? 1 : 0) - (a.is_winner ? 1 : 0));
+        return {
+          ...g,
+          tracks: updatedTracks,
+        };
+      });
+      return {
+        ...prev,
+        duplicate_groups: updatedGroups,
+      };
+    });
+    const fileName = track.file_path.split(/[/\\]/).pop() || track.title;
+    setActionStatus(`Set "${fileName}" as the KEPT winner for this duplicate group.`);
+  };
 
   useEffect(() => {
     if (!isOpen) return;
@@ -189,44 +280,58 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
     let totalBytes = 0;
     for (const group of report.duplicate_groups) {
       for (const track of group.tracks) {
-        if (!track.is_winner) {
+        if (!track.is_winner && !excludedTrackPaths.has(track.file_path)) {
           toDelete.push(track.file_path);
           totalBytes += track.size_bytes;
         }
       }
     }
 
-    if (toDelete.length === 0) return;
-
-    const confirmMsg = `Permanently delete all ${toDelete.length} redundant duplicate copies (${formatSize(totalBytes)}) from disk?\n\nThe kept winner of each group will be preserved. This operation cannot be undone.`;
-    if (!window.confirm(confirmMsg)) return;
-
-    setIsDeleting(true);
-    setActionStatus("");
-    try {
-      const res = await invoke<DeleteDuplicatesResult>("delete_duplicate_files", {
-        filePaths: toDelete,
-      });
-
-      if (res.errors.length > 0) {
-        alert(
-          `Deleted ${res.deleted_count} duplicate files (${formatSize(res.freed_bytes)} freed), but encountered ${res.failed_count} errors:\n\n${res.errors.slice(0, 5).join("\n")}`
-        );
-      }
-
-      setActionStatus(`Deleted ${res.deleted_count} duplicate file(s) and freed ${formatSize(res.freed_bytes)} of disk space.`);
-      await runAnalysis();
-    } catch (e) {
-      alert(`Error deleting duplicates: ${e}`);
-    } finally {
-      setIsDeleting(false);
+    if (toDelete.length === 0) {
+      alert("No duplicate files are currently marked for deletion (all remaining tracks are marked as kept).");
+      return;
     }
+
+    const confirmMsg = `Permanently delete all ${toDelete.length} redundant duplicate copies (${formatSize(totalBytes)}) from disk?\n\nThe kept winner and any manually preserved files of each group will be preserved. This operation cannot be undone.`;
+    setConfirmModal({
+      title: "🗑️ Delete Duplicate Files",
+      message: confirmMsg,
+      confirmText: `Delete ${toDelete.length} Files`,
+      onConfirm: async () => {
+        setConfirmModal(null);
+        setIsDeleting(true);
+        setActionStatus("");
+        try {
+          const res = await invoke<DeleteDuplicatesResult>("delete_duplicate_files", {
+            filePaths: toDelete,
+          });
+
+          if (res.errors.length > 0) {
+            alert(
+              `Deleted ${res.deleted_count} duplicate files (${formatSize(res.freed_bytes)} freed), but encountered ${res.failed_count} errors:\n\n${res.errors.slice(0, 5).join("\n")}`
+            );
+          }
+
+          setActionStatus(`Deleted ${res.deleted_count} duplicate file(s) and freed ${formatSize(res.freed_bytes)} of disk space.`);
+          await runAnalysis();
+        } catch (e) {
+          alert(`Error deleting duplicates: ${e}`);
+        } finally {
+          setIsDeleting(false);
+        }
+      },
+    });
   };
 
   const handleKeepThisAndDeleteOthers = async (group: DuplicateGroup, keepTrack: DuplicateTrackEntry) => {
     if (isDeleting) return;
-    const otherTracks = group.tracks.filter((t) => t.file_path !== keepTrack.file_path);
-    if (otherTracks.length === 0) return;
+    const otherTracks = group.tracks.filter(
+      (t) => t.file_path !== keepTrack.file_path && !excludedTrackPaths.has(t.file_path)
+    );
+    if (otherTracks.length === 0) {
+      alert("The other tracks in this group are marked as kept. Uncheck 'Keep' if you wish to delete them.");
+      return;
+    }
 
     const fileName = keepTrack.file_path.split(/[/\\]/).pop() || keepTrack.title;
     const otherFilesList = otherTracks
@@ -235,38 +340,44 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
     const otherBytes = otherTracks.reduce((sum, t) => sum + t.size_bytes, 0);
 
     const confirmMsg = `Keep this track and permanently delete the other ${otherTracks.length} duplicate copy(ies) from disk?\n\nKEPT:\n• ${fileName}\n\nDELETE FROM DISK (${formatSize(otherBytes)} freed):\n${otherFilesList}`;
-    if (!window.confirm(confirmMsg)) return;
+    setConfirmModal({
+      title: "🗑️ Keep Selected & Delete Others",
+      message: confirmMsg,
+      confirmText: `Delete ${otherTracks.length} Files`,
+      onConfirm: async () => {
+        setConfirmModal(null);
+        setIsDeleting(true);
+        setActionStatus("");
+        try {
+          const filePaths = otherTracks.map((t) => t.file_path);
+          const res = await invoke<DeleteDuplicatesResult>("delete_duplicate_files", {
+            filePaths,
+          });
 
-    setIsDeleting(true);
-    setActionStatus("");
-    try {
-      const filePaths = otherTracks.map((t) => t.file_path);
-      const res = await invoke<DeleteDuplicatesResult>("delete_duplicate_files", {
-        filePaths,
-      });
+          if (res.errors.length > 0) {
+            alert(`Failed to delete some files:\n\n${res.errors.join("\n")}`);
+          }
 
-      if (res.errors.length > 0) {
-        alert(`Failed to delete some files:\n\n${res.errors.join("\n")}`);
-      }
+          setActionStatus(`Kept "${fileName}" and deleted ${res.deleted_count} duplicate file(s) (${formatSize(res.freed_bytes)} freed).`);
 
-      setActionStatus(`Kept "${fileName}" and deleted ${res.deleted_count} duplicate file(s) (${formatSize(res.freed_bytes)} freed).`);
-
-      // Immediately remove this group from the report view
-      setReport((prev) => {
-        if (!prev) return null;
-        const remainingGroups = prev.duplicate_groups.filter((g) => g.group_id !== group.group_id);
-        return {
-          ...prev,
-          duplicate_groups: remainingGroups,
-          redundant_files_count: Math.max(0, prev.redundant_files_count - otherTracks.length),
-          redundant_bytes: Math.max(0, prev.redundant_bytes - otherBytes),
-        };
-      });
-    } catch (e) {
-      alert(`Error deleting duplicate files: ${e}`);
-    } finally {
-      setIsDeleting(false);
-    }
+          // Immediately remove this group from the report view
+          setReport((prev) => {
+            if (!prev) return null;
+            const remainingGroups = prev.duplicate_groups.filter((g) => g.group_id !== group.group_id);
+            return {
+              ...prev,
+              duplicate_groups: remainingGroups,
+              redundant_files_count: Math.max(0, prev.redundant_files_count - otherTracks.length),
+              redundant_bytes: Math.max(0, prev.redundant_bytes - otherBytes),
+            };
+          });
+        } catch (e) {
+          alert(`Error deleting duplicate files: ${e}`);
+        } finally {
+          setIsDeleting(false);
+        }
+      },
+    });
   };
 
   const handlePlayGroupTrack = (group: DuplicateGroup, entry: DuplicateTrackEntry) => {
@@ -366,10 +477,10 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
       <div
         className="card"
         style={{
-          width: "960px",
+          width: "min(1560px, 96vw)",
           maxWidth: "96vw",
-          height: "84vh",
-          maxHeight: "820px",
+          height: "calc(100vh - 100px)",
+          maxHeight: "92vh",
           margin: 0,
           padding: "18px 22px",
           display: "flex",
@@ -881,8 +992,8 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
             >
               <div
                 style={{
-                  width: "560px",
-                  maxWidth: "92vw",
+                  width: "600px",
+                  maxWidth: "94vw",
                   backgroundColor: "var(--bg-secondary)",
                   border: "1px solid var(--border-color)",
                   borderRadius: "14px",
@@ -936,7 +1047,7 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
                           textOverflow: "ellipsis",
                         }}
                       >
-                        {analysisProgress?.phase_label || "Analyzing tracks & computing fingerprints..."}
+                        {analysisProgress?.stage_label || analysisProgress?.phase_label || "Analyzing tracks & computing fingerprints..."}
                       </div>
                       <div
                         style={{
@@ -947,9 +1058,11 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
                           textOverflow: "ellipsis",
                         }}
                       >
-                        {analysisProgress?.phase === "clustering"
-                          ? "Clustering pairwise duplicates & transitive matches"
-                          : "Deterministic stream hash, YouTube ID, & acoustic verification"}
+                        {analysisProgress?.stage === 1
+                          ? "Pass 1: Parallel tag reading & 64-bit audio stream hashing (zero FFmpeg)"
+                          : analysisProgress?.stage === 2
+                          ? "Pass 2: On-demand acoustic waveform decoding for ambiguous candidate pairs"
+                          : "Pass 3: Transitive duplicate clustering with centroid anti-chaining protection"}
                       </div>
                     </div>
                   </div>
@@ -968,6 +1081,111 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
                       {(analysisProgress?.progress ?? 0).toFixed(0)}%
                     </div>
                   </div>
+                </div>
+
+                {/* 3-Stage Step Progress Stepper */}
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "8px" }}>
+                  {[
+                    {
+                      num: 1,
+                      title: "1. Tags & Hashes",
+                      desc: "Fast metadata pass",
+                    },
+                    {
+                      num: 2,
+                      title: "2. Acoustic Verify",
+                      desc: "On-demand waveforms",
+                    },
+                    {
+                      num: 3,
+                      title: "3. Clustering",
+                      desc: "Centroid anti-chaining",
+                    },
+                  ].map((step) => {
+                    const currentStage = analysisProgress?.stage ?? 1;
+                    const isDone = currentStage > step.num || analysisProgress?.phase === "done";
+                    const isActive = currentStage === step.num && analysisProgress?.phase !== "done";
+                    const isPending = currentStage < step.num;
+
+                    return (
+                      <div
+                        key={step.num}
+                        style={{
+                          padding: "8px 10px",
+                          borderRadius: "8px",
+                          backgroundColor: isActive
+                            ? "rgba(139, 92, 246, 0.12)"
+                            : isDone
+                            ? "rgba(34, 197, 94, 0.08)"
+                            : "var(--bg-tertiary)",
+                          border: `1px solid ${
+                            isActive
+                              ? "var(--accent-purple)"
+                              : isDone
+                              ? "rgba(34, 197, 94, 0.35)"
+                              : "var(--border-color)"
+                          }`,
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: "2px",
+                          transition: "all 0.25s ease",
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                          <span
+                            style={{
+                              width: "18px",
+                              height: "18px",
+                              borderRadius: "50%",
+                              display: "inline-flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              fontSize: "0.68rem",
+                              fontWeight: 700,
+                              backgroundColor: isDone
+                                ? "var(--success)"
+                                : isActive
+                                ? "var(--accent-purple)"
+                                : "var(--bg-surface)",
+                              color: isDone || isActive ? "#fff" : "var(--text-secondary)",
+                              border: isPending ? "1px solid var(--border-color)" : "none",
+                              flexShrink: 0,
+                            }}
+                          >
+                            {isDone ? "✓" : step.num}
+                          </span>
+                          <span
+                            style={{
+                              fontSize: "0.75rem",
+                              fontWeight: 600,
+                              color: isActive
+                                ? "var(--accent-purple)"
+                                : isDone
+                                ? "var(--success)"
+                                : "var(--text-secondary)",
+                              whiteSpace: "nowrap",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                            }}
+                          >
+                            {step.title}
+                          </span>
+                        </div>
+                        <div
+                          style={{
+                            fontSize: "0.65rem",
+                            color: "var(--text-secondary)",
+                            paddingLeft: "24px",
+                            whiteSpace: "nowrap",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                          }}
+                        >
+                          {step.desc}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
 
                 {/* Progress bar container */}
@@ -992,6 +1210,27 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
                     }}
                   />
                 </div>
+
+                {/* Current file scanning label */}
+                {analysisProgress?.current_file && (
+                  <div
+                    style={{
+                      fontSize: "0.72rem",
+                      color: "var(--text-secondary)",
+                      fontFamily: "var(--font-mono)",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      backgroundColor: "var(--bg-surface)",
+                      padding: "4px 8px",
+                      borderRadius: "6px",
+                      border: "1px solid var(--border-color)",
+                    }}
+                    title={analysisProgress.current_file}
+                  >
+                    📄 Scanning: {analysisProgress.current_file}
+                  </div>
+                )}
 
                 {/* Stats & ETA row */}
                 <div
@@ -1039,48 +1278,14 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
                       color: "var(--accent-purple)",
                       padding: "3px 10px",
                       borderRadius: "6px",
+                      fontSize: "0.75rem",
                       fontWeight: 600,
-                      fontSize: "0.78rem",
-                      flexShrink: 0,
                       whiteSpace: "nowrap",
                     }}
                   >
                     <span>⏱</span>
                     <span>{formatEta(analysisProgress?.eta_secs)}</span>
                   </div>
-                </div>
-
-                {/* Current file scanning */}
-                <div
-                  style={{
-                    backgroundColor: "var(--bg-tertiary)",
-                    border: "1px solid var(--border-color)",
-                    borderRadius: "6px",
-                    height: "36px",
-                    boxSizing: "border-box",
-                    padding: "0 12px",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "8px",
-                    fontSize: "0.76rem",
-                    color: "var(--text-secondary)",
-                    minWidth: 0,
-                  }}
-                >
-                  <span style={{ flexShrink: 0, color: "var(--text-muted)" }}>Scanning:</span>
-                  <span
-                    style={{
-                      fontFamily: "var(--font-mono)",
-                      color: "var(--text-primary)",
-                      whiteSpace: "nowrap",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      minWidth: 0,
-                    }}
-                    title={analysisProgress?.current_file || undefined}
-                  >
-                    {analysisProgress?.current_file || "Reading tracks from workspace & playlists..."}
-                  </span>
                 </div>
 
                 {/* Helpful footnote */}
@@ -1193,13 +1398,13 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
                           }}
                         >
                           <th style={{ width: "34px", padding: "6px 8px", textAlign: "center" }}></th>
-                          <th style={{ width: "95px", padding: "6px 8px", textAlign: "left" }}>Status</th>
+                          <th style={{ width: "110px", padding: "6px 8px", textAlign: "left" }}>Status</th>
                           <th style={{ padding: "6px 8px", textAlign: "left" }}>File Name</th>
                           <th style={{ width: "160px", padding: "6px 8px", textAlign: "left" }}>Source Folder</th>
                           <th style={{ width: "125px", padding: "6px 8px", textAlign: "right" }}>Format</th>
                           <th style={{ width: "65px", padding: "6px 8px", textAlign: "right" }}>Duration</th>
                           <th style={{ width: "75px", padding: "6px 8px", textAlign: "right" }}>Size</th>
-                          <th style={{ width: "68px", padding: "6px 8px", textAlign: "center" }}>Actions</th>
+                          <th style={{ width: "105px", padding: "6px 8px", textAlign: "center" }}>Actions</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1260,23 +1465,46 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
                                   >
                                     🏆 KEPT
                                   </span>
+                                ) : excludedTrackPaths.has(t.file_path) ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleToggleExcludeTrack(t.file_path)}
+                                    style={{
+                                      fontSize: "0.68rem",
+                                      padding: "2px 6px",
+                                      borderRadius: "4px",
+                                      backgroundColor: "rgba(59, 130, 246, 0.16)",
+                                      color: "#60a5fa",
+                                      border: "1px solid rgba(59, 130, 246, 0.4)",
+                                      fontWeight: 700,
+                                      cursor: "pointer",
+                                      whiteSpace: "nowrap",
+                                      display: "inline-block",
+                                    }}
+                                    title="Click to mark for deletion instead"
+                                  >
+                                    🛡️ KEPT (Manual)
+                                  </button>
                                 ) : (
-                                  <span
+                                  <button
+                                    type="button"
+                                    onClick={() => handleToggleExcludeTrack(t.file_path)}
                                     style={{
                                       fontSize: "0.68rem",
                                       padding: "2px 6px",
                                       borderRadius: "4px",
                                       backgroundColor: "rgba(239, 68, 68, 0.12)",
-                                      color: "var(--text-secondary)",
-                                      border: "1px solid var(--border-color)",
+                                      color: "var(--danger)",
+                                      border: "1px solid rgba(239, 68, 68, 0.35)",
                                       fontWeight: 600,
+                                      cursor: "pointer",
                                       whiteSpace: "nowrap",
                                       display: "inline-block",
                                     }}
-                                    title={`Skipped duplicate (${t.winner_reason})`}
+                                    title={`Skipped duplicate (${t.winner_reason}) - Click to KEEP this file instead`}
                                   >
-                                    ⏭️ SKIPPED
-                                  </span>
+                                    🗑️ DELETE
+                                  </button>
                                 )}
                               </td>
 
@@ -1396,9 +1624,55 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
                                 {formatSize(t.size_bytes)}
                               </td>
 
-                              {/* 8. Actions: Keep this & delete others, Reveal in Finder */}
+                              {/* 8. Actions: Make Winner, Detach, Keep this & delete others, Reveal in Finder */}
                               <td style={{ padding: "6px 8px", textAlign: "center", verticalAlign: "middle", whiteSpace: "nowrap" }}>
-                                <div style={{ display: "inline-flex", alignItems: "center", gap: "5px" }}>
+                                <div style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
+                                  {!t.is_winner && (
+                                    <button
+                                      type="button"
+                                      className="btn btn-secondary"
+                                      onClick={() => handleMakeWinner(group, t)}
+                                      disabled={isDeleting}
+                                      style={{
+                                        width: "24px",
+                                        height: "24px",
+                                        padding: 0,
+                                        display: "inline-flex",
+                                        alignItems: "center",
+                                        justifyContent: "center",
+                                        borderRadius: "4px",
+                                        fontSize: "0.8rem",
+                                      }}
+                                      title={`Set as Kept Winner: Prefer "${fileName}" as the winner for this duplicate group`}
+                                    >
+                                      👑
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    className="btn btn-secondary"
+                                    onClick={() => handleDetachTrack(group, t)}
+                                    disabled={isDeleting}
+                                    style={{
+                                      width: "24px",
+                                      height: "24px",
+                                      padding: 0,
+                                      display: "inline-flex",
+                                      alignItems: "center",
+                                      justifyContent: "center",
+                                      borderRadius: "4px",
+                                      color: "var(--accent-purple)",
+                                    }}
+                                    title={`✂️ Detach from Group: Disconnect "${fileName}" so it is treated as a separate unique song and preserved`}
+                                  >
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                                      <circle cx="6" cy="6" r="3" />
+                                      <circle cx="6" cy="18" r="3" />
+                                      <line x1="20" y1="4" x2="8.12" y2="15.88" />
+                                      <line x1="14.47" y1="14.48" x2="20" y2="20" />
+                                      <line x1="8.12" y1="8.12" x2="12" y2="12" />
+                                    </svg>
+                                  </button>
                                   <button
                                     type="button"
                                     className="btn btn-secondary"
@@ -1417,7 +1691,7 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
                                       color: t.is_winner ? "var(--success)" : "var(--accent-purple)",
                                       cursor: isDeleting ? "not-allowed" : "pointer",
                                     }}
-                                    title={`Keep this, and delete others: Keep "${fileName}" and permanently delete the other ${group.tracks.length - 1} duplicate copy(ies) in this group from disk`}
+                                    title={`Keep this, and delete others: Keep "${fileName}" and permanently delete other duplicate copies from disk`}
                                   >
                                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                                       <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
@@ -1457,6 +1731,19 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
           )}
         </div>
       </div>
+
+      {confirmModal && (
+        <ConfirmModal
+          title={confirmModal.title}
+          message={confirmModal.message}
+          confirmText={confirmModal.confirmText}
+          confirmVariant="danger"
+          isExecuting={isDeleting}
+          executingText="Deleting duplicate files..."
+          onConfirm={confirmModal.onConfirm}
+          onCancel={() => setConfirmModal(null)}
+        />
+      )}
     </div>
   );
 };

@@ -1092,6 +1092,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
                                   fontWeight: 600,
                                 }}>
                                   {warn.warning_type === "invalid_symbol" && "🚨 "}
+                                  {warn.warning_type === "illegal_char" && "⛔ "}
                                   {warn.warning_type === "path_too_long" && "📏 "}
                                   {warn.warning_type === "non_ascii" && "🇧🇩 "}
                                   {warn.warning_type === "apple_double" && "🍏 "}

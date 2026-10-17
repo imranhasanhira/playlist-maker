@@ -310,6 +310,9 @@ export interface PruneCacheReport {
 export interface DuplicateAnalysisProgressPayload {
   phase: "fingerprinting" | "clustering" | "done" | string;
   phase_label: string;
+  stage: number;
+  stage_name: "metadata" | "acoustic" | "clustering" | "done" | string;
+  stage_label: string;
   current: number;
   total: number;
   progress: number;
@@ -324,6 +327,72 @@ export interface DeleteDuplicatesResult {
   freed_bytes: number;
   errors: string[];
 }
+
+export interface Mp3UpgradeCandidate {
+  path: string;
+  filename: string;
+  youtube_id: string;
+  youtube_url: string;
+  title: string;
+  artist: string;
+  file_size_bytes: number;
+  format_ext: string;
+  is_mp3: boolean;
+  missing_tags: boolean;
+  missing_artwork: boolean;
+  reason: string;
+  m4a_already_exists: boolean;
+  m4a_path: string;
+}
+
+export interface Mp3UpgradeScanReport {
+  folder: string;
+  total_files_scanned: number;
+  total_mp3s_found: number;
+  candidates: Mp3UpgradeCandidate[];
+  skipped_no_id_count: number;
+  already_upgraded_count: number;
+  param_issues_count: number;
+}
+
+export interface Mp3UpgradeProgressPayload {
+  current: number;
+  total: number;
+  current_file: string;
+  status: "downloading" | "cancelled" | "done" | string;
+  success_count: number;
+  failed_count: number;
+  saved_bytes: number;
+}
+
+export interface Mp3UpgradeResultItem {
+  path: string;
+  filename: string;
+  youtube_id: string;
+  success: boolean;
+  m4a_path: string | null;
+  error: string | null;
+  original_size_bytes: number;
+  new_size_bytes: number;
+  dead_tag_cleaned?: boolean;
+}
+
+export interface Mp3UpgradeExecutionReport {
+  total: number;
+  success_count: number;
+  failed_count: number;
+  skipped_count: number;
+  freed_bytes: number;
+  results: Mp3UpgradeResultItem[];
+}
+
+// File Repair type aliases
+export type FileRepairCandidate = Mp3UpgradeCandidate;
+export type FileRepairScanReport = Mp3UpgradeScanReport;
+export type FileRepairProgressPayload = Mp3UpgradeProgressPayload;
+export type FileRepairResultItem = Mp3UpgradeResultItem;
+export type FileRepairExecutionReport = Mp3UpgradeExecutionReport;
+
 
 
 

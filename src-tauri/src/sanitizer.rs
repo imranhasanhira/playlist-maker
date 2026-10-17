@@ -60,94 +60,234 @@ pub struct TaskProgress {
     pub file_path: Option<String>,
 }
 
-// Replicate Python's sanitizeText with customizable strip_phrases
-pub fn sanitize_text(original_text: &str, strip_phrases: &[String]) -> String {
-    // 1. Normalize full-width pipes ｜ (U+FF5C) and unicode bars to standard ASCII pipe |
-    let mut new_text = original_text
-        .replace('｜', "|")
-        .replace('│', "|")
-        .replace('┃', "|")
-        .replace('║', "|");
+// Precompiled regex engine for high-performance scanning across thousands of files
+pub struct CompiledSanitizer {
+    strip_regexes: Vec<Regex>,
+    re_pua: Regex,
+    re_url: Regex,
+    re_hashtag: Regex,
+    re_bracket_junk: Regex,
+    re_bracket_promo: Regex,
+    re_resolution: Regex,
+    re_delim_brackets: Regex,
+    re_empty_brackets: Regex,
+    re_composite_sep: Regex,
+    re_leading_track_num: Regex,
+    re_multi_dots: Regex,
+    re_multi_dashes: Regex,
+    re_multi_spaces: Regex,
+    re_leading_sep: Regex,
+    re_trailing_sep_no_ext: Regex,
+}
 
-    // 2. Remove private use area / invalid control characters (e.g. \u{F027} )
-    if let Ok(re) = Regex::new(r"[\uF000-\uFFFF]+") {
-        new_text = re.replace_all(&new_text, "").to_string();
-    }
+impl CompiledSanitizer {
+    pub fn new(strip_phrases: &[String]) -> Self {
+        let mut strip_regexes = Vec::new();
+        for part in strip_phrases {
+            let trimmed = part.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
 
-    // Remove keywords case-insensitively (supporting both literal strings and regexes like \d+)
-    for part in strip_phrases {
-        let trimmed = part.trim();
-        if trimmed.is_empty() {
-            continue;
+            let re = if part.contains(r"\d") || part.contains(r"\s") || part.contains(r"\w") {
+                let safe_pattern = part.replace(" | ", r"\s*\|\s*").replace("|", r"\|");
+                RegexBuilder::new(&safe_pattern).case_insensitive(true).build().ok()
+            } else {
+                RegexBuilder::new(&regex::escape(part)).case_insensitive(true).build().ok()
+            };
+
+            if let Some(r) = re {
+                strip_regexes.push(r);
+            }
         }
 
-        let re = if part.contains(r"\d") || part.contains(r"\s") || part.contains(r"\w") {
-            let safe_pattern = part.replace(" | ", r"\s*\|\s*").replace("|", r"\|");
-            RegexBuilder::new(&safe_pattern).case_insensitive(true).build().ok()
-        } else {
-            None
-        };
+        Self {
+            strip_regexes,
+            re_pua: Regex::new(r"[\uF000-\uFFFF]+").unwrap(),
+            re_url: RegexBuilder::new(
+                r#"(?i)(?:https?://[^\s)\]}'"<>]+|www\.[a-zA-Z0-9\-\._~%]+(?:/[^\s)\]}'"<>]*)?|\b[a-zA-Z0-9\-]{2,}\.(?:com|net|org|info|biz|xyz|top|site|online|club|vip|mobi|pk|fm)(?:/[^\s)\]}'"<>]*)?)"#
+            ).case_insensitive(true).build().unwrap(),
+            re_hashtag: RegexBuilder::new(r"#\w+").case_insensitive(true).build().unwrap(),
+            re_bracket_junk: RegexBuilder::new(r"[(|｜\[\{]+\s*(HQ|HD|Official\s*(Audio|Video|Music\s*Video|Track)?|Audio|Video|Lyrics?|Lyrical|Sound\s*Track|Soundtrack)\s*[)|｜\]\}]+").case_insensitive(true).build().unwrap(),
+            re_bracket_promo: RegexBuilder::new(
+                r#"[\(\[\{]\s*(?:source|download(?:ed)?\s*(?:from)?|visit|website|from|ripped\s*by|courtesy\s*of)\s*[\)\]\}]"#
+            ).case_insensitive(true).build().unwrap(),
+            re_resolution: RegexBuilder::new(r"\s+\d+p\s+").case_insensitive(true).build().unwrap(),
+            re_delim_brackets: Regex::new(r"[\(\[\{]\s*[-–—|｜│┃║:：_~•*\\/><#]+[-–—|｜│┃║:：_~•*\\/><#\s]*[\)\]\}]").unwrap(),
+            re_empty_brackets: Regex::new(r"[\(\[\{]\s*[\)\]\}]").unwrap(),
+            re_composite_sep: Regex::new(r"(\s*[-–—|｜│┃║:：_~•\\/><#]\s*){2,}|\s*[-–—|｜│┃║:：_~•\\/><#]\s+|\s+[-–—|｜│┃║:：_~•\\/><#]\s*|[|｜│┃║:：\\/]+").unwrap(),
+            re_leading_track_num: Regex::new(r#"^\s*\d{1,3}\s*[-–—._]\s*"#).unwrap(),
+            re_multi_dots: Regex::new(r"\.+").unwrap(),
+            re_multi_dashes: Regex::new(r"\s*-\s*(-\s*)+").unwrap(),
+            re_multi_spaces: Regex::new(r"\s+").unwrap(),
+            // Leading/trailing separators: NEVER include brackets '()[]{}' so balanced features like '(feat. ...)' and '(Acoustic)' remain intact
+            re_leading_sep: Regex::new(r#"^[-–—_~•|｜│┃║:：＂'"\\/><#\s]+"#).unwrap(),
+            re_trailing_sep_no_ext: Regex::new(r#"[-–—_~•|｜│┃║:：＂'"\\/><#\s]+$"#).unwrap(),
+        }
+    }
 
-        let re = re.or_else(|| {
-            RegexBuilder::new(&regex::escape(part)).case_insensitive(true).build().ok()
-        });
+    fn sanitize_common(&self, original_text: &str) -> String {
+        // 1. Normalize full-width pipes ｜ (U+FF5C) and unicode bars to standard ASCII pipe |
+        let mut new_text = original_text
+            .replace('｜', "|")
+            .replace('│', "|")
+            .replace('┃', "|")
+            .replace('║', "|");
 
-        if let Some(re) = re {
+        // 2. Remove private use area / invalid control characters (e.g. \u{F027} )
+        new_text = self.re_pua.replace_all(&new_text, "").to_string();
+
+        // 3. Remove URLs and promo web domains from filenames and tag names
+        new_text = self.re_url.replace_all(&new_text, "").to_string();
+
+        // 4. Remove keywords case-insensitively using precompiled regexes
+        for re in &self.strip_regexes {
             new_text = re.replace_all(&new_text, "").to_string();
         }
+
+        // 5. Strip hashtags (e.g. #bangla, #song, #shorts, #trending)
+        new_text = self.re_hashtag.replace_all(&new_text, "").to_string();
+
+        // 6. Strip bracketed descriptors like (Official Video), [HD], and promo brackets like [Downloaded from ]
+        new_text = self.re_bracket_junk.replace_all(&new_text, "").to_string();
+        new_text = self.re_bracket_promo.replace_all(&new_text, "").to_string();
+        new_text = self.re_resolution.replace_all(&new_text, "").to_string();
+
+        // 7. Handle delimiter-enclosing brackets (e.g. "( - )", "[ | ]") by replacing them with " - ", and strip empty brackets ("()", "[]")
+        new_text = self.re_delim_brackets.replace_all(&new_text, " - ").to_string();
+        new_text = self.re_empty_brackets.replace_all(&new_text, "").to_string();
+
+        // 8. Strip forbidden quotes and wildcards
+        new_text = new_text
+            .replace('"', "")
+            .replace('＂', "")
+            .replace('?', "")
+            .replace('？', "")
+            .replace('*', "")
+            .replace('＊', "");
+
+        // 9. Collapse any composite separator cluster in a SINGLE pass:
+        new_text = self.re_composite_sep.replace_all(&new_text, " - ").to_string();
+
+        // 10. Collapse multiple dots, dashes, and spaces
+        new_text = self.re_multi_dots.replace_all(&new_text, ".").to_string();
+        new_text = self.re_multi_dashes.replace_all(&new_text, " - ").to_string();
+        new_text = self.re_multi_spaces.replace_all(&new_text, " ").to_string();
+
+        // 11. Trim leading punctuation & separators (preserving valid opening brackets like "(I Can't Get No)")
+        new_text = self.re_leading_sep.replace_all(&new_text, "").to_string();
+
+        new_text
     }
 
-    // Strip hashtags (e.g. #bangla, #song, #shorts, #trending)
-    if let Ok(re) = RegexBuilder::new(r"#\w+")
-        .case_insensitive(true)
-        .build()
-    {
-        new_text = re.replace_all(&new_text, "").to_string();
+    pub fn sanitize_filename(&self, original_text: &str) -> String {
+        // If the filename has an audio/media extension, sanitize stem and preserve extension
+        let (stem, ext_opt) = match original_text.rfind('.') {
+            Some(dot_idx) if dot_idx > 0 && dot_idx + 1 < original_text.len() => {
+                let candidate_ext = &original_text[dot_idx + 1..];
+                // Check if candidate_ext looks like a file extension (1 to 5 alphanumeric characters)
+                // and NOT a known web domain TLD (e.g. com, net, org, info, biz, pk, fm)
+                let ext_lower = candidate_ext.to_lowercase();
+                let is_web_tld = matches!(
+                    ext_lower.as_str(),
+                    "com" | "net" | "org" | "info" | "biz" | "xyz" | "top" | "site" | "online" | "club" | "vip" | "mobi" | "pk" | "fm" | "html" | "php" | "asp"
+                );
+                if !is_web_tld && candidate_ext.chars().all(|c| c.is_alphanumeric()) && candidate_ext.len() <= 5 {
+                    (&original_text[..dot_idx], Some(candidate_ext))
+                } else {
+                    (original_text, None)
+                }
+            }
+            _ => (original_text, None),
+        };
+
+        let mut clean_stem = self.sanitize_common(stem);
+
+        // Strip leading track numbering only if followed by explicit delimiter (e.g. "01. ", "01 - ")
+        clean_stem = self.re_leading_track_num.replace_all(&clean_stem, "").to_string();
+
+        // Clean any leading separators exposed after removing track numbering
+        clean_stem = self.re_leading_sep.replace_all(&clean_stem, "").to_string();
+
+        // Strip trailing separators from the stem
+        clean_stem = self.re_trailing_sep_no_ext.replace_all(&clean_stem, "").to_string();
+
+        let clean_stem = clean_stem.trim();
+        if clean_stem.is_empty() {
+            return original_text.trim().to_string();
+        }
+
+        match ext_opt {
+            Some(ext) => format!("{}.{}", clean_stem, ext),
+            None => clean_stem.to_string(),
+        }
     }
 
-    if let Ok(re) = RegexBuilder::new(r"[(|｜\[\{]+\s*(HQ|HD|Official\s*(Audio|Video|Music\s*Video|Track)?|Audio|Video|Lyrics?|Lyrical|Sound\s*Track|Soundtrack)\s*[)|｜\]\}]+")
-        .case_insensitive(true)
-        .build()
-    {
-        new_text = re.replace_all(&new_text, "").to_string();
+    pub fn sanitize_metadata(&self, original_text: &str) -> String {
+        let mut new_text = self.sanitize_common(original_text);
+
+        // For metadata (Title, Artist, Album), NEVER strip leading numbers (e.g. "1984", "21 Guns")
+        new_text = self.re_trailing_sep_no_ext.replace_all(&new_text, "").to_string();
+
+        new_text.trim().to_string()
     }
 
-    if let Ok(re) = RegexBuilder::new(r"\s+\d+p\s+")
-        .case_insensitive(true)
-        .build()
-    {
-        new_text = re.replace_all(&new_text, "").to_string();
+    pub fn sanitize_comment(&self, original_text: &str) -> String {
+        let trimmed = original_text.trim();
+        // If the comment is primarily a URL, preserve it untouched (only strip corrupt PUA glyphs)
+        if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            let no_pua: String = trimmed.chars().filter(|&c| {
+                let u = c as u32;
+                !( (0xE000..=0xF8FF).contains(&u) || (0xF000..=0xFFFF).contains(&u) || (0xF0000..=0x10FFFF).contains(&u) )
+            }).collect();
+            return no_pua.trim().to_string();
+        }
+
+        // For description/comment text, protect all embedded URLs with tokens to prevent URL corruption
+        let mut url_placeholders: Vec<String> = Vec::new();
+        let re_http = Regex::new(r#"https?://[^\s)\]}'"<]+"#).unwrap();
+        let protected_text = re_http.replace_all(original_text, |caps: &regex::Captures| {
+            let idx = url_placeholders.len();
+            url_placeholders.push(caps[0].to_string());
+            format!("__URL_PROTECTED_{}__", idx)
+        }).to_string();
+
+        let mut cleaned = protected_text;
+
+        // 1. Remove PUA characters
+        cleaned = self.re_pua.replace_all(&cleaned, "").to_string();
+
+        // 2. Strip user-defined phrases from surrounding text
+        for re in &self.strip_regexes {
+            cleaned = re.replace_all(&cleaned, "").to_string();
+        }
+
+        // 3. Strip bracket junk like (Official Video), [HD]
+        cleaned = self.re_bracket_junk.replace_all(&cleaned, "").to_string();
+
+        // 4. Strip empty brackets
+        cleaned = self.re_empty_brackets.replace_all(&cleaned, "").to_string();
+
+        // 5. Restore protected URLs untouched
+        for (idx, original_url) in url_placeholders.iter().enumerate() {
+            let holder = format!("__URL_PROTECTED_{}__", idx);
+            cleaned = cleaned.replace(&holder, original_url);
+        }
+
+        // 6. Clean multiple consecutive spaces and trim
+        cleaned = self.re_multi_spaces.replace_all(&cleaned, " ").to_string();
+        cleaned.trim().to_string()
     }
 
-    if let Ok(re) = Regex::new(r"\s*[|(｜\|\-\[\{]+(\s*[)|｜\|\-\]\}])+\s*") {
-        new_text = re.replace_all(&new_text, " | ").to_string();
+    pub fn sanitize(&self, original_text: &str) -> String {
+        self.sanitize_filename(original_text)
     }
+}
 
-    if let Ok(re) = Regex::new(r#"\s?[":：＂]+\s?"#) {
-        new_text = re.replace_all(&new_text, " | ").to_string();
-    }
-
-    if let Ok(re) = Regex::new(r"^\.*\s*\d+\.*\s*") {
-        new_text = re.replace_all(&new_text, "").to_string();
-    }
-
-    if let Ok(re) = Regex::new(r"\.+") {
-        new_text = re.replace_all(&new_text, ".").to_string();
-    }
-
-    if let Ok(re) = Regex::new(r"\s+") {
-        new_text = re.replace_all(&new_text, " ").to_string();
-    }
-
-    if let Ok(re) = Regex::new(r#"^[()|｜:：＂'"\-\[\]\{\}\s]+"#) {
-        new_text = re.replace_all(&new_text, "").to_string();
-    }
-
-    if let Ok(re) = Regex::new(r#"[(|｜:：＂'"\-\[\]\{\}\s]+(\.[^\.]+)$"#) {
-        new_text = re.replace_all(&new_text, "$1").to_string();
-    }
-
-    new_text.trim().to_string()
+// Clean and sanitize text for file names and tags, used in unit tests
+#[cfg(test)]
+pub fn sanitize_text(original_text: &str, strip_phrases: &[String]) -> String {
+    CompiledSanitizer::new(strip_phrases).sanitize(original_text)
 }
 
 use std::sync::{Mutex, OnceLock};
@@ -234,6 +374,9 @@ pub fn scan_sanitize_files(
     let items_ref = &items_mutex;
     let last_emit_ref = &last_emit_mutex;
 
+    let sanitizer = CompiledSanitizer::new(strip_phrases);
+    let sanitizer_ref = &sanitizer;
+
     std::thread::scope(|s| {
         for chunk in files.chunks(chunk_size) {
             s.spawn(move || {
@@ -243,7 +386,7 @@ pub fn scan_sanitize_files(
                         break;
                     }
                     if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                        let sanitized = sanitize_text(file_name, strip_phrases);
+                        let sanitized = sanitizer_ref.sanitize(file_name);
                         if sanitized != file_name && !sanitized.is_empty() {
                             let original_path = path.to_string_lossy().to_string();
                             let relative_path = pathdiff::diff_paths(path, folder)
@@ -549,6 +692,9 @@ pub fn scan_sanitize_metadata(
     let items_ref = &items_mutex;
     let last_emit_ref = &last_emit_mutex;
 
+    let sanitizer = CompiledSanitizer::new(strip_phrases);
+    let sanitizer_ref = &sanitizer;
+
     std::thread::scope(|s| {
         for chunk in files.chunks(chunk_size) {
             s.spawn(move || {
@@ -564,7 +710,7 @@ pub fn scan_sanitize_metadata(
 
                             // 1. Title
                             if let Some(title) = tag.title() {
-                                let sanitized = sanitize_text(&title, strip_phrases);
+                                let sanitized = sanitizer_ref.sanitize_metadata(&title);
                                 if sanitized != title.as_ref() && !sanitized.is_empty() {
                                     local_items.push(MetadataSanitizeItem {
                                         file_path: file_path_str.clone(),
@@ -577,7 +723,7 @@ pub fn scan_sanitize_metadata(
 
                             // 2. Artist
                             if let Some(artist) = tag.artist() {
-                                let sanitized = sanitize_text(&artist, strip_phrases);
+                                let sanitized = sanitizer_ref.sanitize_metadata(&artist);
                                 if sanitized != artist.as_ref() && !sanitized.is_empty() {
                                     local_items.push(MetadataSanitizeItem {
                                         file_path: file_path_str.clone(),
@@ -590,7 +736,7 @@ pub fn scan_sanitize_metadata(
 
                             // 3. Album
                             if let Some(album) = tag.album() {
-                                let sanitized = sanitize_text(&album, strip_phrases);
+                                let sanitized = sanitizer_ref.sanitize_metadata(&album);
                                 if sanitized != album.as_ref() && !sanitized.is_empty() {
                                     local_items.push(MetadataSanitizeItem {
                                         file_path: file_path_str.clone(),
@@ -603,7 +749,7 @@ pub fn scan_sanitize_metadata(
 
                             // 4. Description (Comment)
                             if let Some(comment) = tag.comment() {
-                                let sanitized = sanitize_text(&comment, strip_phrases);
+                                let sanitized = sanitizer_ref.sanitize_comment(&comment);
                                 if sanitized != comment.as_ref() && !sanitized.is_empty() {
                                     local_items.push(MetadataSanitizeItem {
                                         file_path: file_path_str.clone(),
@@ -837,6 +983,9 @@ pub fn scan_all_unified(
     let font_issues_ref = &font_issue_items_mutex;
     let last_emit_ref = &last_emit_mutex;
 
+    let sanitizer = CompiledSanitizer::new(strip_phrases);
+    let sanitizer_ref = &sanitizer;
+
     std::thread::scope(|s| {
         for chunk in audio_files.chunks(chunk_size) {
             s.spawn(move || {
@@ -859,7 +1008,7 @@ pub fn scan_all_unified(
 
                     // Analyzer A: Filename sanitization
                     if let Some(file_name) = file_name_opt {
-                        let sanitized = sanitize_text(file_name, strip_phrases);
+                        let sanitized = sanitizer_ref.sanitize(file_name);
                         if sanitized != file_name && !sanitized.is_empty() {
                             local_filenames.push(SanitizeItem {
                                 original_path: abs_path_str.clone(),
@@ -872,22 +1021,28 @@ pub fn scan_all_unified(
 
                     // Analyzer B & C: Font issues & Metadata tags (Single Probe::open pass)
                     let mut font_issues_list = Vec::new();
-                    let mut has_non_ascii = false;
+                    let mut has_issue = false;
 
-                    if regex_bangla.is_match(&rel_path_str) {
-                        font_issues_list.push("Bangla Unicode Script in Filename".to_string());
-                        has_non_ascii = true;
+                    let file_name_for_font = file_name_opt.unwrap_or("");
+
+                    if regex_bangla.is_match(file_name_for_font) {
+                        font_issues_list.push("Bangla Script in Filename".to_string());
+                        has_issue = true;
                     }
-                    if regex_pua.is_match(&rel_path_str) {
+                    if regex_pua.is_match(file_name_for_font) {
                         font_issues_list.push("Private Use Area Symbol (e.g. )".to_string());
-                        has_non_ascii = true;
+                        has_issue = true;
+                    }
+                    if !has_issue && file_name_for_font.chars().any(|c| c as u32 > 127) {
+                        font_issues_list.push("Non-ASCII Characters in Filename".to_string());
+                        has_issue = true;
                     }
 
                     if let Ok(tagged_file) = Probe::open(path).and_then(|f| f.read()) {
                         if let Some(tag) = tagged_file.primary_tag() {
                             // Check title
                             if let Some(title) = tag.title() {
-                                let sanitized = sanitize_text(&title, strip_phrases);
+                                let sanitized = sanitizer_ref.sanitize_metadata(&title);
                                 if sanitized != title.as_ref() && !sanitized.is_empty() {
                                     local_metadata.push(MetadataSanitizeItem {
                                         file_path: abs_path_str.clone(),
@@ -898,13 +1053,16 @@ pub fn scan_all_unified(
                                 }
                                 if regex_bangla.is_match(&title) {
                                     font_issues_list.push("Bangla Title Tag".to_string());
-                                    has_non_ascii = true;
+                                    has_issue = true;
+                                } else if regex_pua.is_match(&title) {
+                                    font_issues_list.push("PUA Symbol in Title Tag".to_string());
+                                    has_issue = true;
                                 }
                             }
 
                             // Check artist
                             if let Some(artist) = tag.artist() {
-                                let sanitized = sanitize_text(&artist, strip_phrases);
+                                let sanitized = sanitizer_ref.sanitize_metadata(&artist);
                                 if sanitized != artist.as_ref() && !sanitized.is_empty() {
                                     local_metadata.push(MetadataSanitizeItem {
                                         file_path: abs_path_str.clone(),
@@ -915,13 +1073,16 @@ pub fn scan_all_unified(
                                 }
                                 if regex_bangla.is_match(&artist) {
                                     font_issues_list.push("Bangla Artist Tag".to_string());
-                                    has_non_ascii = true;
+                                    has_issue = true;
+                                } else if regex_pua.is_match(&artist) {
+                                    font_issues_list.push("PUA Symbol in Artist Tag".to_string());
+                                    has_issue = true;
                                 }
                             }
 
                             // Check album
                             if let Some(album) = tag.album() {
-                                let sanitized = sanitize_text(&album, strip_phrases);
+                                let sanitized = sanitizer_ref.sanitize_metadata(&album);
                                 if sanitized != album.as_ref() && !sanitized.is_empty() {
                                     local_metadata.push(MetadataSanitizeItem {
                                         file_path: abs_path_str.clone(),
@@ -930,11 +1091,15 @@ pub fn scan_all_unified(
                                         sanitized_value: sanitized,
                                     });
                                 }
+                                if regex_bangla.is_match(&album) {
+                                    font_issues_list.push("Bangla Album Tag".to_string());
+                                    has_issue = true;
+                                }
                             }
 
                             // Check comment
                             if let Some(comment) = tag.comment() {
-                                let sanitized = sanitize_text(&comment, strip_phrases);
+                                let sanitized = sanitizer_ref.sanitize_comment(&comment);
                                 if sanitized != comment.as_ref() && !sanitized.is_empty() {
                                     local_metadata.push(MetadataSanitizeItem {
                                         file_path: abs_path_str.clone(),
@@ -947,26 +1112,21 @@ pub fn scan_all_unified(
                         }
                     }
 
-                    if !has_non_ascii && rel_path_str.chars().any(|c| c as u32 > 127) {
-                        font_issues_list.push("Non-ASCII Characters".to_string());
-                        has_non_ascii = true;
-                    }
-
-                    if has_non_ascii {
+                    if has_issue {
                         let file_stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
                         let ext_str = path.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
-                        let latin_stem = any_ascii::any_ascii(&file_stem);
+                        let clean_stem = crate::font_issues::clean_transliterate(&file_stem);
                         let option2_text = if ext_str.is_empty() {
-                            latin_stem
+                            clean_stem
                         } else {
-                            format!("{}.{}", latin_stem, ext_str)
+                            format!("{}.{}", clean_stem, ext_str)
                         };
 
                         local_font_issues.push(crate::font_issues::FontIssueItem {
                             file_path: abs_path_str.clone(),
                             relative_path: rel_path_str.clone(),
                             detected_issue: font_issues_list.join(", "),
-                            option1_preview: "Keep Bangla + Write ID3v2.3 UTF-16".to_string(),
+                            option1_preview: "Rewrite ID3v2.3 UTF-16 Tags".to_string(),
                             option2_preview: option2_text,
                         });
                     }
@@ -1017,4 +1177,96 @@ pub fn scan_all_unified(
         hidden_items,
         total_scanned_files: total_scanned,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_composite_delimiters_single_pass() {
+        let phrases = vec!["Official Video".to_string(), "HD".to_string()];
+
+        // User's exact case: "xxxx | > | xxxx" -> "xxxx - xxxx"
+        assert_eq!(sanitize_text("xxxx | > | xxxx", &phrases), "xxxx - xxxx");
+
+        // "Song | > | Artist.mp3" -> "Song - Artist.mp3"
+        assert_eq!(sanitize_text("Song | > | Artist.mp3", &phrases), "Song - Artist.mp3");
+
+        // "Song - | - Artist.m4a" -> "Song - Artist.m4a"
+        assert_eq!(sanitize_text("Song - | - Artist.m4a", &phrases), "Song - Artist.m4a");
+
+        // "Song | [Official Video] | Artist.m4a" -> "Song - Artist.m4a"
+        assert_eq!(sanitize_text("Song | [Official Video] | Artist.m4a", &phrases), "Song - Artist.m4a");
+
+        // "Song | > | [Official Video] | > | Artist.m4a" -> "Song - Artist.m4a"
+        assert_eq!(sanitize_text("Song | > | [Official Video] | > | Artist.m4a", &phrases), "Song - Artist.m4a");
+
+        // "01. Song ( - ) Artist.mp3" -> "Song - Artist.mp3"
+        assert_eq!(sanitize_text("01. Song ( - ) Artist.mp3", &phrases), "Song - Artist.mp3");
+
+        // Preserve hyphen in compound words like "Non-stop"
+        assert_eq!(sanitize_text("Non-stop Party | Remix", &phrases), "Non-stop Party - Remix");
+
+        // Combinations with | and #:
+        // "xxxx | # | xxxx" -> "xxxx - xxxx"
+        assert_eq!(sanitize_text("xxxx | # | xxxx", &phrases), "xxxx - xxxx");
+
+        // "Song | #shorts | Artist.mp3" -> "Song - Artist.mp3"
+        assert_eq!(sanitize_text("Song | #shorts | Artist.mp3", &phrases), "Song - Artist.mp3");
+
+        // "Song | # | > | Artist.mp3" -> "Song - Artist.mp3"
+        assert_eq!(sanitize_text("Song | # | > | Artist.mp3", &phrases), "Song - Artist.mp3");
+
+        // Trailing and leading # with pipes: "# Song | #shorts #trending | .mp3" -> "Song.mp3"
+        assert_eq!(sanitize_text("# Song | #shorts #trending | .mp3", &phrases), "Song.mp3");
+
+        // User's exact bug: "Loca (feat. El Cata).mp3" MUST NOT lose its closing parenthesis!
+        assert_eq!(sanitize_text("Loca (feat. El Cata).mp3", &phrases), "Loca (feat. El Cata).mp3");
+        assert_eq!(sanitize_text("Shape of You (Acoustic).mp3", &phrases), "Shape of You (Acoustic).mp3");
+        assert_eq!(sanitize_text("Hotel California [Live].mp3", &phrases), "Hotel California [Live].mp3");
+        assert_eq!(sanitize_text("(I Can't Get No) Satisfaction.mp3", &phrases), "(I Can't Get No) Satisfaction.mp3");
+
+        // Leading track numbers vs song titles that start with numbers:
+        assert_eq!(sanitize_text("01. Loca (feat. El Cata).mp3", &phrases), "Loca (feat. El Cata).mp3");
+        assert_eq!(sanitize_text("01 - Loca (feat. El Cata).mp3", &phrases), "Loca (feat. El Cata).mp3");
+        assert_eq!(sanitize_text("21 Guns.mp3", &phrases), "21 Guns.mp3");
+
+        // Metadata sanitization tests:
+        let sanitizer = CompiledSanitizer::new(&phrases);
+        assert_eq!(sanitizer.sanitize_metadata("Loca (feat. El Cata)"), "Loca (feat. El Cata)");
+        assert_eq!(sanitizer.sanitize_metadata("21 Guns"), "21 Guns");
+        assert_eq!(sanitizer.sanitize_metadata("1984"), "1984");
+        assert_eq!(sanitizer.sanitize_metadata("Ek Nodi Rokta Paria "), "Ek Nodi Rokta Paria");
+        assert_eq!(sanitizer.sanitize_metadata("Ek Nodi  Rokta Paria"), "Ek Nodi Rokta Paria");
+
+        // URL removal from filenames:
+        assert_eq!(sanitizer.sanitize_filename("01. www.SongsPK.com - Loca (feat. El Cata).mp3"), "Loca (feat. El Cata).mp3");
+        assert_eq!(sanitizer.sanitize_filename("Title [PagalWorld.com].mp3"), "Title.mp3");
+        assert_eq!(sanitizer.sanitize_filename("Track Name - https://youtube.com/watch?v=12345.mp3"), "Track Name.mp3");
+        assert_eq!(sanitizer.sanitize_filename("Song (www.youtube.com).mp3"), "Song.mp3");
+        assert_eq!(sanitizer.sanitize_filename("Artist - Song (downloaded from pagalworld.com).mp3"), "Artist - Song.mp3");
+
+        // URL removal from tag names (Title, Artist, Album):
+        assert_eq!(sanitizer.sanitize_metadata("Loca (feat. El Cata) [www.SongsPK.com]"), "Loca (feat. El Cata)");
+        assert_eq!(sanitizer.sanitize_metadata("Title - PagalWorld.com"), "Title");
+        assert_eq!(sanitizer.sanitize_metadata("Artist (Visit www.doridro.com)"), "Artist");
+
+        // URL preservation in Description (Comment):
+        // 1. Pure YouTube URL must remain 100% byte-for-byte identical (no punctuation mangling):
+        assert_eq!(
+            sanitizer.sanitize_comment("https://www.youtube.com/watch?v=iZb9_8MCGew"),
+            "https://www.youtube.com/watch?v=iZb9_8MCGew"
+        );
+        // 2. URL embedded in comment text must preserve URL and sentence punctuation:
+        assert_eq!(
+            sanitizer.sanitize_comment("Source: https://www.youtube.com/watch?v=iZb9_8MCGew"),
+            "Source: https://www.youtube.com/watch?v=iZb9_8MCGew"
+        );
+        // 3. PUA characters stripped but URL preserved:
+        assert_eq!(
+            sanitizer.sanitize_comment("https://www.youtube.com/watch?v=iZb9_8MCGew \u{F027}"),
+            "https://www.youtube.com/watch?v=iZb9_8MCGew"
+        );
+    }
 }
