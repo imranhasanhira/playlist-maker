@@ -31,6 +31,10 @@ pub fn clean_transliterate(input: &str) -> String {
 
     // 3. Remove/replace illegal filesystem and car player characters
     let mut cleaned = ascii_str
+        .replace('/', " - ")
+        .replace('\\', " - ")
+        .replace('⧸', " - ")
+        .replace('／', " - ")
         .replace('|', " - ")
         .replace(':', " - ")
         .replace('*', "")
@@ -476,4 +480,18 @@ pub async fn apply_font_issue_option2(
     })
     .await
     .map_err(|e| format!("Thread execution error: {}", e))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_clean_transliterate_solidus_and_symbols() {
+        let clean = clean_transliterate("Bob Sinclar feat. Raffaella Carra' ⧸ Far l'Amore (preview 2011)");
+        assert_eq!(clean, "Bob Sinclar feat. Raffaella Carra' - Far l'Amore (preview 2011)");
+
+        let clean2 = clean_transliterate("Artist / Title \\ Part");
+        assert_eq!(clean2, "Artist - Title - Part");
+    }
 }

@@ -13,6 +13,7 @@ pub enum ExportStatus {
     New,
     Modified,
     UpToDate,
+    Renamed,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -20,6 +21,7 @@ pub struct ExportTrackItem {
     pub file_path: String,
     pub relative_path: String,
     pub dest_relative_path: String,
+    pub old_dest_relative_path: Option<String>,
     pub size_bytes: u64,
     pub mtime_secs: u64,
     pub status: ExportStatus,
@@ -55,11 +57,13 @@ pub struct ExportDiffReport {
     pub destination: String,
     pub new_files: Vec<ExportTrackItem>,
     pub up_to_date_files: Vec<ExportTrackItem>,
+    pub renamed_files: Vec<ExportTrackItem>,
     pub orphan_files: Vec<ExportOrphanItem>,
     pub playlists: Vec<ExportPlaylistItem>,
     pub warnings: Vec<ExportWarningItem>,
     pub total_bytes_to_copy: u64,
     pub total_bytes_up_to_date: u64,
+    pub total_bytes_renamed: u64,
     pub total_bytes_orphans: u64,
 }
 
@@ -166,10 +170,13 @@ pub async fn analyze_export_diff(
 
     let mut new_files: Vec<ExportTrackItem> = Vec::new();
     let mut up_to_date_files: Vec<ExportTrackItem> = Vec::new();
+    let mut renamed_files: Vec<ExportTrackItem> = Vec::new();
     let mut total_bytes_to_copy: u64 = 0;
     let mut total_bytes_up_to_date: u64 = 0;
+    let mut total_bytes_renamed: u64 = 0;
 
     let mut expected_dest_rel_paths: HashSet<String> = HashSet::new();
+    let mut candidate_new_tracks: Vec<(String, String, u64, u64)> = Vec::new();
 
     for (rel_path, (src_abs_path, _track)) in &required_tracks {
         expected_dest_rel_paths.insert(rel_path.clone());
@@ -179,38 +186,36 @@ pub async fn analyze_export_diff(
 
         let (src_mtime, src_size) = get_file_mtime_and_size(src_path).unwrap_or((0, 0));
 
-        let status = if dest_file_path.exists() {
+        if dest_file_path.exists() {
             if let Some((dest_mtime, dest_size)) = get_file_mtime_and_size(&dest_file_path) {
                 if src_size == dest_size && src_mtime <= dest_mtime {
-                    ExportStatus::UpToDate
+                    total_bytes_up_to_date += src_size;
+                    up_to_date_files.push(ExportTrackItem {
+                        file_path: src_abs_path.clone(),
+                        relative_path: rel_path.clone(),
+                        dest_relative_path: format!("music/{}", rel_path),
+                        old_dest_relative_path: None,
+                        size_bytes: src_size,
+                        mtime_secs: src_mtime,
+                        status: ExportStatus::UpToDate,
+                    });
                 } else {
-                    ExportStatus::Modified
+                    total_bytes_to_copy += src_size;
+                    new_files.push(ExportTrackItem {
+                        file_path: src_abs_path.clone(),
+                        relative_path: rel_path.clone(),
+                        dest_relative_path: format!("music/{}", rel_path),
+                        old_dest_relative_path: None,
+                        size_bytes: src_size,
+                        mtime_secs: src_mtime,
+                        status: ExportStatus::Modified,
+                    });
                 }
             } else {
-                ExportStatus::New
+                candidate_new_tracks.push((rel_path.clone(), src_abs_path.clone(), src_size, src_mtime));
             }
         } else {
-            ExportStatus::New
-        };
-
-        let item = ExportTrackItem {
-            file_path: src_abs_path.clone(),
-            relative_path: rel_path.clone(),
-            dest_relative_path: format!("music/{}", rel_path),
-            size_bytes: src_size,
-            mtime_secs: src_mtime,
-            status: status.clone(),
-        };
-
-        match status {
-            ExportStatus::UpToDate => {
-                total_bytes_up_to_date += src_size;
-                up_to_date_files.push(item);
-            }
-            ExportStatus::New | ExportStatus::Modified => {
-                total_bytes_to_copy += src_size;
-                new_files.push(item);
-            }
+            candidate_new_tracks.push((rel_path.clone(), src_abs_path.clone(), src_size, src_mtime));
         }
     }
 
@@ -224,7 +229,8 @@ fn is_os_system_junk(filename: &str) -> bool {
     // Expected playlist filenames
     let expected_playlists: HashSet<String> = playlist_items.iter().map(|p| p.filename.clone()).collect();
 
-    // Scan destination for orphans
+    // Scan destination for orphans and candidate renamed files
+    let mut candidate_dest_orphans: Vec<(std::path::PathBuf, String, u64)> = Vec::new();
     let mut orphan_files: Vec<ExportOrphanItem> = Vec::new();
     let mut total_bytes_orphans: u64 = 0;
 
@@ -240,16 +246,84 @@ fn is_os_system_junk(filename: &str) -> bool {
                     let rel_clean = rel.to_string_lossy().replace('\\', "/");
                     if !expected_dest_rel_paths.contains(&rel_clean) {
                         let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                        total_bytes_orphans += size;
-                        orphan_files.push(ExportOrphanItem {
-                            file_path: entry.path().to_string_lossy().to_string(),
-                            relative_path: format!("music/{}", rel_clean),
-                            size_bytes: size,
-                            is_playlist: false,
-                        });
+                        candidate_dest_orphans.push((entry.path().to_path_buf(), rel_clean, size));
                     }
                 }
             }
+        }
+    }
+
+    // Pass 2: Audio Stream Hash Matching between candidate_new_tracks and candidate_dest_orphans
+    let mut matched_orphan_indices: HashSet<usize> = HashSet::new();
+
+    if !candidate_new_tracks.is_empty() && !candidate_dest_orphans.is_empty() {
+        // Build hash index of candidate destination orphans: audio_hash -> Vec<orphan_idx>
+        let mut dest_hash_index: HashMap<String, Vec<usize>> = HashMap::new();
+        for (idx, (dest_path, _rel, size)) in candidate_dest_orphans.iter().enumerate() {
+            let (_q_hash, audio_hash) = crate::dedup::compute_file_hashes(dest_path, *size);
+            dest_hash_index.entry(audio_hash).or_default().push(idx);
+        }
+
+        for (rel_path, src_abs_path, src_size, src_mtime) in candidate_new_tracks {
+            let src_path = Path::new(&src_abs_path);
+            let (_src_q_hash, src_audio_hash) = crate::dedup::compute_file_hashes(src_path, src_size);
+
+            if let Some(matching_indices) = dest_hash_index.get_mut(&src_audio_hash) {
+                if let Some(orphan_idx) = matching_indices.pop() {
+                    matched_orphan_indices.insert(orphan_idx);
+                    let (_old_path, old_rel, _old_size) = &candidate_dest_orphans[orphan_idx];
+                    total_bytes_renamed += src_size;
+                    renamed_files.push(ExportTrackItem {
+                        file_path: src_abs_path,
+                        relative_path: rel_path.clone(),
+                        dest_relative_path: format!("music/{}", rel_path),
+                        old_dest_relative_path: Some(format!("music/{}", old_rel)),
+                        size_bytes: src_size,
+                        mtime_secs: src_mtime,
+                        status: ExportStatus::Renamed,
+                    });
+                    continue;
+                }
+            }
+
+            // Truly New file (no matching audio hash in destination)
+            total_bytes_to_copy += src_size;
+            new_files.push(ExportTrackItem {
+                file_path: src_abs_path,
+                relative_path: rel_path.clone(),
+                dest_relative_path: format!("music/{}", rel_path),
+                old_dest_relative_path: None,
+                size_bytes: src_size,
+                mtime_secs: src_mtime,
+                status: ExportStatus::New,
+            });
+        }
+    } else {
+        // If no candidate orphans, all candidate new tracks are truly new
+        for (rel_path, src_abs_path, src_size, src_mtime) in candidate_new_tracks {
+            total_bytes_to_copy += src_size;
+            new_files.push(ExportTrackItem {
+                file_path: src_abs_path,
+                relative_path: rel_path.clone(),
+                dest_relative_path: format!("music/{}", rel_path),
+                old_dest_relative_path: None,
+                size_bytes: src_size,
+                mtime_secs: src_mtime,
+                status: ExportStatus::New,
+            });
+        }
+    }
+
+    // Truly Orphaned audio tracks (not matched to any renamed track)
+    for (idx, (dest_path, rel_clean, size)) in candidate_dest_orphans.into_iter().enumerate() {
+        if !matched_orphan_indices.contains(&idx) {
+            total_bytes_orphans += size;
+            orphan_files.push(ExportOrphanItem {
+                file_path: dest_path.to_string_lossy().to_string(),
+                relative_path: format!("music/{}", rel_clean),
+                size_bytes: size,
+                is_playlist: false,
+            });
         }
     }
 
@@ -377,6 +451,7 @@ fn is_os_system_junk(filename: &str) -> bool {
 
     new_files.sort_by(|a, b| a.relative_path.to_lowercase().cmp(&b.relative_path.to_lowercase()));
     up_to_date_files.sort_by(|a, b| a.relative_path.to_lowercase().cmp(&b.relative_path.to_lowercase()));
+    renamed_files.sort_by(|a, b| a.relative_path.to_lowercase().cmp(&b.relative_path.to_lowercase()));
     orphan_files.sort_by(|a, b| a.relative_path.to_lowercase().cmp(&b.relative_path.to_lowercase()));
     playlist_items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
@@ -384,11 +459,13 @@ fn is_os_system_junk(filename: &str) -> bool {
         destination: destination.to_string(),
         new_files,
         up_to_date_files,
+        renamed_files,
         orphan_files,
         playlists: playlist_items,
         warnings,
         total_bytes_to_copy,
         total_bytes_up_to_date,
+        total_bytes_renamed,
         total_bytes_orphans,
     })
 }
@@ -529,6 +606,38 @@ pub async fn execute_export(
         .map_err(|e| format!("Failed to create destination music directory: {}", e))?;
     fs::create_dir_all(&dest_playlists_dir)
         .map_err(|e| format!("Failed to create destination playlists directory: {}", e))?;
+
+    // 0. Process Renamed files via instant destination filesystem rename
+    if !report.renamed_files.is_empty() {
+        push_log(format!("Found {} renamed/moved tracks to update instantly at destination.", report.renamed_files.len()), &mut logs);
+        for item in &report.renamed_files {
+            if let Some(ref old_dest_rel) = item.old_dest_relative_path {
+                let old_full_path = dest_path.join(old_dest_rel);
+                let new_full_path = dest_music_dir.join(&item.relative_path);
+                if old_full_path.exists() {
+                    if let Some(parent) = new_full_path.parent() {
+                        if !parent.exists() {
+                            let _ = fs::create_dir_all(parent);
+                        }
+                    }
+                    match fs::rename(&old_full_path, &new_full_path) {
+                        Ok(_) => {
+                            push_log(format!("  🔄 Renamed: {} -> {}", old_dest_rel, item.dest_relative_path), &mut logs);
+                        }
+                        Err(e) => {
+                            push_log(format!("  ⚠️ Rename error for {}: {}. Copying instead...", old_dest_rel, e), &mut logs);
+                            let src_path = Path::new(&item.file_path);
+                            if let Err(err) = fs::copy(src_path, &new_full_path) {
+                                push_log(format!("  ❌ Failed to copy {}: {}", item.relative_path, err), &mut logs);
+                            } else {
+                                let _ = fs::remove_file(&old_full_path);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // 1. Copy New & Modified files
     push_log(format!("Found {} new/modified audio files to copy.", report.new_files.len()), &mut logs);
@@ -688,4 +797,59 @@ pub async fn execute_export(
 
     push_log("Export completed successfully!".to_string(), &mut logs);
     Ok(logs)
+}
+
+#[tauri::command]
+pub async fn clean_export_hidden_files(destination: String) -> Result<usize, String> {
+    tokio::task::spawn_blocking(move || {
+        let dest_path = Path::new(&destination);
+        if !dest_path.exists() {
+            return Err(format!("Destination path does not exist: {}", destination));
+        }
+
+        let mut deleted_count = 0;
+        for entry in WalkDir::new(dest_path).into_iter().filter_map(|e| e.ok()) {
+            if entry.file_type().is_file() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name.starts_with("._") || crate::utils::is_os_system_junk(name) {
+                        if fs::remove_file(entry.path()).is_ok() {
+                            deleted_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(deleted_count)
+    })
+    .await
+    .map_err(|e| format!("Thread execution error: {}", e))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_renamed_content_hash_matching() {
+        // Create 2 temporary files simulating source renamed file and destination orphan file
+        let temp_dir = std::env::temp_dir().join("playlist_maker_test_export_renamed");
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let src_file = temp_dir.join("New Artist - Song Title.mp3");
+        let dest_file = temp_dir.join("01. Old Artist - Song Title.mp3");
+
+        // Identical audio stream content
+        let audio_payload = vec![0x42u8; 65536];
+        fs::write(&src_file, &audio_payload).unwrap();
+        fs::write(&dest_file, &audio_payload).unwrap();
+
+        let (src_q, src_a) = crate::dedup::compute_file_hashes(&src_file, 65536);
+        let (dest_q, dest_a) = crate::dedup::compute_file_hashes(&dest_file, 65536);
+
+        assert_eq!(src_q, dest_q);
+        assert_eq!(src_a, dest_a);
+
+        // Clean up
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
 }

@@ -1044,9 +1044,9 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
                           <td>
                             {renderMetadataDiff(item.original_value, item.sanitized_value)}
                           </td>
-                          <td>
+                            <td>
                             <div style={{ color: "var(--success)", fontWeight: 600, fontFamily: "var(--font-mono)", whiteSpace: "pre-wrap", fontSize: "0.85rem" }}>
-                              "{item.sanitized_value}"
+                              {item.sanitized_value ? `"${item.sanitized_value}"` : <span style={{ fontStyle: "italic", opacity: 0.75, color: "var(--warning)" }}>&lt;Remove Tag&gt;</span>}
                             </div>
                           </td>
                         </tr>

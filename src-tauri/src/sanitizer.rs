@@ -93,7 +93,9 @@ impl CompiledSanitizer {
                 let safe_pattern = part.replace(" | ", r"\s*\|\s*").replace("|", r"\|");
                 RegexBuilder::new(&safe_pattern).case_insensitive(true).build().ok()
             } else {
-                RegexBuilder::new(&regex::escape(part)).case_insensitive(true).build().ok()
+                let escaped = regex::escape(part);
+                let pattern = format!(r"(?i)(?:https?://)?(?:www\.)?{}(?:/)?", escaped);
+                RegexBuilder::new(&pattern).case_insensitive(true).build().ok()
             };
 
             if let Some(r) = re {
@@ -268,15 +270,28 @@ impl CompiledSanitizer {
         // 4. Strip empty brackets
         cleaned = self.re_empty_brackets.replace_all(&cleaned, "").to_string();
 
-        // 5. Restore protected URLs untouched
+        // 5. Strip lingering 'www.' or promotional domain leftovers while URLs are protected
+        static RE_DANGLING_WWW: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+            RegexBuilder::new(r"(?i)\b(?:https?://)?www\.[\w\-\._~%]*").case_insensitive(true).build().unwrap()
+        });
+        cleaned = RE_DANGLING_WWW.replace_all(&cleaned, "").to_string();
+
+        // 6. Restore protected URLs untouched
         for (idx, original_url) in url_placeholders.iter().enumerate() {
             let holder = format!("__URL_PROTECTED_{}__", idx);
             cleaned = cleaned.replace(&holder, original_url);
         }
 
-        // 6. Clean multiple consecutive spaces and trim
+        // 7. Clean multiple consecutive spaces and trim
         cleaned = self.re_multi_spaces.replace_all(&cleaned, " ").to_string();
-        cleaned.trim().to_string()
+        let trimmed_result = cleaned.trim().trim_matches(|c: char| c == '-' || c == '.' || c == '|' || c == ':' || c == '_' || c.is_whitespace()).trim();
+
+        // If the comment has no alphanumeric characters left (purely stripped junk or punctuation), clean to empty string
+        if !trimmed_result.chars().any(|c| c.is_alphanumeric()) {
+            String::new()
+        } else {
+            trimmed_result.to_string()
+        }
     }
 
     pub fn sanitize(&self, original_text: &str) -> String {
@@ -750,7 +765,7 @@ pub fn scan_sanitize_metadata(
                             // 4. Description (Comment)
                             if let Some(comment) = tag.comment() {
                                 let sanitized = sanitizer_ref.sanitize_comment(&comment);
-                                if sanitized != comment.as_ref() && !sanitized.is_empty() {
+                                if sanitized != comment.as_ref() {
                                     local_items.push(MetadataSanitizeItem {
                                         file_path: file_path_str.clone(),
                                         field_name: "Description (Comment)".to_string(),
@@ -1100,7 +1115,7 @@ pub fn scan_all_unified(
                             // Check comment
                             if let Some(comment) = tag.comment() {
                                 let sanitized = sanitizer_ref.sanitize_comment(&comment);
-                                if sanitized != comment.as_ref() && !sanitized.is_empty() {
+                                if sanitized != comment.as_ref() {
                                     local_metadata.push(MetadataSanitizeItem {
                                         file_path: abs_path_str.clone(),
                                         field_name: "Description (Comment)".to_string(),
@@ -1268,5 +1283,13 @@ mod tests {
             sanitizer.sanitize_comment("https://www.youtube.com/watch?v=iZb9_8MCGew \u{F027}"),
             "https://www.youtube.com/watch?v=iZb9_8MCGew"
         );
+
+        // 4. Promotional website in comment completely removed (including 'www.'):
+        let bd_phrases = vec!["music.com.bd".to_string()];
+        let bd_sanitizer = CompiledSanitizer::new(&bd_phrases);
+        assert_eq!(bd_sanitizer.sanitize_comment("www.music.com.bd"), "");
+        assert_eq!(bd_sanitizer.sanitize_comment("www."), "");
+        assert_eq!(bd_sanitizer.sanitize_comment("Visit www.music.com.bd"), "Visit");
+        assert_eq!(bd_sanitizer.sanitize_metadata("Porshi - Tomari Porosh [www.music.com.bd]"), "Porshi - Tomari Porosh");
     }
 }
