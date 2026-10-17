@@ -468,8 +468,9 @@ function App() {
     <div className="app-container">
       {/* Top Header Navigation */}
       <header className="top-nav">
-        <div className="top-nav-logo">
-          <span>💎</span> Diamond Music Manager
+        <div className="top-nav-logo" style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+          <img src="/app-icon.svg" alt="Diamond Music Manager" style={{ width: "22px", height: "22px", borderRadius: "5px" }} />
+          <span>Diamond Music Manager</span>
         </div>
         <ul className="top-nav-menu">
           <li
@@ -581,6 +582,7 @@ function App() {
 
         <div style={{ display: currentView === "tools" ? "flex" : "none", flexDirection: "column", height: "100%", flex: 1, minHeight: 0 }}>
           <ToolsView
+            config={config}
             formats={formats}
             stripPhrases={stripPhrases}
             setStripPhrases={setStripPhrases}
@@ -740,6 +742,18 @@ function App() {
             {wizardMode === null ? (
               <div className="card" style={{ maxWidth: "560px", width: "90%", padding: "40px", textAlign: "center", display: "flex", flexDirection: "column", gap: "28px" }}>
                 <div>
+                  <img
+                    src="/app-icon.svg"
+                    alt="Diamond Music Manager"
+                    style={{
+                      width: "80px",
+                      height: "80px",
+                      margin: "0 auto 16px auto",
+                      borderRadius: "18px",
+                      boxShadow: "0 10px 30px rgba(124, 58, 237, 0.35)",
+                      display: "block",
+                    }}
+                  />
                   <h1 style={{ fontSize: "2.2rem", marginBottom: "12px", background: "linear-gradient(135deg, var(--accent-indigo) 0%, var(--accent-purple) 100%)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
                     Welcome to Diamond Music Manager
                   </h1>

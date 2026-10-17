@@ -1,8 +1,11 @@
 import React, { useState } from "react";
 import { SanitizerView } from "./SanitizerView";
 import { TranscoderView } from "./TranscoderView";
+import { FileRepairModal } from "../components/FileRepairModal";
+import { MainConfig } from "../types";
 
 type ToolsViewProps = {
+  config?: MainConfig | null;
   formats: string;
   stripPhrases: string[];
   setStripPhrases: (phrases: string[]) => void;
@@ -18,6 +21,7 @@ type ToolsViewProps = {
 };
 
 export const ToolsView: React.FC<ToolsViewProps> = ({
+  config,
   formats,
   stripPhrases,
   setStripPhrases,
@@ -32,6 +36,7 @@ export const ToolsView: React.FC<ToolsViewProps> = ({
   setSanitizerMetadataItems,
 }) => {
   const [subView, setSubView] = useState<"sanitizer" | "transcoder">("sanitizer");
+  const [showFileRepairModal, setShowFileRepairModal] = useState<boolean>(false);
 
   return (
     <div style={{ display: "flex", height: "100%", width: "100%", overflow: "hidden" }}>
@@ -87,6 +92,24 @@ export const ToolsView: React.FC<ToolsViewProps> = ({
         >
           🔄 FLAC Transcoder
         </div>
+
+        <div
+          onClick={() => setShowFileRepairModal(true)}
+          style={{
+            padding: "10px 14px",
+            borderRadius: "8px",
+            cursor: "pointer",
+            backgroundColor: "transparent",
+            color: "var(--text-secondary)",
+            fontWeight: 400,
+            display: "flex",
+            alignItems: "center",
+            gap: "8px",
+            transition: "all 0.2s",
+          }}
+        >
+          🛠️ File Repair
+        </div>
       </div>
 
       {/* Sub-View Content */}
@@ -111,6 +134,12 @@ export const ToolsView: React.FC<ToolsViewProps> = ({
           <TranscoderView addBackgroundTask={addBackgroundTask} />
         )}
       </div>
+
+      <FileRepairModal
+        isOpen={showFileRepairModal}
+        onClose={() => setShowFileRepairModal(false)}
+        config={config || null}
+      />
     </div>
   );
 };

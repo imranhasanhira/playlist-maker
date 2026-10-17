@@ -1,0 +1,224 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <!-- Background Squircle Gradient -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e1338"/>
+      <stop offset="45%" stop-color="#120d24"/>
+      <stop offset="100%" stop-color="#08060f"/>
+    </linearGradient>
+
+    <!-- Squircle Border Stroke Gradient -->
+    <linearGradient id="borderGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#c084fc" stop-opacity="0.6"/>
+      <stop offset="35%" stop-color="#818cf8" stop-opacity="0.3"/>
+      <stop offset="70%" stop-color="#38bdf8" stop-opacity="0.4"/>
+      <stop offset="100%" stop-color="#06b6d4" stop-opacity="0.1"/>
+    </linearGradient>
+
+    <!-- Ambient Core Radial Glow -->
+    <radialGradient id="ambientGlow" cx="50%" cy="48%" r="48%">
+      <stop offset="0%" stop-color="#8b5cf6" stop-opacity="0.45"/>
+      <stop offset="50%" stop-color="#4f46e5" stop-opacity="0.2"/>
+      <stop offset="100%" stop-color="#0f0c1b" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="cyanCoreGlow" cx="50%" cy="50%" r="38%">
+      <stop offset="0%" stop-color="#06b6d4" stop-opacity="0.35"/>
+      <stop offset="60%" stop-color="#3b82f6" stop-opacity="0.1"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Diamond Facet Gradients -->
+    <!-- Table (flat top) -->
+    <linearGradient id="facetTable" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="40%" stop-color="#e0e7ff"/>
+      <stop offset="80%" stop-color="#c4b5fd"/>
+      <stop offset="100%" stop-color="#a78bfa"/>
+    </linearGradient>
+
+    <!-- Star Top Center -->
+    <linearGradient id="facetStarTop" x1="50%" y1="0%" x2="50%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
+    </linearGradient>
+
+    <!-- Crown Left Outer -->
+    <linearGradient id="facetCrownLeftOut" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#67e8f9"/>
+      <stop offset="100%" stop-color="#2563eb"/>
+    </linearGradient>
+
+    <!-- Crown Left Mid -->
+    <linearGradient id="facetCrownLeftMid" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#a5f3fc"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
+    </linearGradient>
+
+    <!-- Crown Right Mid -->
+    <linearGradient id="facetCrownRightMid" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#e9d5ff"/>
+      <stop offset="100%" stop-color="#a855f7"/>
+    </linearGradient>
+
+    <!-- Crown Right Outer -->
+    <linearGradient id="facetCrownRightOut" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#c084fc"/>
+      <stop offset="100%" stop-color="#7c3aed"/>
+    </linearGradient>
+
+    <!-- Pavilion Left Outer -->
+    <linearGradient id="facetPavLeftOut" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0284c7"/>
+      <stop offset="60%" stop-color="#1e40af"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+
+    <!-- Pavilion Left Center -->
+    <linearGradient id="facetPavLeftCenter" x1="30%" y1="0%" x2="70%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="50%" stop-color="#4f46e5"/>
+      <stop offset="100%" stop-color="#1e1b4b"/>
+    </linearGradient>
+
+    <!-- Pavilion Right Center -->
+    <linearGradient id="facetPavRightCenter" x1="70%" y1="0%" x2="30%" y2="100%">
+      <stop offset="0%" stop-color="#a855f7"/>
+      <stop offset="50%" stop-color="#6366f1"/>
+      <stop offset="100%" stop-color="#1e1b4b"/>
+    </linearGradient>
+
+    <!-- Pavilion Right Outer -->
+    <linearGradient id="facetPavRightOut" x1="100%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#9333ea"/>
+      <stop offset="60%" stop-color="#581c87"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+
+    <!-- Musical Note Gradient -->
+    <linearGradient id="noteGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="45%" stop-color="#f0f9ff"/>
+      <stop offset="100%" stop-color="#bae6fd"/>
+    </linearGradient>
+
+    <!-- Note Glow & Shadow Filter -->
+    <filter id="noteGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#0284c7" flood-opacity="0.6"/>
+      <feDropShadow dx="0" dy="16" stdDeviation="20" flood-color="#7c3aed" flood-opacity="0.5"/>
+    </filter>
+
+    <filter id="diamondShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="24" stdDeviation="32" flood-color="#000000" flood-opacity="0.7"/>
+      <feDropShadow dx="0" dy="8" stdDeviation="16" flood-color="#4f46e5" flood-opacity="0.35"/>
+    </filter>
+
+    <!-- Sparkle Flare Gradient -->
+    <radialGradient id="sparkleGrad" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="35%" stop-color="#e0f2fe" stop-opacity="0.9"/>
+      <stop offset="70%" stop-color="#38bdf8" stop-opacity="0.4"/>
+      <stop offset="100%" stop-color="#38bdf8" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Base Squircle Body -->
+  <rect x="32" y="32" width="960" height="960" rx="224" fill="url(#bgGrad)"/>
+  
+  <!-- Subtle Internal Glow Layer -->
+  <rect x="32" y="32" width="960" height="960" rx="224" fill="url(#ambientGlow)"/>
+  <circle cx="512" cy="510" r="360" fill="url(#cyanCoreGlow)"/>
+
+  <!-- Chamfered Edge Stroke -->
+  <rect x="33.5" y="33.5" width="957" height="957" rx="222.5" fill="none" stroke="url(#borderGrad)" stroke-width="3"/>
+
+  <!-- Soundwave / Frequency Resonance Bars (Left and Right) -->
+  <g opacity="0.45">
+    <!-- Left Soundwaves -->
+    <rect x="96" y="470" width="10" height="84" rx="5" fill="#38bdf8"/>
+    <rect x="120" y="435" width="10" height="154" rx="5" fill="#06b6d4"/>
+    <rect x="144" y="405" width="10" height="214" rx="5" fill="#60a5fa"/>
+    <rect x="168" y="445" width="10" height="134" rx="5" fill="#818cf8"/>
+
+    <!-- Right Soundwaves -->
+    <rect x="846" y="445" width="10" height="134" rx="5" fill="#a78bfa"/>
+    <rect x="870" y="405" width="10" height="214" rx="5" fill="#c084fc"/>
+    <rect x="894" y="435" width="10" height="154" rx="5" fill="#e879f9"/>
+    <rect x="918" y="470" width="10" height="84" rx="5" fill="#f472b6"/>
+  </g>
+
+  <!-- Diamond Main Body -->
+  <g filter="url(#diamondShadow)">
+    <!-- Pavilion (Bottom Half) -->
+    <!-- Far Left -->
+    <polygon points="196,440 354,440 512,810" fill="url(#facetPavLeftOut)"/>
+    <!-- Center Left -->
+    <polygon points="354,440 512,440 512,810" fill="url(#facetPavLeftCenter)"/>
+    <!-- Center Right -->
+    <polygon points="512,440 670,440 512,810" fill="url(#facetPavRightCenter)"/>
+    <!-- Far Right -->
+    <polygon points="670,440 828,440 512,810" fill="url(#facetPavRightOut)"/>
+
+    <!-- Crown (Top Half) -->
+    <!-- Outer Left Triangle -->
+    <polygon points="196,440 310,270 354,440" fill="url(#facetCrownLeftOut)"/>
+    <!-- Mid Left Triangle -->
+    <polygon points="310,270 410,270 354,440" fill="url(#facetCrownLeftMid)"/>
+    <!-- Center-Left Triangle -->
+    <polygon points="410,270 512,440 354,440" fill="#38bdf8"/>
+    <!-- Center Top Star -->
+    <polygon points="410,270 614,270 512,440" fill="url(#facetStarTop)"/>
+    <!-- Center-Right Triangle -->
+    <polygon points="614,270 512,440 670,440" fill="#a855f7"/>
+    <!-- Mid Right Triangle -->
+    <polygon points="614,270 714,270 670,440" fill="url(#facetCrownRightMid)"/>
+    <!-- Outer Right Triangle -->
+    <polygon points="714,270 828,440 670,440" fill="url(#facetCrownRightOut)"/>
+
+    <!-- Table Facet (Upper Central Flat Surface) -->
+    <polygon points="360,270 664,270 584,370 440,370" fill="url(#facetTable)"/>
+
+    <!-- Precision Internal Facet Accent Lines -->
+    <polyline points="196,440 828,440" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-opacity="0.6"/>
+    <polyline points="310,270 354,440 512,810 670,440 714,270" fill="none" stroke="#ffffff" stroke-width="2" stroke-opacity="0.4"/>
+    <line x1="512" y1="270" x2="512" y2="810" stroke="#ffffff" stroke-width="2" stroke-opacity="0.4"/>
+  </g>
+
+  <!-- Foreground Musical Note Symbol (Beamed Double Quavers) -->
+  <g filter="url(#noteGlow)">
+    <!-- Beamed Bar at top of notes -->
+    <polygon points="410,400 634,354 634,420 410,466" fill="url(#noteGrad)"/>
+    <!-- Left Stem -->
+    <rect x="410" y="420" width="28" height="196" rx="12" fill="url(#noteGrad)"/>
+    <!-- Right Stem -->
+    <rect x="606" y="374" width="28" height="196" rx="12" fill="url(#noteGrad)"/>
+
+    <!-- Left Note Head (Angled ellipse) -->
+    <ellipse cx="376" cy="616" rx="58" ry="42" transform="rotate(-24 376 616)" fill="url(#noteGrad)"/>
+    <!-- Right Note Head (Angled ellipse) -->
+    <ellipse cx="572" cy="570" rx="58" ry="42" transform="rotate(-24 572 570)" fill="url(#noteGrad)"/>
+
+    <!-- Note Head Specular Reflection -->
+    <ellipse cx="366" cy="604" rx="28" ry="14" transform="rotate(-24 366 604)" fill="#ffffff" opacity="0.85"/>
+    <ellipse cx="562" cy="558" rx="28" ry="14" transform="rotate(-24 562 558)" fill="#ffffff" opacity="0.85"/>
+  </g>
+
+  <!-- Dynamic Equalizer Mini Dots under Note -->
+  <circle cx="478" cy="680" r="7" fill="#67e8f9" opacity="0.8"/>
+  <circle cx="512" cy="672" r="9" fill="#a5f3fc" opacity="0.95"/>
+  <circle cx="546" cy="680" r="7" fill="#c084fc" opacity="0.8"/>
+
+  <!-- Brilliant Star Sparkle / Glint (Top-Right Crown) -->
+  <g transform="translate(714, 270)">
+    <circle cx="0" cy="0" r="64" fill="url(#sparkleGrad)"/>
+    <!-- 4-Point Star -->
+    <path d="M 0,-56 Q 0,0 56,0 Q 0,0 0,56 Q 0,0 -56,0 Q 0,0 0,-56 Z" fill="#ffffff"/>
+    <circle cx="0" cy="0" r="10" fill="#ffffff"/>
+  </g>
+
+  <!-- Secondary Mini Glint (Bottom Pavilion Left) -->
+  <g transform="translate(340, 560) scale(0.45)">
+    <circle cx="0" cy="0" r="48" fill="url(#sparkleGrad)"/>
+    <path d="M 0,-48 Q 0,0 48,0 Q 0,0 0,48 Q 0,0 -48,0 Q 0,0 0,-48 Z" fill="#ffffff"/>
+  </g>
+</svg>

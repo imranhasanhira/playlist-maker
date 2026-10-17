@@ -361,6 +361,9 @@ async fn cancel_any_task(taskId: String) -> Result<(), String> {
     if taskId.starts_with("export_") || taskId == "export" {
         let _ = export::cancel_export().await;
     }
+    if taskId == "mp3_to_m4a" || taskId.starts_with("mp3_to_m4a") {
+        let _ = downloader::cancel_mp3_to_m4a_upgrade().await;
+    }
     Ok(())
 }
 
@@ -658,6 +661,12 @@ pub fn run() {
             downloader::dl_get_delete_files_report,
             downloader::dl_execute_delete_files,
             downloader::dl_reconcile_playlist_archive,
+            downloader::scan_mp3s_for_m4a_upgrade,
+            downloader::execute_mp3_to_m4a_upgrade,
+            downloader::cancel_mp3_to_m4a_upgrade,
+            downloader::scan_files_for_repair,
+            downloader::execute_file_repair,
+            downloader::cancel_file_repair,
             download_store::dl_store_get_all_entries,
             download_store::dl_store_save_entry,
             download_store::dl_store_delete_entry,

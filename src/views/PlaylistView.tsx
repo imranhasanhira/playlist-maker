@@ -84,7 +84,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     for (const [s, e] of currentMerges) {
       const curStart = Math.min(s, e);
       const curEnd = Math.max(s, e);
-      if (Math.max(start, curStart) <= Math.min(end, curEnd) + 1) {
+      if (Math.max(start, curStart) <= Math.min(end, curEnd)) {
         start = Math.min(start, curStart);
         end = Math.max(end, curEnd);
       } else {
@@ -1721,42 +1721,6 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
 
                     {activePlaylist.year_split?.enabled && (
                       <div style={{ display: "flex", flexDirection: "column", gap: "10px", marginTop: "4px" }}>
-                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", backgroundColor: "var(--bg-primary)", padding: "6px 10px", borderRadius: "6px", border: "1px solid var(--border-color)" }}>
-                          <div>
-                            <div style={{ fontSize: "0.78rem", color: "var(--text-primary)", fontWeight: 500 }}>
-                              Min Tracks per Year: <span style={{ fontFamily: "var(--font-mono)", fontWeight: 700, color: "var(--accent-purple-hover)" }}>{activePlaylist.year_split?.min_tracks ?? config.minTracksPerYearPlaylist ?? 10} tracks</span>
-                            </div>
-                            <div style={{ fontSize: "0.68rem", color: "var(--text-secondary)" }}>
-                              {activePlaylist.year_split?.min_tracks !== undefined
-                                ? "Playlist-level override"
-                                : "Configured globally in Settings"}
-                            </div>
-                          </div>
-                          {activePlaylist.year_split?.min_tracks !== undefined && (
-                            <button
-                              type="button"
-                              className="btn btn-secondary"
-                              onClick={() => {
-                                if (!config || selectedPlaylistIndex === null) return;
-                                const newPlaylists = [...config.playlists];
-                                const cur = { ...newPlaylists[selectedPlaylistIndex].year_split! };
-                                delete cur.min_tracks;
-                                newPlaylists[selectedPlaylistIndex] = {
-                                  ...newPlaylists[selectedPlaylistIndex],
-                                  year_split: cur,
-                                };
-                                const updatedConfig = { ...config, playlists: newPlaylists };
-                                setConfig(updatedConfig);
-                                invalidateCacheFor(selectedPlaylistIndex);
-                                fetchSinglePlaylistSummary(selectedPlaylistIndex, updatedConfig, true);
-                              }}
-                              style={{ padding: "2px 6px", fontSize: "0.65rem" }}
-                              title="Reset to global setting"
-                            >
-                              Reset to Global
-                            </button>
-                          )}
-                        </div>
 
                         {/* Buckets List */}
                         <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>

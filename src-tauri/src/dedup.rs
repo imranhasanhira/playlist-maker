@@ -17,7 +17,6 @@ use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct TrackFingerprintRecord {
     pub file_path: String,
@@ -96,6 +95,9 @@ pub struct DeleteDuplicatesResult {
 pub struct DuplicateProgressPayload {
     pub phase: String,
     pub phase_label: String,
+    pub stage: u8,
+    pub stage_name: String,
+    pub stage_label: String,
     pub current: usize,
     pub total: usize,
     pub progress: f64,
@@ -231,9 +233,9 @@ fn get_yt_regexes() -> &'static (Regex, Regex, Regex, Regex) {
 fn get_noise_regex() -> &'static (Regex, Regex, Regex) {
     static NOISE_RE: OnceLock<(Regex, Regex, Regex)> = OnceLock::new();
     NOISE_RE.get_or_init(|| {
-        // 1. Bracketed / parenthesized sections containing promo/video/lyric noise
+        // 1. Bracketed / parenthesized sections containing promo/video/lyric noise (strictly excluding musical modifiers like live, version, acoustic)
         let bracket_noise = Regex::new(
-            r"(?i)[\(\[\{][^\)\]\}]*\b(official|video|audio|lyric|lyrics|lyrical|full|hd|4k|hq|remaster|remastered|live|version|ver|ost|soundtrack|music\.com\.bd|svf|tseries|coke studio|128kbps|192kbps|256kbps|320kbps|kbps|mp3|m4a|eng sub|subtitle|subtitles)\b[^\)\]\}]*[\)\]\}]"
+            r"(?i)[\(\[\{][^\)\]\}]*\b(official\s*(music\s*video|video|audio|track)?|lyric|lyrics|lyrical|full\s*(video|audio|song|hd)|hd|4k|hq|remaster|remastered|music\.com\.bd|svf|tseries|coke\s*studio|128kbps|192kbps|256kbps|320kbps|kbps|eng\s*sub|subtitle|subtitles)\b[^\)\]\}]*[\)\]\}]"
         ).unwrap();
 
         // 2. Standalone noise phrases outside brackets
@@ -331,8 +333,10 @@ fn compute_acoustic_subfingerprints(path: &Path) -> Option<Vec<u32>> {
             "-v",
             "quiet",
             "-nostdin",
+            "-ss",
+            "10",
             "-t",
-            "120",
+            "40",
             "-i",
             &path.to_string_lossy(),
             "-ac",
@@ -346,13 +350,37 @@ fn compute_acoustic_subfingerprints(path: &Path) -> Option<Vec<u32>> {
         .output()
         .ok()?;
 
-    if !output.status.success() || output.stdout.len() < 8000 * 2 * 10 {
-        return None;
-    }
+    let stdout = if output.status.success() && output.stdout.len() >= 8000 * 2 * 15 {
+        output.stdout
+    } else {
+        // Fallback for tracks shorter than 15s: decode from beginning
+        let fallback = Command::new("ffmpeg")
+            .args([
+                "-v",
+                "quiet",
+                "-nostdin",
+                "-t",
+                "40",
+                "-i",
+                &path.to_string_lossy(),
+                "-ac",
+                "1",
+                "-ar",
+                "8000",
+                "-f",
+                "s16le",
+                "-",
+            ])
+            .output()
+            .ok()?;
+        if !fallback.status.success() || fallback.stdout.len() < 8000 * 2 * 10 {
+            return None;
+        }
+        fallback.stdout
+    };
 
     // Convert bytes to i16 samples at 8000 Hz
-    let samples: Vec<f32> = output
-        .stdout
+    let samples: Vec<f32> = stdout
         .chunks_exact(2)
         .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32)
         .collect();
@@ -740,107 +768,6 @@ pub fn compute_raw_fingerprint(
     }
 }
 
-/// Extract metadata, hashes, and (optionally) acoustic fingerprint for a single file,
-/// utilizing SQLite cache with (file_path, mtime, size) and rename recovery via (size, quick_hash).
-#[allow(dead_code)]
-pub fn load_or_compute_fingerprint(
-    path: &Path,
-    conn_opt: Option<&Connection>,
-    compute_acoustic: bool,
-) -> TrackFingerprintRecord {
-    let canonical_path = canonical_path_str(path);
-    let (mtime_secs, size_bytes) = get_file_mtime_and_size(path).unwrap_or((0, 0));
-
-    // 1. Check fast path in SQLite: exact (file_path, mtime_secs, size_bytes) match
-    if let Some(conn) = conn_opt {
-        if let Ok(mut stmt) = conn.prepare_cached(
-            "SELECT mtime_secs, size_bytes, quick_hash, audio_hash, youtube_id,
-                    raw_title, raw_artist, norm_title, norm_artist, norm_stem,
-                    duration_secs, format_ext, bitrate_kbps, chromaprint
-             FROM track_fingerprints WHERE file_path = ?1",
-        ) {
-            if let Ok(rec) = stmt.query_row(params![&canonical_path], |row| {
-                let db_mtime: i64 = row.get(0)?;
-                let db_size: i64 = row.get(1)?;
-                let blob_opt: Option<Vec<u8>> = row.get(13)?;
-                Ok((
-                    db_mtime as u64,
-                    db_size as u64,
-                    TrackFingerprintRecord {
-                        file_path: canonical_path.clone(),
-                        mtime_secs: db_mtime as u64,
-                        size_bytes: db_size as u64,
-                        quick_hash: row.get(2)?,
-                        audio_hash: row.get(3)?,
-                        youtube_id: row.get(4)?,
-                        raw_title: row.get(5)?,
-                        raw_artist: row.get(6)?,
-                        norm_title: row.get(7)?,
-                        norm_artist: row.get(8)?,
-                        norm_stem: row.get(9)?,
-                        duration_secs: row.get::<_, i64>(10)? as u32,
-                        format_ext: row.get(11)?,
-                        bitrate_kbps: row.get::<_, i64>(12)? as u32,
-                        chromaprint: blob_opt.map(|b| decode_u32_blob(&b)),
-                    },
-                ))
-            }) {
-                let (db_mtime, db_size, mut cached) = rec;
-                if db_mtime == mtime_secs && db_size == size_bytes {
-                    // If acoustic fingerprint was requested and not yet computed, compute & update it
-                    if compute_acoustic && cached.chromaprint.is_none() {
-                        if let Some(fp) = compute_acoustic_subfingerprints(path) {
-                            let blob = encode_u32_blob(&fp);
-                            let _ = conn.execute(
-                                "UPDATE track_fingerprints SET chromaprint = ?1 WHERE file_path = ?2",
-                                params![blob, &canonical_path],
-                            );
-                            cached.chromaprint = Some(fp);
-                        }
-                    }
-                    return cached;
-                }
-            }
-        }
-    }
-
-    let rec = compute_raw_fingerprint(path, mtime_secs, size_bytes, compute_acoustic);
-
-    if let Some(conn) = conn_opt {
-        let blob_opt = rec.chromaprint.as_ref().map(|fp| encode_u32_blob(fp));
-        let now_ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        let _ = conn.execute(
-            "INSERT OR REPLACE INTO track_fingerprints (
-                file_path, mtime_secs, size_bytes, quick_hash, audio_hash, youtube_id,
-                raw_title, raw_artist, norm_title, norm_artist, norm_stem,
-                duration_secs, format_ext, bitrate_kbps, chromaprint, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
-            params![
-                &rec.file_path,
-                rec.mtime_secs as i64,
-                rec.size_bytes as i64,
-                &rec.quick_hash,
-                &rec.audio_hash,
-                &rec.youtube_id,
-                &rec.raw_title,
-                &rec.raw_artist,
-                &rec.norm_title,
-                &rec.norm_artist,
-                &rec.norm_stem,
-                rec.duration_secs as i64,
-                &rec.format_ext,
-                rec.bitrate_kbps as i64,
-                blob_opt,
-                now_ts,
-            ],
-        );
-    }
-
-    rec
-}
 
 /// Remove stale fingerprint entries whose files no longer exist on disk (or clear all if requested)
 pub fn prune_stale_fingerprints_impl(conn: &Connection, clear_all: bool) -> (usize, usize) {
@@ -887,6 +814,22 @@ struct MatchEdge {
     offset_secs: Option<f32>,
 }
 
+fn get_track_modifier(raw_title: &str, raw_stem: &str) -> Option<&'static str> {
+    let lower = format!("{} {}", raw_title, raw_stem).to_lowercase();
+    let modifiers = [
+        "remix", "acoustic", "live", "instrumental", "karaoke",
+        "reprise", "cover", "club mix", "unplugged", "orchestral",
+        "part 1", "part 2", "part 3", "part 4", "pt 1", "pt 2", "pt 3",
+        "part i", "part ii", "part iii",
+    ];
+    for &m in &modifiers {
+        if lower.contains(m) {
+            return Some(m);
+        }
+    }
+    None
+}
+
 /// Determine whether two distinct files represent the same underlying song across the 3 tiers
 fn check_pair_duplicate(
     a: &TrackFingerprintRecord,
@@ -918,6 +861,26 @@ fn check_pair_duplicate(
                 offset_secs: if diff.abs() >= 1.0 { Some(-diff) } else { None },
             });
         }
+    }
+
+    // Protect distinct musical modifiers (e.g. Live vs Studio, Remix vs Original, Part 1 vs Part 2)
+    let mod_a = get_track_modifier(&a.raw_title, &a.norm_stem);
+    let mod_b = get_track_modifier(&b.raw_title, &b.norm_stem);
+    if mod_a != mod_b {
+        return None;
+    }
+
+    // Protect generic titles from merging across different or empty artists
+    let is_generic_a = matches!(
+        a.norm_title.as_str(),
+        "intro" | "outro" | "interlude" | "track 1" | "track 01" | "untitled" | "prelude"
+    );
+    let is_generic_b = matches!(
+        b.norm_title.as_str(),
+        "intro" | "outro" | "interlude" | "track 1" | "track 01" | "untitled" | "prelude"
+    );
+    if (is_generic_a || is_generic_b) && (a.norm_artist.is_empty() || b.norm_artist.is_empty() || a.norm_artist != b.norm_artist) {
+        return None;
     }
 
     let dur_diff = (a.duration_secs as i64 - b.duration_secs as i64).unsigned_abs() as u32;
@@ -1121,6 +1084,9 @@ pub fn analyze_candidates(
                 DuplicateProgressPayload {
                     phase: "done".to_string(),
                     phase_label: "No tracks to analyze".to_string(),
+                    stage: 3,
+                    stage_name: "done".to_string(),
+                    stage_label: "No tracks to analyze".to_string(),
                     current: 0,
                     total: 0,
                     progress: 100.0,
@@ -1177,10 +1143,8 @@ pub fn analyze_candidates(
                 }) {
                     let (db_mtime, db_size, cached) = rec;
                     if db_mtime == mtime_secs && db_size == size_bytes {
-                        if !compute_acoustic || cached.chromaprint.is_some() {
-                            records[idx] = Some(cached);
-                            hit = true;
-                        }
+                        records[idx] = Some(cached);
+                        hit = true;
                     }
                 }
             }
@@ -1192,7 +1156,7 @@ pub fn analyze_candidates(
 
     let initial_cached = n - to_compute.len();
 
-    // 2. Parallel processing of uncached / modified / missing tracks
+    // Stage 1: Parallel extraction of metadata & stream hashes (100x faster, zero ffmpeg calls)
     if !to_compute.is_empty() {
         let num_workers = std::thread::available_parallelism()
             .map(|p| p.get())
@@ -1209,15 +1173,18 @@ pub fn analyze_candidates(
                 .map(|f| f.to_string_lossy().to_string())
                 .unwrap_or_else(|| to_compute[0].1.canonical_path.clone());
             let pct = if n > 0 {
-                ((initial_cached as f64) / (n as f64) * 88.0).clamp(0.0, 88.0)
+                ((initial_cached as f64) / (n as f64) * 33.0).clamp(0.0, 33.0)
             } else {
-                0.0
+                33.0
             };
             let _ = app.emit(
                 "duplicate-analysis-progress",
                 DuplicateProgressPayload {
                     phase: "fingerprinting".to_string(),
-                    phase_label: format!("Analyzing tracks ({} parallel workers)...", num_workers),
+                    phase_label: format!("Stage 1/3: Reading tags & audio stream hashes ({} parallel workers)...", num_workers),
+                    stage: 1,
+                    stage_name: "metadata".to_string(),
+                    stage_label: "Stage 1/3: Reading tags & audio stream hashes".to_string(),
                     current: initial_cached,
                     total: n,
                     progress: pct,
@@ -1248,7 +1215,8 @@ pub fn analyze_candidates(
                             break;
                         }
                         let (orig_idx, ref cand, mtime, size) = to_compute_ref[i];
-                        let rec = compute_raw_fingerprint(&cand.path, mtime, size, compute_acoustic);
+                        // Fast pass: compute_acoustic = false (extracts tags and stream hash only)
+                        let rec = compute_raw_fingerprint(&cand.path, mtime, size, false);
                         let _ = tx.send((orig_idx, rec));
                     }
                 });
@@ -1290,9 +1258,9 @@ pub fn analyze_candidates(
                                     None
                                 };
                                 let pct = if n > 0 {
-                                    ((total_done as f64) / (n as f64) * 88.0).clamp(0.0, 88.0)
+                                    ((total_done as f64) / (n as f64) * 33.0).clamp(0.0, 33.0)
                                 } else {
-                                    100.0
+                                    33.0
                                 };
 
                                 let _ = app.emit(
@@ -1300,9 +1268,12 @@ pub fn analyze_candidates(
                                     DuplicateProgressPayload {
                                         phase: "fingerprinting".to_string(),
                                         phase_label: format!(
-                                            "Analyzing tracks ({} parallel workers)...",
+                                            "Stage 1/3: Reading tags & audio stream hashes ({} parallel workers)...",
                                             num_workers
                                         ),
+                                        stage: 1,
+                                        stage_name: "metadata".to_string(),
+                                        stage_label: "Stage 1/3: Reading tags & audio stream hashes".to_string(),
                                         current: total_done,
                                         total: n,
                                         progress: pct,
@@ -1332,18 +1303,21 @@ pub fn analyze_candidates(
                                     None
                                 };
                                 let pct = if n > 0 {
-                                    ((total_done as f64) / (n as f64) * 88.0).clamp(0.0, 88.0)
+                                    ((total_done as f64) / (n as f64) * 33.0).clamp(0.0, 33.0)
                                 } else {
-                                    100.0
+                                    33.0
                                 };
                                 let _ = app.emit(
                                     "duplicate-analysis-progress",
                                     DuplicateProgressPayload {
                                         phase: "fingerprinting".to_string(),
                                         phase_label: format!(
-                                            "Analyzing tracks ({} parallel workers)...",
+                                            "Stage 1/3: Reading tags & audio stream hashes ({} parallel workers)...",
                                             num_workers
                                         ),
+                                        stage: 1,
+                                        stage_name: "metadata".to_string(),
+                                        stage_label: "Stage 1/3: Reading tags & audio stream hashes".to_string(),
                                         current: total_done,
                                         total: n,
                                         progress: pct,
@@ -1365,7 +1339,7 @@ pub fn analyze_candidates(
             records[orig_idx] = Some(rec);
         }
 
-        // 3. Batch persist newly computed fingerprints into SQLite in a single transaction
+        // Batch persist newly computed fingerprints into SQLite in a single transaction
         if let Some(ref mut conn) = conn_opt {
             if let Ok(tx) = conn.transaction() {
                 {
@@ -1410,30 +1384,7 @@ pub fn analyze_candidates(
         }
     }
 
-    let records: Vec<TrackFingerprintRecord> = records.into_iter().flatten().collect();
-
-    if let Some(app) = app {
-        let elapsed = start_time.elapsed().as_secs_f64();
-        let speed = if elapsed > 0.0 && n > 0 {
-            (n as f64) / elapsed
-        } else {
-            0.0
-        };
-        let _ = app.emit(
-            "duplicate-analysis-progress",
-            DuplicateProgressPayload {
-                phase: "clustering".to_string(),
-                phase_label: "Comparing candidates & clustering duplicate groups...".to_string(),
-                current: n,
-                total: n,
-                progress: 89.0,
-                current_file: None,
-                eta_secs: Some(0.3),
-                speed,
-            },
-        );
-        last_emit = std::time::Instant::now();
-    }
+    let mut records: Vec<TrackFingerprintRecord> = records.into_iter().flatten().collect();
 
     // Union-Find for duplicate clustering
     let mut parent: Vec<usize> = (0..n).collect();
@@ -1505,10 +1456,254 @@ pub fn analyze_candidates(
         }
     }
 
-    // Step 2: Duration-windowed candidate comparison for Tier 2 (Metadata) & Tier 3 (Acoustic)
-    // Both Tier 2 and Tier 3 strictly require dur_diff <= 26s.
-    // By sorting tracks by duration_secs, we only compare candidates within [dur_i, dur_i + 26s],
-    // reducing comparisons from 50,000,000+ down to ~100k (500x speedup).
+    // Stage 2: Targeted Acoustic Analysis (ONLY computed on unresolved candidate pairs)
+    if compute_acoustic {
+        let mut already_matched: HashSet<usize> = HashSet::new();
+        for i in 0..n {
+            let root = find(&mut parent, i);
+            if root != i {
+                already_matched.insert(i);
+                already_matched.insert(root);
+            }
+        }
+
+        let mut needed_flags = vec![false; n];
+        let mut sorted_by_dur: Vec<usize> = (0..n).collect();
+        sorted_by_dur.sort_by_key(|&idx| records[idx].duration_secs);
+
+        for (pos, &i) in sorted_by_dur.iter().enumerate() {
+            if already_matched.contains(&i) {
+                continue;
+            }
+            let dur_i = records[i].duration_secs;
+            for &j in &sorted_by_dur[(pos + 1)..] {
+                if already_matched.contains(&j) {
+                    continue;
+                }
+                let dur_j = records[j].duration_secs;
+                if dur_j > dur_i + 22 {
+                    break;
+                }
+                let mod_a = get_track_modifier(&records[i].raw_title, &records[i].norm_stem);
+                let mod_b = get_track_modifier(&records[j].raw_title, &records[j].norm_stem);
+                if mod_a != mod_b {
+                    continue;
+                }
+
+                let artist_same = !records[i].norm_artist.is_empty()
+                    && records[i].norm_artist == records[j].norm_artist;
+                let artists_compat = artist_same
+                    || records[i].norm_artist.is_empty()
+                    || records[j].norm_artist.is_empty()
+                    || records[i].norm_artist.contains(&records[j].norm_artist)
+                    || records[j].norm_artist.contains(&records[i].norm_artist);
+
+                let stem_exact = !records[i].norm_stem.is_empty() && records[i].norm_stem == records[j].norm_stem;
+                let title_exact = !records[i].norm_title.is_empty() && records[i].norm_title == records[j].norm_title;
+
+                let should_check_acoustic = if stem_exact || title_exact {
+                    artists_compat
+                } else if artist_same {
+                    let t_i = &records[i].norm_title;
+                    let t_j = &records[j].norm_title;
+                    (t_i.len() >= 4 && t_j.len() >= 4 && (t_i.contains(t_j) || t_j.contains(t_i)))
+                        || jaro_winkler(t_i, t_j) >= 0.80
+                } else if artists_compat {
+                    let t_i = &records[i].norm_title;
+                    let t_j = &records[j].norm_title;
+                    jaro_winkler(t_i, t_j) >= 0.88
+                } else {
+                    false
+                };
+
+                if should_check_acoustic {
+                    needed_flags[i] = true;
+                    needed_flags[j] = true;
+                }
+            }
+        }
+
+        let needed_indices: Vec<usize> = (0..n)
+            .filter(|&i| needed_flags[i] && records[i].chromaprint.is_none())
+            .collect();
+        let total_acoustic = needed_indices.len();
+
+        if total_acoustic > 0 {
+            let acoustic_start = std::time::Instant::now();
+            let mut last_acoustic_emit = std::time::Instant::now();
+
+            let num_workers = std::thread::available_parallelism()
+                .map(|p| p.get())
+                .unwrap_or(4)
+                .clamp(2, 8)
+                .min(total_acoustic);
+            let work_idx = std::sync::atomic::AtomicUsize::new(0);
+            let (tx, rx) = std::sync::mpsc::channel();
+
+            // Emit immediate start notice
+            if let Some(app) = app {
+                let _ = app.emit(
+                    "duplicate-analysis-progress",
+                    DuplicateProgressPayload {
+                        phase: "acoustic".to_string(),
+                        phase_label: format!("Stage 2/3: Verifying {} candidate tracks with parallel acoustic waveforms...", total_acoustic),
+                        stage: 2,
+                        stage_name: "acoustic".to_string(),
+                        stage_label: "Stage 2/3: Acoustic waveform verification".to_string(),
+                        current: 0,
+                        total: total_acoustic,
+                        progress: 33.0,
+                        current_file: None,
+                        eta_secs: None,
+                        speed: 0.0,
+                    },
+                );
+            }
+
+            let mut computed_fps = Vec::with_capacity(total_acoustic);
+
+            std::thread::scope(|s| {
+                for _ in 0..num_workers {
+                    let tx = tx.clone();
+                    let work_idx = &work_idx;
+                    let needed_ref = &needed_indices;
+                    let unique_cand_ref = &unique_candidates;
+                    s.spawn(move || {
+                        loop {
+                            if let Some(tid) = task_id {
+                                if crate::sanitizer::is_task_cancelled(tid) {
+                                    break;
+                                }
+                            }
+                            let i = work_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if i >= needed_ref.len() {
+                                break;
+                            }
+                            let orig_idx = needed_ref[i];
+                            let fp = compute_acoustic_subfingerprints(&unique_cand_ref[orig_idx].path);
+                            let _ = tx.send((orig_idx, fp));
+                        }
+                    });
+                }
+                drop(tx);
+
+                let mut completed = 0usize;
+
+                while completed < total_acoustic {
+                    if let Some(tid) = task_id {
+                        if crate::sanitizer::is_task_cancelled(tid) {
+                            break;
+                        }
+                    }
+                    match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                        Ok((orig_idx, fp_opt)) => {
+                            computed_fps.push((orig_idx, fp_opt));
+                            completed += 1;
+
+                            if let Some(app) = app {
+                                let elapsed = acoustic_start.elapsed().as_secs_f64();
+                                let should_emit = completed == total_acoustic
+                                    || last_acoustic_emit.elapsed() >= std::time::Duration::from_millis(400);
+                                if should_emit {
+                                    let speed = if elapsed > 0.05 && completed > 0 {
+                                        (completed as f64) / elapsed
+                                    } else {
+                                        0.0
+                                    };
+                                    let remaining = (total_acoustic - completed) as f64;
+                                    let eta = if speed > 0.1 { Some(remaining / speed) } else { None };
+                                    let pct = 33.0 + ((completed as f64) / (total_acoustic as f64) * 33.0);
+                                    let fname = Path::new(&unique_candidates[orig_idx].canonical_path)
+                                        .file_name()
+                                        .map(|f| f.to_string_lossy().to_string());
+                                    let _ = app.emit(
+                                        "duplicate-analysis-progress",
+                                        DuplicateProgressPayload {
+                                            phase: "acoustic".to_string(),
+                                            phase_label: format!("Stage 2/3: Acoustic decoding ({}/{})...", completed, total_acoustic),
+                                            stage: 2,
+                                            stage_name: "acoustic".to_string(),
+                                            stage_label: "Stage 2/3: Acoustic waveform verification".to_string(),
+                                            current: completed,
+                                            total: total_acoustic,
+                                            progress: pct.clamp(33.0, 66.0),
+                                            current_file: fname,
+                                            eta_secs: eta,
+                                            speed,
+                                        },
+                                    );
+                                    last_acoustic_emit = std::time::Instant::now();
+                                }
+                            }
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+            });
+
+            // Persist newly computed fingerprints to SQLite in batch
+            if let Some(ref mut conn) = conn_opt {
+                if let Ok(tx) = conn.transaction() {
+                    {
+                        if let Ok(mut stmt) = tx.prepare_cached(
+                            "UPDATE track_fingerprints SET chromaprint = ?1 WHERE file_path = ?2",
+                        ) {
+                            for &(orig_idx, ref fp_opt) in &computed_fps {
+                                if let Some(ref fp) = fp_opt {
+                                    let blob = encode_u32_blob(fp);
+                                    let _ = stmt.execute(params![blob, &records[orig_idx].file_path]);
+                                }
+                            }
+                        }
+                    }
+                    let _ = tx.commit();
+                }
+            }
+
+            for (orig_idx, fp_opt) in computed_fps {
+                if let Some(fp) = fp_opt {
+                    records[orig_idx].chromaprint = Some(fp);
+                }
+            }
+        } else if let Some(app) = app {
+            let _ = app.emit(
+                "duplicate-analysis-progress",
+                DuplicateProgressPayload {
+                    phase: "acoustic".to_string(),
+                    phase_label: "Stage 2/3: All candidates verified via stream hashes & metadata (acoustic decode skipped)".to_string(),
+                    stage: 2,
+                    stage_name: "acoustic".to_string(),
+                    stage_label: "Stage 2/3: Acoustic decode skipped (all resolved via metadata)".to_string(),
+                    current: 0,
+                    total: 0,
+                    progress: 66.0,
+                    current_file: None,
+                    eta_secs: Some(0.0),
+                    speed: 0.0,
+                },
+            );
+        }
+    } else if let Some(app) = app {
+        let _ = app.emit(
+            "duplicate-analysis-progress",
+            DuplicateProgressPayload {
+                phase: "acoustic".to_string(),
+                phase_label: "Stage 2/3: Acoustic decoding disabled".to_string(),
+                stage: 2,
+                stage_name: "acoustic".to_string(),
+                stage_label: "Stage 2/3: Acoustic decoding disabled".to_string(),
+                current: 0,
+                total: 0,
+                progress: 66.0,
+                current_file: None,
+                eta_secs: Some(0.0),
+                speed: 0.0,
+            },
+        );
+    }
+
+    // Stage 3: Duration-windowed candidate comparison for Tier 2 (Metadata) & Tier 3 (Acoustic)
     let mut sorted_indices: Vec<usize> = (0..n).collect();
     sorted_indices.sort_by_key(|&idx| records[idx].duration_secs);
 
@@ -1531,6 +1726,14 @@ pub fn analyze_candidates(
             let root_j = find(&mut parent, j);
             if root_i == root_j {
                 continue;
+            }
+
+            // Anti-transitive chaining check: ensure j is compatible with the cluster representative
+            let rep_i = root_i;
+            if rep_i != i {
+                if check_pair_duplicate(&records[rep_i], &records[j], max_acoustic_secs).is_none() {
+                    continue;
+                }
             }
 
             if let Some(edge) = check_pair_duplicate(&records[i], &records[j], max_acoustic_secs) {
@@ -1560,19 +1763,18 @@ pub fn analyze_candidates(
                 } else {
                     None
                 };
-                let pct = if n > 0 {
-                    89.0 + ((step as f64) / (n as f64) * 9.0)
-                } else {
-                    98.0
-                };
+                let pct = 66.0 + ((step as f64) / (n as f64) * 33.0);
                 let _ = app.emit(
                     "duplicate-analysis-progress",
                     DuplicateProgressPayload {
                         phase: "clustering".to_string(),
-                        phase_label: "Comparing candidates & clustering duplicate groups...".to_string(),
+                        phase_label: "Stage 3/3: Comparing candidates & clustering duplicate groups...".to_string(),
+                        stage: 3,
+                        stage_name: "clustering".to_string(),
+                        stage_label: "Stage 3/3: Comparing candidates & clustering duplicate groups".to_string(),
                         current: step + 1,
                         total: n,
-                        progress: pct.clamp(89.0, 98.0),
+                        progress: pct.clamp(66.0, 99.0),
                         current_file: None,
                         eta_secs,
                         speed,
@@ -1783,6 +1985,9 @@ pub fn analyze_candidates(
             DuplicateProgressPayload {
                 phase: "done".to_string(),
                 phase_label: "Analysis complete".to_string(),
+                stage: 3,
+                stage_name: "done".to_string(),
+                stage_label: "Analysis complete".to_string(),
                 current: n,
                 total: n,
                 progress: 100.0,

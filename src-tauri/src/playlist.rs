@@ -348,12 +348,6 @@ fn lazy_static_or_local_year_regex(text: &str) -> Option<u32> {
 static TRACK_METADATA_CACHE: std::sync::LazyLock<std::sync::RwLock<std::collections::HashMap<String, CachedTrackMeta>>> =
     std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
 
-#[allow(dead_code)]
-pub fn clear_track_metadata_cache() {
-    if let Ok(mut cache_guard) = TRACK_METADATA_CACHE.write() {
-        cache_guard.clear();
-    }
-}
 
 pub fn probe_track_metadata(path: &Path, mtime_secs: u64, size_bytes: u64) -> CachedTrackMeta {
     let file_path = crate::utils::canonical_path_str(path);

@@ -188,14 +188,18 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
   const handleApplyUtf16Tags = async () => {
     if (selectedFontIssuePaths.size === 0) return;
     setIsApplyingOption1(true);
+    const count = selectedFontIssuePaths.size;
+    const taskId = `font_rewrite_${Date.now()}`;
     try {
-      const res = await invoke<ExecutionReport>("apply_font_issue_option1", {
+      const promise = invoke<ExecutionReport>("apply_font_issue_option1", {
         filePaths: Array.from(selectedFontIssuePaths),
       });
+      addBackgroundTask(taskId, `Rewrite ID3 tags for ${count} files`, promise);
+      const res = await promise;
       if (res.failure_count > 0) {
-        alert(`Updated ID3v2.3 UTF-16 tags for ${res.success_count} file(s). Warning: ${res.failure_count} file(s) failed:\n${res.errors.slice(0, 5).join("\n")}`);
+        alert(`Updated tags for ${res.success_count} file(s). Warning: ${res.failure_count} file(s) failed:\n${res.errors.slice(0, 5).join("\n")}`);
       } else {
-        alert(`Successfully updated ID3v2.3 UTF-16 tags for ${res.success_count} file(s)!`);
+        alert(`Successfully updated tags for ${res.success_count} file(s)!`);
       }
       setFontIssueItems((prev) => prev.filter((i) => !selectedFontIssuePaths.has(i.file_path)));
       setSelectedFontIssuePaths(new Set());
@@ -209,25 +213,48 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
   const handleApplyTransliterate = async (targetType: "both" | "tags" | "filenames") => {
     if (selectedFontIssuePaths.size === 0) return;
     setIsApplyingOption2(true);
+    const count = selectedFontIssuePaths.size;
+    const taskId = `font_transliterate_${Date.now()}`;
+    const typeLabel = targetType === "both" ? "both tags & filenames" : targetType === "filenames" ? "filenames" : "tags";
     try {
-      const res = await invoke<ExecutionReport>("apply_font_issue_option2", {
+      const promise = invoke<ExecutionReport>("apply_font_issue_option2", {
         filePaths: Array.from(selectedFontIssuePaths),
         targetType,
       });
-      const typeLabel = targetType === "both" ? "both tags & filenames" : targetType === "filenames" ? "filenames" : "tags";
+      addBackgroundTask(taskId, `Transliterate ${typeLabel} for ${count} files`, promise);
+      const res = await promise;
       if (res.failure_count > 0) {
-        alert(`Transliterated ${typeLabel} for ${res.success_count} file(s). Warning: ${res.failure_count} file(s) failed:\n${res.errors.slice(0, 5).join("\n")}`);
+        alert(`Transliterated ${typeLabel} for ${res.success_count} file(s). Warning: ${res.failure_count} file(s) had issues:\n${res.errors.slice(0, 5).join("\n")}`);
       } else {
         alert(`Successfully transliterated ${typeLabel} for ${res.success_count} file(s) to Romanized Banglish!`);
       }
-      if (targetType === "both" || targetType === "filenames") {
-        setFontIssueItems((prev) => prev.filter((i) => !selectedFontIssuePaths.has(i.file_path)));
-        setSelectedFontIssuePaths(new Set());
-      }
+      setFontIssueItems((prev) => prev.filter((i) => !selectedFontIssuePaths.has(i.file_path)));
+      setSelectedFontIssuePaths(new Set());
     } catch (e) {
       alert("Error applying transliteration: " + e);
     } finally {
       setIsApplyingOption2(false);
+    }
+  };
+
+  const handleApplySingleFontIssue = async (filePath: string, targetType: "both" | "tags" | "filenames") => {
+    try {
+      const res = await invoke<ExecutionReport>("apply_font_issue_option2", {
+        filePaths: [filePath],
+        targetType,
+      });
+      if (res.failure_count > 0) {
+        alert(`Warning: Failed to transliterate:\n${res.errors.join("\n")}`);
+      } else {
+        setFontIssueItems((prev) => prev.filter((i) => i.file_path !== filePath));
+        setSelectedFontIssuePaths((prev) => {
+          const next = new Set(prev);
+          next.delete(filePath);
+          return next;
+        });
+      }
+    } catch (e) {
+      alert("Error applying transliteration: " + e);
     }
   };
 
@@ -459,14 +486,56 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
     setUncheckedPhrases(next);
   };
 
-  const addCustomPhrase = () => {
-    const phrase = newPhrase.trim();
-    if (!phrase) return;
-    if (stripPhrases.includes(phrase)) {
-      alert("Phrase is already in the list!");
+  const addCustomPhrases = () => {
+    if (!newPhrase.trim()) return;
+
+    // Split by newlines, carriage returns, or comma delimiters
+    const lines = newPhrase
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+
+    if (lines.length === 0) return;
+
+    // Deduplicate over the whole list (case-insensitive deduplication while preserving casing)
+    const existingLower = new Set(stripPhrases.map((p) => p.trim().toLowerCase()));
+    const newUniqueToAdd: string[] = [];
+
+    for (const item of lines) {
+      const lower = item.toLowerCase();
+      if (!existingLower.has(lower)) {
+        existingLower.add(lower);
+        newUniqueToAdd.push(item);
+      }
+    }
+
+    if (newUniqueToAdd.length === 0) {
+      alert("All entered phrases are already in the list!");
       return;
     }
-    setStripPhrases([...stripPhrases, phrase]);
+
+    // Merge and deduplicate whole list preserving original order
+    const combined = [...stripPhrases, ...newUniqueToAdd];
+    const seen = new Set<string>();
+    const deduplicatedList: string[] = [];
+    for (const p of combined) {
+      const trimmed = p.trim();
+      const lower = trimmed.toLowerCase();
+      if (lower && !seen.has(lower)) {
+        seen.add(lower);
+        deduplicatedList.push(trimmed);
+      }
+    }
+
+    setStripPhrases(deduplicatedList);
+
+    // Make sure newly added phrases are enabled/checked
+    const nextUnchecked = new Set(uncheckedPhrases);
+    for (const a of newUniqueToAdd) {
+      nextUnchecked.delete(a);
+    }
+    setUncheckedPhrases(nextUnchecked);
+
     setNewPhrase("");
   };
 
@@ -475,6 +544,60 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
     const next = new Set(uncheckedPhrases);
     next.delete(phrase);
     setUncheckedPhrases(next);
+  };
+
+  const renderMetadataDiff = (original: string, sanitized: string) => {
+    const issues: string[] = [];
+
+    if (original.startsWith(" ") || original.endsWith(" ")) {
+      issues.push("Whitespace at edge");
+    }
+    if (original.includes("  ")) {
+      issues.push("Multiple spaces");
+    }
+    if (original.includes("\n") || original.includes("\r") || original.includes("\t")) {
+      issues.push("Newline / Tab in tag");
+    }
+    const hasInvisible = /[\u0000-\u001F\u007F-\u009F\u00A0\u2000-\u200F\u2028-\u202F\uFEFF\uF000-\uFFFF]/.test(original);
+    if (hasInvisible) {
+      issues.push("Invisible / control symbol");
+    }
+    if (issues.length === 0 && original !== sanitized) {
+      issues.push("Punctuation / text cleaned");
+    }
+
+    const visualOriginal = original
+      .replace(/^ +/, (m) => "␣".repeat(m.length))
+      .replace(/ +$/, (m) => "␣".repeat(m.length))
+      .replace(/ {2,}/g, (m) => " " + "␣".repeat(m.length - 1));
+
+    return (
+      <div>
+        <div style={{ color: "var(--danger)", fontFamily: "var(--font-mono)", whiteSpace: "pre-wrap", fontSize: "0.85rem" }}>
+          "{visualOriginal}"
+        </div>
+        {issues.length > 0 && (
+          <div style={{ display: "flex", gap: "4px", marginTop: "4px", flexWrap: "wrap" }}>
+            {issues.map((iss, i) => (
+              <span
+                key={i}
+                className="badge"
+                style={{
+                  fontSize: "0.68rem",
+                  padding: "1px 5px",
+                  borderRadius: "3px",
+                  backgroundColor: "rgba(234, 179, 8, 0.15)",
+                  color: "var(--warning)",
+                  border: "1px solid var(--warning)",
+                }}
+              >
+                ⚠️ {iss}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+    );
   };
 
 
@@ -571,17 +694,45 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
               Check or uncheck which words/phrases should be stripped from filenames and metadata, or add your own custom words to strip.
             </p>
 
-            {/* Custom Input */}
-            <div className="form-row" style={{ marginBottom: "16px", maxWidth: "450px" }}>
-              <input
-                type="text"
+            {/* Custom Multiline Input */}
+            <div style={{ marginBottom: "16px", maxWidth: "560px", display: "flex", flexDirection: "column", gap: "8px" }}>
+              <textarea
                 value={newPhrase}
                 onChange={(e) => setNewPhrase(e.target.value)}
-                placeholder="Add new word or phrase to strip..."
+                placeholder="Paste or type words/phrases to strip (multiline supported, one per line)..."
+                rows={3}
+                style={{
+                  width: "100%",
+                  padding: "8px 12px",
+                  borderRadius: "6px",
+                  border: "1px solid var(--border-color)",
+                  backgroundColor: "var(--bg-surface)",
+                  color: "var(--text-primary)",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: "0.82rem",
+                  resize: "vertical",
+                  boxSizing: "border-box",
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                    e.preventDefault();
+                    addCustomPhrases();
+                  }
+                }}
               />
-              <button className="btn btn-secondary" onClick={addCustomPhrase}>
-                + Add Word
-              </button>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span className="text-secondary" style={{ fontSize: "0.72rem" }}>
+                  Tip: Paste multiple lines at once. Press <kbd style={{ padding: "1px 4px", fontSize: "0.7rem", borderRadius: "3px", backgroundColor: "var(--bg-tertiary)" }}>Ctrl/⌘</kbd> + <kbd style={{ padding: "1px 4px", fontSize: "0.7rem", borderRadius: "3px", backgroundColor: "var(--bg-tertiary)" }}>Enter</kbd> to add.
+                </span>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={addCustomPhrases}
+                  style={{ padding: "6px 14px", fontSize: "0.8rem", whiteSpace: "nowrap" }}
+                >
+                  + Add Phrases
+                </button>
+              </div>
             </div>
 
             {/* Phrases wrap container */}
@@ -746,13 +897,22 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
             {sanitizerSubTab === "font_issues" && fontIssueItems.length > 0 && (
               <>
                 <button
-                  className="btn btn-secondary"
-                  onClick={handleApplyUtf16Tags}
-                  disabled={selectedFontIssuePaths.size === 0 || isApplyingOption1 || isScanningFontIssues}
-                  style={{ padding: "6px 12px", fontSize: "0.82rem" }}
-                  title="Preserves real Bangla text in Title & Artist tags, but forces ID3v2.3 UTF-16 LE encoding with BOM for car displays"
+                  className="btn btn-primary"
+                  onClick={() => handleApplyTransliterate("both")}
+                  disabled={selectedFontIssuePaths.size === 0 || isApplyingOption2 || isScanningFontIssues}
+                  style={{ padding: "6px 14px", fontSize: "0.82rem", fontWeight: 600 }}
+                  title="Transliterates Bangla script and PUA symbols in both ID3 metadata tags AND physical filenames on disk to clean phonetic Romanized Banglish (ASCII), guaranteeing full car display compatibility"
                 >
-                  {isApplyingOption1 ? "Applying..." : "Rewrite ID3v2.3 UTF-16 Tags"}
+                  {isApplyingOption2 ? "Applying..." : `⚡ Transliterate Both (${selectedFontIssuePaths.size})`}
+                </button>
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => handleApplyTransliterate("filenames")}
+                  disabled={selectedFontIssuePaths.size === 0 || isApplyingOption2 || isScanningFontIssues}
+                  style={{ padding: "6px 12px", fontSize: "0.82rem" }}
+                  title="Transliterates Bangla script and PUA symbols in physical file names on disk to clean phonetic Romanized Banglish (ASCII)"
+                >
+                  {isApplyingOption2 ? "Applying..." : `📁 Rename Files (${selectedFontIssuePaths.size})`}
                 </button>
                 <button
                   className="btn btn-secondary"
@@ -761,25 +921,16 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
                   style={{ padding: "6px 12px", fontSize: "0.82rem" }}
                   title="Transliterates Bangla script in Title & Artist metadata tags to clean phonetic Romanized Banglish (ASCII), keeping files on disk unchanged"
                 >
-                  {isApplyingOption2 ? "Applying..." : "Transliterate Tags to Banglish"}
+                  {isApplyingOption2 ? "Applying..." : `🏷️ Clean Tags (${selectedFontIssuePaths.size})`}
                 </button>
                 <button
                   className="btn btn-secondary"
-                  onClick={() => handleApplyTransliterate("filenames")}
-                  disabled={selectedFontIssuePaths.size === 0 || isApplyingOption2 || isScanningFontIssues}
+                  onClick={handleApplyUtf16Tags}
+                  disabled={selectedFontIssuePaths.size === 0 || isApplyingOption1 || isScanningFontIssues}
                   style={{ padding: "6px 12px", fontSize: "0.82rem" }}
-                  title="Transliterates Bangla script in physical file names on disk to clean phonetic Romanized Banglish (ASCII)"
+                  title="Preserves real Bangla text in Title & Artist tags, stripping PUA symbols"
                 >
-                  {isApplyingOption2 ? "Applying..." : "Transliterate Filenames to Banglish"}
-                </button>
-                <button
-                  className="btn btn-primary"
-                  onClick={() => handleApplyTransliterate("both")}
-                  disabled={selectedFontIssuePaths.size === 0 || isApplyingOption2 || isScanningFontIssues}
-                  style={{ padding: "6px 12px", fontSize: "0.82rem" }}
-                  title="Transliterates Bangla script in both ID3 metadata tags AND physical filenames on disk to clean phonetic Romanized Banglish (ASCII), fully resolving font issues"
-                >
-                  {isApplyingOption2 ? "Applying..." : "Transliterate Both (Tags & Filenames)"}
+                  {isApplyingOption1 ? "Applying..." : `Rewrite ID3 Tags (${selectedFontIssuePaths.size})`}
                 </button>
               </>
             )}
@@ -891,10 +1042,12 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
                             {item.field_name}
                           </td>
                           <td>
-                            <div style={{ color: "var(--danger)" }}>{item.original_value}</div>
+                            {renderMetadataDiff(item.original_value, item.sanitized_value)}
                           </td>
-                          <td style={{ color: "var(--success)", fontWeight: 600 }}>
-                            {item.sanitized_value}
+                          <td>
+                            <div style={{ color: "var(--success)", fontWeight: 600, fontFamily: "var(--font-mono)", whiteSpace: "pre-wrap", fontSize: "0.85rem" }}>
+                              "{item.sanitized_value}"
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -923,10 +1076,11 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
                             onChange={handleToggleAllFontIssues}
                           />
                         </th>
-                        <th style={{ width: "260px" }}>File Path / Location</th>
+                        <th style={{ width: "240px" }}>File Path / Location</th>
                         <th style={{ width: "160px" }}>Detected Issue</th>
-                        <th style={{ width: "220px" }}>ID3v2.3 UTF-16 Target</th>
+                        <th style={{ width: "180px" }}>ID3 Target</th>
                         <th>Banglish Transliteration Preview</th>
+                        <th style={{ width: "160px", textAlign: "center" }}>Actions</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -957,6 +1111,26 @@ export const SanitizerView: React.FC<SanitizerViewProps> = ({
                           </td>
                           <td style={{ color: "var(--success)", fontWeight: 600, fontFamily: "var(--font-mono)", fontSize: "0.82rem" }}>
                             {item.option2_preview}
+                          </td>
+                          <td style={{ textAlign: "center" }}>
+                            <div style={{ display: "flex", gap: "6px", justifyContent: "center" }}>
+                              <button
+                                className="btn btn-primary"
+                                onClick={() => handleApplySingleFontIssue(item.file_path, "both")}
+                                style={{ padding: "3px 8px", fontSize: "0.75rem", fontWeight: 600 }}
+                                title="Transliterate both tags & filename for this track to clean ASCII"
+                              >
+                                ⚡ Fix
+                              </button>
+                              <button
+                                className="btn btn-secondary"
+                                onClick={() => handleApplySingleFontIssue(item.file_path, "filenames")}
+                                style={{ padding: "3px 8px", fontSize: "0.75rem" }}
+                                title="Rename file to clean ASCII on disk"
+                              >
+                                📁 Rename
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       ))}

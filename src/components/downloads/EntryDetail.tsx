@@ -16,6 +16,8 @@ type EntryDetailProps = {
   onReconcileArchive?: (entry: DownloadEntry) => Promise<void>;
   onDeleteEntry: (entryId: string) => void;
   onDeleteFilesExecuted: (entryId: string) => Promise<void>;
+  onFileRepair?: (entry: DownloadEntry) => void;
+  onUpgradeEntryMp3s?: (entry: DownloadEntry) => void;
 };
 
 export const EntryDetail: React.FC<EntryDetailProps> = ({
@@ -32,6 +34,8 @@ export const EntryDetail: React.FC<EntryDetailProps> = ({
   onReconcileArchive,
   onDeleteEntry,
   onDeleteFilesExecuted,
+  onFileRepair,
+  onUpgradeEntryMp3s,
 }) => {
   const [formData, setFormData] = useState<DownloadEntry | null>(entry);
   const [localIsRefreshing, setLocalIsRefreshing] = useState(false);
@@ -199,6 +203,19 @@ export const EntryDetail: React.FC<EntryDetailProps> = ({
           >
             {isReconciling ? "Reconciling..." : "Reconcile"}
           </button>
+
+          {(onFileRepair || onUpgradeEntryMp3s) && (
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => (onFileRepair ? onFileRepair(formData) : onUpgradeEntryMp3s?.(formData))}
+              disabled={isRefreshing || isDownloading || isReconciling}
+              style={{ padding: "4px 10px", fontSize: "0.78rem" }}
+              title={`Repair audio files in this playlist folder ("${formData.name}"): tags, artwork, or format`}
+            >
+              🛠️ File Repair
+            </button>
+          )}
 
           <button
             type="button"
