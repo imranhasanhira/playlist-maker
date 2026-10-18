@@ -51,7 +51,8 @@ export const ExportView: React.FC<ExportViewProps> = ({
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [exportLogs, setExportLogs] = useState<string[]>([]);
   const [showLogsModal, setShowLogsModal] = useState<boolean>(false);
-  const [activeTab, setActiveTab] = useState<"new" | "renamed" | "uptodate" | "orphans" | "warnings">("new");
+  const [activeTab, setActiveTab] = useState<"new" | "updated" | "renamed" | "uptodate" | "orphans" | "warnings">("new");
+  const [inspectDiffItem, setInspectDiffItem] = useState<ExportTrackItem | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>("");
   const debouncedSearchQuery = useDebounce(searchQuery, 250);
   const [visibleLimit, setVisibleLimit] = useState<number>(100);
@@ -69,14 +70,16 @@ export const ExportView: React.FC<ExportViewProps> = ({
   };
 
   const filteredItems = useMemo(() => {
-    if (!diffReport) return { newFiles: [], renamedFiles: [], upToDateFiles: [], orphanFiles: [], warningItems: [] };
+    if (!diffReport) return { newFiles: [], updatedFiles: [], renamedFiles: [], upToDateFiles: [], orphanFiles: [], warningItems: [] };
     const q = debouncedSearchQuery.trim().toLowerCase();
     const warnings = diffReport.warnings || [];
     const renamed = diffReport.renamed_files || [];
+    const updated = diffReport.updated_files || [];
     
     if (!q) {
       return {
         newFiles: diffReport.new_files,
+        updatedFiles: updated,
         renamedFiles: renamed,
         upToDateFiles: diffReport.up_to_date_files,
         orphanFiles: diffReport.orphan_files,
@@ -86,6 +89,9 @@ export const ExportView: React.FC<ExportViewProps> = ({
 
     return {
       newFiles: diffReport.new_files.filter(
+        (item) => item.relative_path.toLowerCase().includes(q) || item.dest_relative_path.toLowerCase().includes(q)
+      ),
+      updatedFiles: updated.filter(
         (item) => item.relative_path.toLowerCase().includes(q) || item.dest_relative_path.toLowerCase().includes(q)
       ),
       renamedFiles: renamed.filter(
@@ -165,6 +171,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
 
     return {
       newFiles: sortList(filteredItems.newFiles),
+      updatedFiles: sortList(filteredItems.updatedFiles),
       renamedFiles: sortList(filteredItems.renamedFiles),
       upToDateFiles: sortList(filteredItems.upToDateFiles),
       orphanFiles: sortList(filteredItems.orphanFiles),
@@ -220,12 +227,12 @@ export const ExportView: React.FC<ExportViewProps> = ({
     setSelectedItemPaths(next);
   };
 
-  const [showDeleteConfirmModal, setShowDeleteConfirmModal] = useState<boolean>(false);
-
   const getAbsPathsForSelected = () => {
     if (!diffReport) return [];
     const map = new Map<string, string>();
     diffReport.new_files.forEach((f) => map.set(f.relative_path, f.file_path));
+    (diffReport.updated_files || []).forEach((f) => map.set(f.relative_path, f.file_path));
+    (diffReport.renamed_files || []).forEach((f) => map.set(f.relative_path, f.file_path));
     diffReport.up_to_date_files.forEach((f) => map.set(f.relative_path, f.file_path));
     diffReport.orphan_files.forEach((f) => map.set(f.relative_path, f.file_path));
     
@@ -268,41 +275,202 @@ export const ExportView: React.FC<ExportViewProps> = ({
     alert(`Copied ${selectedItemPaths.size} path(s) to clipboard!`);
   };
 
-  const handleDeleteSelected = () => {
-    if (selectedItemPaths.size === 0) return;
-    setShowDeleteConfirmModal(true);
+
+  const [isApplyingAction, setIsApplyingAction] = useState<boolean>(false);
+  const [confirmModal, setConfirmModal] = useState<{
+    title: string;
+    message: string;
+    confirmText: string;
+    confirmVariant?: "primary" | "danger";
+    executingText?: string;
+    onConfirm: () => Promise<void> | void;
+  } | null>(null);
+
+  const [notification, setNotification] = useState<{
+    message: string;
+    type: "success" | "error" | "info";
+  } | null>(null);
+
+  useEffect(() => {
+    if (!notification) return;
+    const timer = setTimeout(() => setNotification(null), 4000);
+    return () => clearTimeout(timer);
+  }, [notification]);
+
+  const handleApplyRenames = (selectedOnly?: boolean, singleItem?: ExportTrackItem) => {
+    const targetDir = exportDir || diffReport?.destination;
+    if (!targetDir) {
+      setNotification({ message: "No export destination directory specified.", type: "error" });
+      return;
+    }
+    const toProcess = singleItem
+      ? [singleItem]
+      : selectedOnly
+        ? sortedItems.renamedFiles.filter(item => selectedItemPaths.has(item.relative_path))
+        : sortedItems.renamedFiles;
+
+    if (toProcess.length === 0) {
+      setNotification({
+        message: selectedOnly ? "No renamed tracks selected to apply." : "No renamed tracks to process.",
+        type: "info",
+      });
+      return;
+    }
+
+    setConfirmModal({
+      title: "🔄 Confirm Track Renames",
+      message: `Apply instant filesystem rename for ${toProcess.length} track(s) on destination USB (${targetDir})? No large audio data will need to be re-copied.`,
+      confirmText: `Rename ${toProcess.length} File(s)`,
+      confirmVariant: "primary",
+      executingText: "Renaming tracks on destination...",
+      onConfirm: async () => {
+        setIsApplyingAction(true);
+        try {
+          const count = await invoke<number>("apply_export_renames", {
+            destination: targetDir,
+            items: toProcess,
+          });
+          setNotification({ message: `Successfully renamed ${count} track(s) on destination!`, type: "success" });
+          setSelectedItemPaths(new Set());
+          setConfirmModal(null);
+          await handleAnalyzeDiff();
+        } catch (e) {
+          setNotification({ message: "Error applying renames: " + e, type: "error" });
+          setConfirmModal(null);
+        } finally {
+          setIsApplyingAction(false);
+        }
+      },
+    });
   };
 
-  const executeDeleteSelected = async () => {
-    setShowDeleteConfirmModal(false);
-    const absPaths = getAbsPathsForSelected();
-    if (absPaths.length === 0) return;
-    try {
-      const count = await invoke<number>("delete_export_files", { filePaths: absPaths });
-      alert(`Successfully deleted ${count} file(s) from disk.`);
-      setSelectedItemPaths(new Set());
-      handleAnalyzeDiff();
-    } catch (e) {
-      alert("Error deleting files: " + e);
+  const handleApplyCopies = (actionType: "new" | "updated" | "force", selectedOnly?: boolean, singleItem?: ExportTrackItem) => {
+    const targetDir = exportDir || diffReport?.destination;
+    if (!targetDir) {
+      setNotification({ message: "No export destination directory specified.", type: "error" });
+      return;
     }
+    const sourceList = actionType === "new" ? sortedItems.newFiles : actionType === "updated" ? sortedItems.updatedFiles : sortedItems.upToDateFiles;
+    const toProcess = singleItem
+      ? [singleItem]
+      : selectedOnly
+        ? sourceList.filter(item => selectedItemPaths.has(item.relative_path))
+        : sourceList;
+
+    if (toProcess.length === 0) {
+      setNotification({
+        message: selectedOnly ? "No tracks selected in this tab to transfer." : "No tracks available to transfer.",
+        type: "info",
+      });
+      return;
+    }
+
+    const actionLabel = actionType === "new" ? "Copy New" : actionType === "updated" ? "Update Tags / Content" : "Force Re-copy";
+    const title = actionType === "new" ? "🟢 Copy New Tracks" : actionType === "updated" ? "🟠 Update Modified Tracks" : "⚪ Force Re-copy Tracks";
+    const desc = actionType === "updated"
+      ? `Transfer and update ${toProcess.length} modified track(s) on USB with latest tags, cover art, and content?`
+      : `${actionLabel} for ${toProcess.length} track(s) to destination USB?`;
+
+    setConfirmModal({
+      title,
+      message: desc,
+      confirmText: `${actionLabel} (${toProcess.length})`,
+      confirmVariant: "primary",
+      executingText: `Transferring ${toProcess.length} track(s) to destination...`,
+      onConfirm: async () => {
+        setIsApplyingAction(true);
+        try {
+          const count = await invoke<number>("apply_export_copies", {
+            destination: targetDir,
+            items: toProcess,
+          });
+          setNotification({ message: `Successfully transferred ${count} track(s) to destination!`, type: "success" });
+          setSelectedItemPaths(new Set());
+          setConfirmModal(null);
+          await handleAnalyzeDiff();
+        } catch (e) {
+          setNotification({ message: "Error transferring files: " + e, type: "error" });
+          setConfirmModal(null);
+        } finally {
+          setIsApplyingAction(false);
+        }
+      },
+    });
+  };
+
+  const handleDeleteOrphans = (selectedOnly?: boolean, singleItem?: ExportOrphanItem) => {
+    const targetDir = exportDir || diffReport?.destination;
+    if (!targetDir) {
+      setNotification({ message: "No export destination directory specified.", type: "error" });
+      return;
+    }
+    const toProcess = singleItem
+      ? [singleItem]
+      : selectedOnly
+        ? sortedItems.orphanFiles.filter(item => selectedItemPaths.has(item.relative_path))
+        : sortedItems.orphanFiles;
+
+    if (toProcess.length === 0) {
+      setNotification({
+        message: selectedOnly ? "No orphan files selected to delete." : "No orphan files to delete.",
+        type: "info",
+      });
+      return;
+    }
+
+    setConfirmModal({
+      title: "🗑 Confirm Orphan Deletion",
+      message: `Permanently delete ${toProcess.length} orphan file(s) from destination USB? This action cannot be undone.`,
+      confirmText: `Delete ${toProcess.length} Orphan(s)`,
+      confirmVariant: "danger",
+      executingText: "Deleting orphan files...",
+      onConfirm: async () => {
+        setIsApplyingAction(true);
+        try {
+          const filePaths = toProcess.map(o => o.file_path);
+          const count = await invoke<number>("delete_export_files", { filePaths });
+          setNotification({ message: `Successfully deleted ${count} orphan file(s)!`, type: "success" });
+          setSelectedItemPaths(new Set());
+          setConfirmModal(null);
+          await handleAnalyzeDiff();
+        } catch (e) {
+          setNotification({ message: "Error deleting orphans: " + e, type: "error" });
+          setConfirmModal(null);
+        } finally {
+          setIsApplyingAction(false);
+        }
+      },
+    });
   };
 
   const [isCleaningHidden, setIsCleaningHidden] = useState<boolean>(false);
 
-  const handleCleanHiddenFiles = async (destPath: string) => {
-    if (!window.confirm(`Are you sure you want to clean all hidden system files (._*) from "${destPath}"?`)) {
+  const handleCleanHiddenFiles = (destPath: string) => {
+    if (!destPath) {
+      setNotification({ message: "No export destination directory specified.", type: "error" });
       return;
     }
-    setIsCleaningHidden(true);
-    try {
-      const count = await invoke<number>("clean_export_hidden_files", { destination: destPath });
-      alert(`Successfully cleaned ${count} hidden system file(s)!`);
-      handleAnalyzeDiff();
-    } catch (e) {
-      alert("Error cleaning hidden files: " + e);
-    } finally {
-      setIsCleaningHidden(false);
-    }
+    setConfirmModal({
+      title: "🧹 Clean Hidden System Files",
+      message: `Clean all macOS resource fork junk files (._*) from "${destPath}"?`,
+      confirmText: "Clean Hidden Files",
+      confirmVariant: "primary",
+      executingText: "Cleaning hidden system files...",
+      onConfirm: async () => {
+        setIsCleaningHidden(true);
+        try {
+          const count = await invoke<number>("clean_export_hidden_files", { destination: destPath });
+          setNotification({ message: `Successfully cleaned ${count} hidden system file(s)!`, type: "success" });
+          setConfirmModal(null);
+          await handleAnalyzeDiff();
+        } catch (e) {
+          setNotification({ message: "Error cleaning hidden files: " + e, type: "error" });
+          setConfirmModal(null);
+        } finally {
+          setIsCleaningHidden(false);
+        }
+      },
+    });
   };
 
   useEffect(() => {
@@ -628,16 +796,28 @@ export const ExportView: React.FC<ExportViewProps> = ({
 
       {/* Summary Cards */}
       {diffReport && (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: "10px" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: "10px" }}>
           <div className="card" style={{ padding: "12px 14px", margin: 0 }}>
             <div className="text-secondary" style={{ fontSize: "0.75rem", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>
-              🟢 New / Modified
+              🟢 New Tracks
             </div>
             <div style={{ fontSize: "1.2rem", fontWeight: 700, marginTop: "4px", color: "var(--text-primary)" }}>
               {diffReport.new_files.length} files
             </div>
             <div className="text-secondary" style={{ fontSize: "0.78rem", fontFamily: "var(--font-mono)", marginTop: "2px" }}>
               {formatSize(diffReport.total_bytes_to_copy)}
+            </div>
+          </div>
+
+          <div className="card" style={{ padding: "12px 14px", margin: 0 }}>
+            <div className="text-secondary" style={{ fontSize: "0.75rem", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>
+              🟠 Updated Tracks
+            </div>
+            <div style={{ fontSize: "1.2rem", fontWeight: 700, marginTop: "4px", color: (diffReport.updated_files?.length || 0) > 0 ? "var(--warning)" : "var(--text-primary)" }}>
+              {diffReport.updated_files?.length || 0} files
+            </div>
+            <div className="text-secondary" style={{ fontSize: "0.78rem", fontFamily: "var(--font-mono)", marginTop: "2px" }}>
+              {formatSize(diffReport.total_bytes_updated || 0)}
             </div>
           </div>
 
@@ -705,6 +885,18 @@ export const ExportView: React.FC<ExportViewProps> = ({
                 🟢 New ({filteredItems.newFiles.length})
               </button>
               <button
+                className={`btn ${activeTab === "updated" ? "btn-primary" : "btn-secondary"}`}
+                onClick={() => setActiveTab("updated")}
+                style={{
+                  padding: "4px 12px",
+                  fontSize: "0.8rem",
+                  borderColor: filteredItems.updatedFiles.length > 0 ? "var(--warning)" : undefined,
+                  color: filteredItems.updatedFiles.length > 0 && activeTab !== "updated" ? "var(--warning)" : undefined,
+                }}
+              >
+                🟠 Updated ({filteredItems.updatedFiles.length})
+              </button>
+              <button
                 className={`btn ${activeTab === "renamed" ? "btn-primary" : "btn-secondary"}`}
                 onClick={() => setActiveTab("renamed")}
                 style={{
@@ -762,20 +954,123 @@ export const ExportView: React.FC<ExportViewProps> = ({
                 </button>
               )}
 
-              {/* Action Panel right of Orphan Files tab */}
+              {/* Contextual Apply / Action Buttons */}
+              {selectedItemPaths.size === 0 && (
+                <>
+                  {activeTab === "new" && filteredItems.newFiles.length > 0 && (
+                    <button
+                      className="btn btn-secondary"
+                      disabled={isApplyingAction}
+                      onClick={() => handleApplyCopies("new", false)}
+                      style={{ padding: "3px 10px", fontSize: "0.75rem", borderColor: "var(--success)", color: "var(--success)", fontWeight: 600, marginLeft: "4px", display: "inline-flex", alignItems: "center", gap: "4px" }}
+                      title="Copy all new tracks to destination USB"
+                    >
+                      <span>⚡ Copy All New ({filteredItems.newFiles.length})</span>
+                    </button>
+                  )}
+                  {activeTab === "updated" && filteredItems.updatedFiles.length > 0 && (
+                    <button
+                      className="btn btn-secondary"
+                      disabled={isApplyingAction}
+                      onClick={() => handleApplyCopies("updated", false)}
+                      style={{ padding: "3px 10px", fontSize: "0.75rem", borderColor: "var(--warning)", color: "var(--warning)", fontWeight: 600, marginLeft: "4px", display: "inline-flex", alignItems: "center", gap: "4px" }}
+                      title="Transfer all modified tracks to update destination with new metadata"
+                    >
+                      <span>⚡ Apply All Updates ({filteredItems.updatedFiles.length})</span>
+                    </button>
+                  )}
+                  {activeTab === "renamed" && filteredItems.renamedFiles.length > 0 && (
+                    <button
+                      className="btn btn-secondary"
+                      disabled={isApplyingAction}
+                      onClick={() => handleApplyRenames(false)}
+                      style={{ padding: "3px 10px", fontSize: "0.75rem", borderColor: "var(--accent-blue)", color: "var(--accent-blue)", fontWeight: 600, marginLeft: "4px", display: "inline-flex", alignItems: "center", gap: "4px" }}
+                      title="Apply instant filesystem rename for all detected renamed tracks"
+                    >
+                      <span>⚡ Apply All Renames ({filteredItems.renamedFiles.length})</span>
+                    </button>
+                  )}
+                  {activeTab === "orphans" && filteredItems.orphanFiles.length > 0 && (
+                    <button
+                      className="btn btn-secondary"
+                      disabled={isApplyingAction}
+                      onClick={() => handleDeleteOrphans(false)}
+                      style={{ padding: "3px 10px", fontSize: "0.75rem", borderColor: "var(--danger)", color: "var(--danger)", fontWeight: 600, marginLeft: "4px", display: "inline-flex", alignItems: "center", gap: "4px" }}
+                      title="Delete all detected orphan files from destination USB"
+                    >
+                      <span>🗑 Clean All Orphans ({filteredItems.orphanFiles.length})</span>
+                    </button>
+                  )}
+                </>
+              )}
+
+              {/* Action Panel for Selected items */}
               {selectedItemPaths.size > 0 && (
                 <div style={{ display: "flex", gap: "6px", alignItems: "center", borderLeft: "1px solid var(--border-color)", paddingLeft: "10px", marginLeft: "4px" }}>
                   <span style={{ fontWeight: 600, color: "var(--accent-purple)", fontSize: "0.78rem" }}>
                     {selectedItemPaths.size} selected
                   </span>
+
+                  {/* Primary Tab Apply Button for Selection */}
                   {activeTab === "new" && (
-                    <button className="btn btn-secondary" onClick={handleToggleExcludeSelected} style={{ padding: "3px 8px", fontSize: "0.75rem" }}>
-                      {areAllSelectedExcluded ? "✅ Include" : "🚫 Exclude"}
+                    <button
+                      className="btn btn-primary"
+                      disabled={isApplyingAction}
+                      onClick={() => handleApplyCopies("new", true)}
+                      style={{ padding: "3px 10px", fontSize: "0.75rem", backgroundColor: "var(--success)", borderColor: "var(--success)", color: "#fff", fontWeight: 600, display: "flex", alignItems: "center", gap: "4px" }}
+                      title={`Copy ${selectedItemPaths.size} selected new file(s) to destination USB`}
+                    >
+                      <span>⚡ Apply / Copy ({selectedItemPaths.size})</span>
+                    </button>
+                  )}
+                  {activeTab === "updated" && (
+                    <button
+                      className="btn btn-primary"
+                      disabled={isApplyingAction}
+                      onClick={() => handleApplyCopies("updated", true)}
+                      style={{ padding: "3px 10px", fontSize: "0.75rem", backgroundColor: "var(--warning)", borderColor: "var(--warning)", color: "#000", fontWeight: 600, display: "flex", alignItems: "center", gap: "4px" }}
+                      title={`Transfer ${selectedItemPaths.size} selected updated file(s) to overwrite destination with new tags/content`}
+                    >
+                      <span>⚡ Apply / Update ({selectedItemPaths.size})</span>
+                    </button>
+                  )}
+                  {activeTab === "renamed" && (
+                    <button
+                      className="btn btn-primary"
+                      disabled={isApplyingAction}
+                      onClick={() => handleApplyRenames(true)}
+                      style={{ padding: "3px 10px", fontSize: "0.75rem", backgroundColor: "var(--accent-blue)", borderColor: "var(--accent-blue)", color: "#fff", fontWeight: 600, display: "flex", alignItems: "center", gap: "4px" }}
+                      title={`Instantly rename ${selectedItemPaths.size} selected file(s) on destination USB`}
+                    >
+                      <span>⚡ Apply / Rename ({selectedItemPaths.size})</span>
+                    </button>
+                  )}
+                  {activeTab === "uptodate" && (
+                    <button
+                      className="btn btn-secondary"
+                      disabled={isApplyingAction}
+                      onClick={() => handleApplyCopies("force", true)}
+                      style={{ padding: "3px 10px", fontSize: "0.75rem", fontWeight: 600, display: "flex", alignItems: "center", gap: "4px" }}
+                      title={`Force re-copy ${selectedItemPaths.size} selected file(s) to destination`}
+                    >
+                      <span>🔄 Apply / Re-copy ({selectedItemPaths.size})</span>
                     </button>
                   )}
                   {activeTab === "orphans" && (
-                    <button className="btn btn-danger" onClick={handleDeleteSelected} style={{ padding: "3px 8px", fontSize: "0.75rem" }}>
-                      🗑 Delete
+                    <button
+                      className="btn btn-danger"
+                      disabled={isApplyingAction}
+                      onClick={() => handleDeleteOrphans(true)}
+                      style={{ padding: "3px 10px", fontSize: "0.75rem", fontWeight: 600, display: "flex", alignItems: "center", gap: "4px" }}
+                      title={`Delete ${selectedItemPaths.size} selected orphan file(s) from destination USB`}
+                    >
+                      <span>🗑 Apply / Delete ({selectedItemPaths.size})</span>
+                    </button>
+                  )}
+
+                  {(activeTab === "new" || activeTab === "updated") && (
+                    <button className="btn btn-secondary" onClick={handleToggleExcludeSelected} style={{ padding: "3px 8px", fontSize: "0.75rem" }}>
+                      {areAllSelectedExcluded ? "✅ Include" : "🚫 Exclude"}
                     </button>
                   )}
                   <button className="btn btn-secondary" onClick={() => handleRevealSelected()} style={{ padding: "3px 8px", fontSize: "0.75rem" }}>
@@ -921,6 +1216,171 @@ export const ExportView: React.FC<ExportViewProps> = ({
               )
             )}
 
+            {activeTab === "updated" && (
+              sortedItems.updatedFiles.length > 0 ? (
+                <>
+                  <table style={{ tableLayout: "fixed", width: "100%" }}>
+                    <thead>
+                      <tr>
+                        <th style={{ width: "36px", textAlign: "center" }}>
+                          <input
+                            type="checkbox"
+                            checked={
+                              sortedItems.updatedFiles.length > 0 &&
+                              sortedItems.updatedFiles.every((item) => selectedItemPaths.has(item.relative_path))
+                            }
+                            onChange={() => handleToggleSelectAll(sortedItems.updatedFiles)}
+                            style={{ cursor: "pointer" }}
+                          />
+                        </th>
+                        <th
+                          style={{ width: "95px", cursor: "pointer", userSelect: "none" }}
+                          onClick={() => handleToggleSort("status")}
+                          title="Click to sort by Status"
+                        >
+                          <div style={{ display: "inline-flex", alignItems: "center" }}>
+                            <span>Status</span>
+                            {renderSortIndicator("status")}
+                          </div>
+                        </th>
+                        <th style={{ width: "185px" }}>Changes Detected</th>
+                        <th
+                          style={{ width: "32%", cursor: "pointer", userSelect: "none" }}
+                          onClick={() => handleToggleSort("source")}
+                          title="Click to sort by Source Path"
+                        >
+                          <div style={{ display: "inline-flex", alignItems: "center" }}>
+                            <span>Source Relative Path</span>
+                            {renderSortIndicator("source")}
+                          </div>
+                        </th>
+                        <th
+                          style={{ width: "24%", cursor: "pointer", userSelect: "none" }}
+                          onClick={() => handleToggleSort("dest")}
+                          title="Click to sort by Target Path"
+                        >
+                          <div style={{ display: "inline-flex", alignItems: "center" }}>
+                            <span>Target Relative Path</span>
+                            {renderSortIndicator("dest")}
+                          </div>
+                        </th>
+                        <th
+                          style={{ width: "80px", textAlign: "right", cursor: "pointer", userSelect: "none" }}
+                          onClick={() => handleToggleSort("size")}
+                          title="Click to sort by File Size"
+                        >
+                          <div style={{ display: "inline-flex", alignItems: "center", justifyContent: "flex-end" }}>
+                            <span>Size</span>
+                            {renderSortIndicator("size")}
+                          </div>
+                        </th>
+                        <th style={{ width: "85px", textAlign: "center" }}>Diff</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sortedItems.updatedFiles.slice(0, visibleLimit).map((item, idx) => {
+                        const isExcluded = excludedPaths.has(item.relative_path);
+                        const isSelected = selectedItemPaths.has(item.relative_path);
+                        const diff = item.diff_details;
+                        return (
+                          <tr
+                            key={idx}
+                            className={isSelected ? "selected" : undefined}
+                            data-selected={isSelected}
+                            title="Click row to select, or click '🔍 Diff' to inspect changes"
+                            onClick={(e) => handleToggleSelectItem(item.relative_path, idx, e.shiftKey, sortedItems.updatedFiles)}
+                            style={{ cursor: "pointer", userSelect: "none" }}
+                          >
+                            <td style={{ textAlign: "center" }} onClick={(e) => e.stopPropagation()}>
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={(e) => handleToggleSelectItem(item.relative_path, idx, (e.nativeEvent as MouseEvent).shiftKey, sortedItems.updatedFiles)}
+                                style={{ cursor: "pointer" }}
+                              />
+                            </td>
+                            <td>
+                              {isExcluded ? (
+                                <span className="badge" style={{ backgroundColor: "rgba(239, 68, 68, 0.15)", color: "var(--danger)", border: "1px solid var(--danger)", padding: "2px 6px", borderRadius: "4px", fontSize: "0.72rem" }}>
+                                  EXCLUDED
+                                </span>
+                              ) : (
+                                <span className="badge" style={{ backgroundColor: "rgba(245, 158, 11, 0.15)", color: "var(--warning)", border: "1px solid var(--warning)", padding: "2px 6px", borderRadius: "4px", fontSize: "0.72rem", fontWeight: 600 }}>
+                                  🟠 UPDATED
+                                </span>
+                              )}
+                            </td>
+                            <td>
+                              <div style={{ display: "flex", gap: "4px", flexWrap: "wrap", alignItems: "center" }}>
+                                {diff?.has_tag_changes && (
+                                  <span className="badge" style={{ backgroundColor: "rgba(245, 158, 11, 0.15)", color: "var(--warning)", border: "1px solid var(--warning)", padding: "1px 5px", borderRadius: "3px", fontSize: "0.68rem" }}>
+                                    🏷️ Tags
+                                  </span>
+                                )}
+                                {diff?.has_artwork_changes && (
+                                  <span className="badge" style={{ backgroundColor: "rgba(168, 85, 247, 0.15)", color: "var(--accent-purple)", border: "1px solid var(--accent-purple)", padding: "1px 5px", borderRadius: "3px", fontSize: "0.68rem" }}>
+                                    🖼️ Cover
+                                  </span>
+                                )}
+                                {diff?.has_audio_changes ? (
+                                  <span className="badge" style={{ backgroundColor: "rgba(239, 68, 68, 0.15)", color: "var(--danger)", border: "1px solid var(--danger)", padding: "1px 5px", borderRadius: "3px", fontSize: "0.68rem" }}>
+                                    🔊 Audio
+                                  </span>
+                                ) : (
+                                  <span className="badge" style={{ backgroundColor: "rgba(34, 197, 94, 0.15)", color: "var(--success)", border: "1px solid var(--success)", padding: "1px 5px", borderRadius: "3px", fontSize: "0.68rem" }} title="Audio stream identical; tags/artwork updated">
+                                    🎶 Audio Same
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+                            <td style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textDecoration: isExcluded ? "line-through" : "none", opacity: isExcluded ? 0.6 : 1 }} title={item.file_path}>
+                              {item.relative_path}
+                            </td>
+                            <td className="text-secondary" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--font-mono)", fontSize: "0.78rem" }}>
+                              {item.dest_relative_path}
+                            </td>
+                            <td style={{ fontFamily: "var(--font-mono)", textAlign: "right", fontSize: "0.78rem" }}>
+                              {formatSize(item.size_bytes)}
+                            </td>
+                            <td style={{ textAlign: "center" }} onClick={(e) => e.stopPropagation()}>
+                              <div style={{ display: "inline-flex", gap: "4px" }}>
+                                <button
+                                  className="btn btn-secondary"
+                                  onClick={() => setInspectDiffItem(item)}
+                                  style={{ padding: "2px 8px", fontSize: "0.72rem", display: "inline-flex", alignItems: "center", gap: "3px", borderColor: "var(--warning)", color: "var(--warning)" }}
+                                  title="Inspect git-diff of tags, cover art, and audio stream"
+                                >
+                                  🔍 Diff
+                                </button>
+                                <button
+                                  className="btn btn-primary"
+                                  disabled={isApplyingAction}
+                                  onClick={() => handleApplyCopies("updated", false, item)}
+                                  style={{ padding: "2px 8px", fontSize: "0.72rem", display: "inline-flex", alignItems: "center", gap: "3px", backgroundColor: "var(--warning)", borderColor: "var(--warning)", color: "#000", fontWeight: 600 }}
+                                  title="Update this file on USB destination"
+                                >
+                                  ⚡ Update
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                  {sortedItems.updatedFiles.length > visibleLimit && (
+                    <div className="text-secondary" style={{ textAlign: "center", padding: "8px", fontSize: "0.75rem", fontFamily: "var(--font-mono)" }}>
+                      Showing {visibleLimit} of {sortedItems.updatedFiles.length} files (Scroll down to load more)
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="no-data">
+                  {searchQuery ? "No matching updated files found." : "No modified files detected. All existing destination tracks match source library metadata."}
+                </div>
+              )
+            )}
+
             {activeTab === "renamed" && (
               sortedItems.renamedFiles.length > 0 ? (
                 <>
@@ -949,7 +1409,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
                           </div>
                         </th>
                         <th
-                          style={{ width: "42%", cursor: "pointer", userSelect: "none" }}
+                          style={{ width: "36%", cursor: "pointer", userSelect: "none" }}
                           onClick={() => handleToggleSort("source")}
                           title="Click to sort by Source Path"
                         >
@@ -959,7 +1419,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
                           </div>
                         </th>
                         <th
-                          style={{ width: "38%", cursor: "pointer", userSelect: "none" }}
+                          style={{ width: "36%", cursor: "pointer", userSelect: "none" }}
                           onClick={() => handleToggleSort("dest")}
                           title="Click to sort by Destination Rename"
                         >
@@ -969,7 +1429,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
                           </div>
                         </th>
                         <th
-                          style={{ width: "90px", textAlign: "right", cursor: "pointer", userSelect: "none" }}
+                          style={{ width: "80px", textAlign: "right", cursor: "pointer", userSelect: "none" }}
                           onClick={() => handleToggleSort("size")}
                           title="Click to sort by File Size"
                         >
@@ -977,6 +1437,9 @@ export const ExportView: React.FC<ExportViewProps> = ({
                             <span>Size</span>
                             {renderSortIndicator("size")}
                           </div>
+                        </th>
+                        <th style={{ width: "80px", textAlign: "center" }}>
+                          <span>Action</span>
                         </th>
                       </tr>
                     </thead>
@@ -1015,6 +1478,17 @@ export const ExportView: React.FC<ExportViewProps> = ({
                             </td>
                             <td style={{ fontFamily: "var(--font-mono)", textAlign: "right", fontSize: "0.78rem" }}>
                               {formatSize(item.size_bytes)}
+                            </td>
+                            <td style={{ textAlign: "center" }} onClick={(e) => e.stopPropagation()}>
+                              <button
+                                className="btn btn-primary"
+                                disabled={isApplyingAction}
+                                onClick={() => handleApplyRenames(false, item)}
+                                style={{ padding: "2px 8px", fontSize: "0.72rem", display: "inline-flex", alignItems: "center", gap: "3px", backgroundColor: "var(--accent-blue)", borderColor: "var(--accent-blue)", color: "#fff", fontWeight: 600 }}
+                                title="Apply instant filesystem rename for this track on destination USB"
+                              >
+                                ⚡ Rename
+                              </button>
                             </td>
                           </tr>
                         );
@@ -1356,18 +1830,6 @@ export const ExportView: React.FC<ExportViewProps> = ({
         </div>
       )}
 
-      {/* Delete Selection Confirmation Modal */}
-      {showDeleteConfirmModal && (
-        <ConfirmModal
-          title="⚠️ Confirm Permanent Deletion"
-          message={`Are you sure you want to permanently delete ${selectedItemPaths.size} selected file(s) from disk? This action cannot be undone!`}
-          confirmText="🗑 Confirm Delete"
-          confirmVariant="danger"
-          onConfirm={executeDeleteSelected}
-          onCancel={() => setShowDeleteConfirmModal(false)}
-        />
-      )}
-
       {/* Execution Logs Modal */}
       {showLogsModal && (() => {
         const progressPercent = exportProgress && exportProgress.total_bytes > 0
@@ -1516,6 +1978,159 @@ export const ExportView: React.FC<ExportViewProps> = ({
           </div>
         );
       })()}
+
+      {/* Git-Diff Style Inspection Modal */}
+      {inspectDiffItem && (
+        <div className="modal-backdrop" onClick={() => setInspectDiffItem(null)} style={{ zIndex: 1100 }}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: "750px", width: "90%", maxHeight: "85vh", display: "flex", flexDirection: "column" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid var(--border-color)", paddingBottom: "12px", marginBottom: "16px" }}>
+              <div>
+                <h3 style={{ margin: 0, fontSize: "1.1rem", display: "flex", alignItems: "center", gap: "8px" }}>
+                  <span style={{ color: "var(--warning)" }}>🟠 Updated Track Diff</span>
+                </h3>
+                <div style={{ fontSize: "0.82rem", color: "var(--text-secondary)", marginTop: "4px", fontFamily: "var(--font-mono)" }}>
+                  {inspectDiffItem.relative_path}
+                </div>
+              </div>
+              <button className="btn btn-secondary" onClick={() => setInspectDiffItem(null)} style={{ padding: "4px 8px" }}>
+                ✕
+              </button>
+            </div>
+
+            <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: "14px" }}>
+              {/* Badges overview */}
+              <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
+                <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>Changes detected:</span>
+                {inspectDiffItem.diff_details?.has_tag_changes && (
+                  <span className="badge" style={{ backgroundColor: "rgba(245, 158, 11, 0.15)", color: "var(--warning)", border: "1px solid var(--warning)", padding: "2px 8px", borderRadius: "4px", fontSize: "0.75rem", fontWeight: 600 }}>
+                    🏷️ Metadata Tags
+                  </span>
+                )}
+                {inspectDiffItem.diff_details?.has_artwork_changes && (
+                  <span className="badge" style={{ backgroundColor: "rgba(168, 85, 247, 0.15)", color: "var(--accent-purple)", border: "1px solid var(--accent-purple)", padding: "2px 8px", borderRadius: "4px", fontSize: "0.75rem", fontWeight: 600 }}>
+                    🖼️ Cover Art
+                  </span>
+                )}
+                {inspectDiffItem.diff_details?.has_audio_changes ? (
+                  <span className="badge" style={{ backgroundColor: "rgba(239, 68, 68, 0.15)", color: "var(--danger)", border: "1px solid var(--danger)", padding: "2px 8px", borderRadius: "4px", fontSize: "0.75rem", fontWeight: 600 }}>
+                    🔊 Audio Stream Re-encoded
+                  </span>
+                ) : (
+                  <span className="badge" style={{ backgroundColor: "rgba(34, 197, 94, 0.15)", color: "var(--success)", border: "1px solid var(--success)", padding: "2px 8px", borderRadius: "4px", fontSize: "0.75rem", fontWeight: 600 }}>
+                    🎶 Audio Stream Unchanged
+                  </span>
+                )}
+              </div>
+
+              {/* Git-Diff Style Comparison Table */}
+              <div style={{ border: "1px solid var(--border-color)", borderRadius: "6px", overflow: "hidden", backgroundColor: "var(--bg-secondary)" }}>
+                <div style={{ display: "grid", gridTemplateColumns: "130px 1fr 1fr", padding: "8px 12px", borderBottom: "1px solid var(--border-color)", fontWeight: 600, fontSize: "0.78rem", color: "var(--text-secondary)", textTransform: "uppercase" }}>
+                  <span>Field</span>
+                  <span style={{ color: "var(--danger)" }}>- Destination USB (Old)</span>
+                  <span style={{ color: "var(--success)" }}>+ Source Library (New)</span>
+                </div>
+
+                <div style={{ display: "flex", flexDirection: "column" }}>
+                  {inspectDiffItem.diff_details?.diffs && inspectDiffItem.diff_details.diffs.length > 0 ? (
+                    inspectDiffItem.diff_details.diffs.map((diff, idx) => (
+                      <div
+                        key={idx}
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns: "130px 1fr 1fr",
+                          padding: "8px 12px",
+                          borderBottom: idx < inspectDiffItem.diff_details!.diffs.length - 1 ? "1px solid var(--border-color)" : "none",
+                          fontSize: "0.82rem",
+                          fontFamily: "var(--font-mono)",
+                          backgroundColor: idx % 2 === 0 ? "transparent" : "rgba(255, 255, 255, 0.02)",
+                        }}
+                      >
+                        <span style={{ fontWeight: 600, color: "var(--text-primary)", fontFamily: "inherit" }}>
+                          {diff.field}
+                        </span>
+                        <span style={{ color: "var(--danger)", wordBreak: "break-word", paddingRight: "8px" }}>
+                          {diff.old_value ? `- ${diff.old_value}` : <span style={{ opacity: 0.4 }}>&lt;None&gt;</span>}
+                        </span>
+                        <span style={{ color: "var(--success)", wordBreak: "break-word" }}>
+                          {diff.new_value ? `+ ${diff.new_value}` : <span style={{ opacity: 0.4 }}>&lt;Removed&gt;</span>}
+                        </span>
+                      </div>
+                    ))
+                  ) : (
+                    <div style={{ padding: "16px", textAlign: "center", color: "var(--text-muted)", fontSize: "0.82rem" }}>
+                      No granular field differences detected (timestamp or file size mismatch).
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid var(--border-color)", paddingTop: "12px", marginTop: "16px" }}>
+              <button
+                className="btn btn-primary"
+                disabled={isApplyingAction}
+                onClick={() => {
+                  const item = inspectDiffItem;
+                  setInspectDiffItem(null);
+                  handleApplyCopies("updated", false, item);
+                }}
+                style={{ padding: "6px 14px", backgroundColor: "var(--warning)", borderColor: "var(--warning)", color: "#000", fontWeight: 600, display: "inline-flex", alignItems: "center", gap: "6px" }}
+              >
+                ⚡ Apply This Update to USB
+              </button>
+              <button className="btn btn-secondary" onClick={() => setInspectDiffItem(null)} style={{ padding: "6px 16px" }}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirmation Modal */}
+      {confirmModal && (
+        <ConfirmModal
+          title={confirmModal.title}
+          message={confirmModal.message}
+          confirmText={confirmModal.confirmText}
+          confirmVariant={confirmModal.confirmVariant || "primary"}
+          isExecuting={isApplyingAction}
+          executingText={confirmModal.executingText || "Applying changes..."}
+          onConfirm={confirmModal.onConfirm}
+          onCancel={() => {
+            if (!isApplyingAction) setConfirmModal(null);
+          }}
+        />
+      )}
+
+      {/* Toast Notification */}
+      {notification && (
+        <div
+          style={{
+            position: "fixed",
+            bottom: "24px",
+            right: "24px",
+            zIndex: 10001,
+            backgroundColor: notification.type === "success" ? "var(--success)" : notification.type === "error" ? "var(--danger)" : "var(--accent-blue)",
+            color: "#fff",
+            padding: "12px 20px",
+            borderRadius: "8px",
+            boxShadow: "0 8px 24px rgba(0, 0, 0, 0.4)",
+            fontWeight: 600,
+            fontSize: "0.85rem",
+            display: "flex",
+            alignItems: "center",
+            gap: "12px",
+          }}
+        >
+          <span>{notification.message}</span>
+          <button
+            onClick={() => setNotification(null)}
+            style={{ background: "none", border: "none", color: "#fff", cursor: "pointer", fontSize: "1rem", lineHeight: 1 }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
     </div>
   );
 };

@@ -76,6 +76,19 @@ export interface MainConfig {
 
 export type ExportStatus = "New" | "Modified" | "UpToDate" | "Renamed";
 
+export interface TrackDiffField {
+  field: string;
+  old_value?: string | null;
+  new_value?: string | null;
+}
+
+export interface TrackDiffDetails {
+  has_tag_changes: boolean;
+  has_artwork_changes: boolean;
+  has_audio_changes: boolean;
+  diffs: TrackDiffField[];
+}
+
 export interface ExportTrackItem {
   file_path: string;
   relative_path: string;
@@ -84,6 +97,7 @@ export interface ExportTrackItem {
   size_bytes: number;
   mtime_secs: number;
   status: ExportStatus;
+  diff_details?: TrackDiffDetails | null;
 }
 
 export interface ExportOrphanItem {
@@ -119,12 +133,14 @@ export interface FontIssueItem {
 export interface ExportDiffReport {
   destination: string;
   new_files: ExportTrackItem[];
+  updated_files: ExportTrackItem[];
   up_to_date_files: ExportTrackItem[];
   renamed_files?: ExportTrackItem[];
   orphan_files: ExportOrphanItem[];
   playlists: ExportPlaylistItem[];
   warnings?: ExportWarningItem[];
   total_bytes_to_copy: number;
+  total_bytes_updated: number;
   total_bytes_up_to_date: number;
   total_bytes_renamed?: number;
   total_bytes_orphans: number;

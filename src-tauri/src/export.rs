@@ -6,6 +6,9 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use walkdir::WalkDir;
 
+use lofty::prelude::*;
+use lofty::probe::Probe;
+
 use crate::playlist::{self, TrackPreview};
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -17,6 +20,21 @@ pub enum ExportStatus {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TrackDiffField {
+    pub field: String,
+    pub old_value: Option<String>,
+    pub new_value: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TrackDiffDetails {
+    pub has_tag_changes: bool,
+    pub has_artwork_changes: bool,
+    pub has_audio_changes: bool,
+    pub diffs: Vec<TrackDiffField>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ExportTrackItem {
     pub file_path: String,
     pub relative_path: String,
@@ -25,6 +43,7 @@ pub struct ExportTrackItem {
     pub size_bytes: u64,
     pub mtime_secs: u64,
     pub status: ExportStatus,
+    pub diff_details: Option<TrackDiffDetails>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -56,12 +75,14 @@ pub struct ExportWarningItem {
 pub struct ExportDiffReport {
     pub destination: String,
     pub new_files: Vec<ExportTrackItem>,
+    pub updated_files: Vec<ExportTrackItem>,
     pub up_to_date_files: Vec<ExportTrackItem>,
     pub renamed_files: Vec<ExportTrackItem>,
     pub orphan_files: Vec<ExportOrphanItem>,
     pub playlists: Vec<ExportPlaylistItem>,
     pub warnings: Vec<ExportWarningItem>,
     pub total_bytes_to_copy: u64,
+    pub total_bytes_updated: u64,
     pub total_bytes_up_to_date: u64,
     pub total_bytes_renamed: u64,
     pub total_bytes_orphans: u64,
@@ -80,6 +101,112 @@ fn sanitize_playlist_filename(name: &str) -> String {
         "playlist".to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+pub fn compute_track_diff(src_path: &Path, dest_path: &Path, src_size: u64, dest_size: u64) -> TrackDiffDetails {
+    let mut diffs: Vec<TrackDiffField> = Vec::new();
+    let mut has_tag_changes = false;
+    let mut has_artwork_changes = false;
+
+    let src_tagged = Probe::open(src_path).ok().and_then(|p| p.read().ok());
+    let dest_tagged = Probe::open(dest_path).ok().and_then(|p| p.read().ok());
+
+    let src_tag = src_tagged.as_ref().and_then(|tf| tf.primary_tag().or_else(|| tf.first_tag()));
+    let dest_tag = dest_tagged.as_ref().and_then(|tf| tf.primary_tag().or_else(|| tf.first_tag()));
+
+    let mut check_tag_field = |field_name: &str, old_val: Option<&str>, new_val: Option<&str>| {
+        let old_clean = old_val.map(|s| s.trim()).filter(|s| !s.is_empty());
+        let new_clean = new_val.map(|s| s.trim()).filter(|s| !s.is_empty());
+        if old_clean != new_clean {
+            has_tag_changes = true;
+            diffs.push(TrackDiffField {
+                field: field_name.to_string(),
+                old_value: old_clean.map(|s| s.to_string()),
+                new_value: new_clean.map(|s| s.to_string()),
+            });
+        }
+    };
+
+    let dest_title = dest_tag.and_then(|t| t.title());
+    let src_title = src_tag.and_then(|t| t.title());
+    check_tag_field("Title", dest_title.as_deref(), src_title.as_deref());
+
+    let dest_artist = dest_tag.and_then(|t| t.artist());
+    let src_artist = src_tag.and_then(|t| t.artist());
+    check_tag_field("Artist", dest_artist.as_deref(), src_artist.as_deref());
+
+    let dest_album = dest_tag.and_then(|t| t.album());
+    let src_album = src_tag.and_then(|t| t.album());
+    check_tag_field("Album", dest_album.as_deref(), src_album.as_deref());
+
+    let dest_year = dest_tag.and_then(|t| t.year()).map(|y| y.to_string());
+    let src_year = src_tag.and_then(|t| t.year()).map(|y| y.to_string());
+    check_tag_field("Year", dest_year.as_deref(), src_year.as_deref());
+
+    let dest_track = dest_tag.and_then(|t| t.track()).map(|tr| tr.to_string());
+    let src_track = src_tag.and_then(|t| t.track()).map(|tr| tr.to_string());
+    check_tag_field("Track #", dest_track.as_deref(), src_track.as_deref());
+
+    let dest_genre = dest_tag.and_then(|t| t.genre());
+    let src_genre = src_tag.and_then(|t| t.genre());
+    check_tag_field("Genre", dest_genre.as_deref(), src_genre.as_deref());
+
+    let dest_comment = dest_tag.and_then(|t| t.comment());
+    let src_comment = src_tag.and_then(|t| t.comment());
+    check_tag_field("Comment", dest_comment.as_deref(), src_comment.as_deref());
+
+    // Cover Art comparison
+    let dest_pics = dest_tag.map(|t| t.pictures()).unwrap_or(&[]);
+    let src_pics = src_tag.map(|t| t.pictures()).unwrap_or(&[]);
+    let dest_pic_info = dest_pics.first().map(|p| {
+        format!(
+            "{} ({} KB)",
+            p.mime_type().map(|m| m.to_string()).unwrap_or_else(|| "image".to_string()),
+            p.data().len() / 1024
+        )
+    });
+    let src_pic_info = src_pics.first().map(|p| {
+        format!(
+            "{} ({} KB)",
+            p.mime_type().map(|m| m.to_string()).unwrap_or_else(|| "image".to_string()),
+            p.data().len() / 1024
+        )
+    });
+
+    if dest_pic_info != src_pic_info {
+        has_artwork_changes = true;
+        diffs.push(TrackDiffField {
+            field: "Cover Art".to_string(),
+            old_value: dest_pic_info,
+            new_value: src_pic_info,
+        });
+    }
+
+    // Audio stream comparison
+    let (_dest_q, dest_audio_hash) = crate::dedup::compute_file_hashes(dest_path, dest_size);
+    let (_src_q, src_audio_hash) = crate::dedup::compute_file_hashes(src_path, src_size);
+    let has_audio_changes = dest_audio_hash != src_audio_hash;
+
+    diffs.push(TrackDiffField {
+        field: "Audio Stream".to_string(),
+        old_value: Some(if has_audio_changes { "Previous audio stream" } else { "Unchanged" }.to_string()),
+        new_value: Some(if has_audio_changes { "Modified / Re-encoded" } else { "Unchanged (Metadata-only update)" }.to_string()),
+    });
+
+    if src_size != dest_size {
+        diffs.push(TrackDiffField {
+            field: "File Size".to_string(),
+            old_value: Some(format!("{:.2} MB", dest_size as f64 / 1_048_576.0)),
+            new_value: Some(format!("{:.2} MB", src_size as f64 / 1_048_576.0)),
+        });
+    }
+
+    TrackDiffDetails {
+        has_tag_changes,
+        has_artwork_changes,
+        has_audio_changes,
+        diffs,
     }
 }
 
@@ -169,9 +296,11 @@ pub async fn analyze_export_diff(
     }
 
     let mut new_files: Vec<ExportTrackItem> = Vec::new();
+    let mut updated_files: Vec<ExportTrackItem> = Vec::new();
     let mut up_to_date_files: Vec<ExportTrackItem> = Vec::new();
     let mut renamed_files: Vec<ExportTrackItem> = Vec::new();
     let mut total_bytes_to_copy: u64 = 0;
+    let mut total_bytes_updated: u64 = 0;
     let mut total_bytes_up_to_date: u64 = 0;
     let mut total_bytes_renamed: u64 = 0;
 
@@ -198,10 +327,12 @@ pub async fn analyze_export_diff(
                         size_bytes: src_size,
                         mtime_secs: src_mtime,
                         status: ExportStatus::UpToDate,
+                        diff_details: None,
                     });
                 } else {
-                    total_bytes_to_copy += src_size;
-                    new_files.push(ExportTrackItem {
+                    let diff_details = compute_track_diff(src_path, &dest_file_path, src_size, dest_size);
+                    total_bytes_updated += src_size;
+                    updated_files.push(ExportTrackItem {
                         file_path: src_abs_path.clone(),
                         relative_path: rel_path.clone(),
                         dest_relative_path: format!("music/{}", rel_path),
@@ -209,6 +340,7 @@ pub async fn analyze_export_diff(
                         size_bytes: src_size,
                         mtime_secs: src_mtime,
                         status: ExportStatus::Modified,
+                        diff_details: Some(diff_details),
                     });
                 }
             } else {
@@ -271,7 +403,8 @@ fn is_os_system_junk(filename: &str) -> bool {
             if let Some(matching_indices) = dest_hash_index.get_mut(&src_audio_hash) {
                 if let Some(orphan_idx) = matching_indices.pop() {
                     matched_orphan_indices.insert(orphan_idx);
-                    let (_old_path, old_rel, _old_size) = &candidate_dest_orphans[orphan_idx];
+                    let (old_path, old_rel, old_size) = &candidate_dest_orphans[orphan_idx];
+                    let diff_details = compute_track_diff(src_path, old_path, src_size, *old_size);
                     total_bytes_renamed += src_size;
                     renamed_files.push(ExportTrackItem {
                         file_path: src_abs_path,
@@ -281,6 +414,7 @@ fn is_os_system_junk(filename: &str) -> bool {
                         size_bytes: src_size,
                         mtime_secs: src_mtime,
                         status: ExportStatus::Renamed,
+                        diff_details: Some(diff_details),
                     });
                     continue;
                 }
@@ -296,6 +430,7 @@ fn is_os_system_junk(filename: &str) -> bool {
                 size_bytes: src_size,
                 mtime_secs: src_mtime,
                 status: ExportStatus::New,
+                diff_details: None,
             });
         }
     } else {
@@ -310,6 +445,7 @@ fn is_os_system_junk(filename: &str) -> bool {
                 size_bytes: src_size,
                 mtime_secs: src_mtime,
                 status: ExportStatus::New,
+                diff_details: None,
             });
         }
     }
@@ -450,6 +586,7 @@ fn is_os_system_junk(filename: &str) -> bool {
     }
 
     new_files.sort_by(|a, b| a.relative_path.to_lowercase().cmp(&b.relative_path.to_lowercase()));
+    updated_files.sort_by(|a, b| a.relative_path.to_lowercase().cmp(&b.relative_path.to_lowercase()));
     up_to_date_files.sort_by(|a, b| a.relative_path.to_lowercase().cmp(&b.relative_path.to_lowercase()));
     renamed_files.sort_by(|a, b| a.relative_path.to_lowercase().cmp(&b.relative_path.to_lowercase()));
     orphan_files.sort_by(|a, b| a.relative_path.to_lowercase().cmp(&b.relative_path.to_lowercase()));
@@ -458,12 +595,14 @@ fn is_os_system_junk(filename: &str) -> bool {
     Ok(ExportDiffReport {
         destination: destination.to_string(),
         new_files,
+        updated_files,
         up_to_date_files,
         renamed_files,
         orphan_files,
         playlists: playlist_items,
         warnings,
         total_bytes_to_copy,
+        total_bytes_updated,
         total_bytes_up_to_date,
         total_bytes_renamed,
         total_bytes_orphans,
@@ -529,6 +668,89 @@ pub async fn delete_export_files(filePaths: Vec<String>) -> Result<usize, String
                 }
             }
         }
+        Ok(count)
+    })
+    .await
+    .map_err(|e| format!("Thread execution error: {}", e))?
+}
+
+#[tauri::command]
+pub async fn apply_export_renames(
+    destination: String,
+    items: Vec<ExportTrackItem>,
+) -> Result<usize, String> {
+    tokio::task::spawn_blocking(move || {
+        let dest_path = Path::new(&destination);
+        let dest_music_dir = dest_path.join("music");
+        let mut count = 0;
+
+        for item in items {
+            if let Some(ref old_dest_rel) = item.old_dest_relative_path {
+                let old_full_path = dest_path.join(old_dest_rel);
+                let new_full_path = dest_music_dir.join(&item.relative_path);
+
+                if old_full_path.exists() {
+                    if let Some(parent) = new_full_path.parent() {
+                        if !parent.exists() {
+                            let _ = fs::create_dir_all(parent);
+                        }
+                    }
+                    if fs::rename(&old_full_path, &new_full_path).is_ok() {
+                        count += 1;
+                    } else {
+                        let src_path = Path::new(&item.file_path);
+                        if fs::copy(src_path, &new_full_path).is_ok() {
+                            let _ = fs::remove_file(&old_full_path);
+                            count += 1;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(count)
+    })
+    .await
+    .map_err(|e| format!("Thread execution error: {}", e))?
+}
+
+#[tauri::command]
+pub async fn apply_export_copies(
+    app: tauri::AppHandle,
+    destination: String,
+    items: Vec<ExportTrackItem>,
+) -> Result<usize, String> {
+    use tauri::Emitter;
+
+    tokio::task::spawn_blocking(move || {
+        let dest_path = Path::new(&destination);
+        let dest_music_dir = dest_path.join("music");
+        let mut count = 0;
+        let total = items.len();
+
+        for (idx, item) in items.iter().enumerate() {
+            let src_path = Path::new(&item.file_path);
+            let dest_file_path = dest_music_dir.join(&item.relative_path);
+
+            if let Some(parent) = dest_file_path.parent() {
+                if !parent.exists() {
+                    let _ = fs::create_dir_all(parent);
+                }
+            }
+
+            if fs::copy(src_path, &dest_file_path).is_ok() {
+                count += 1;
+            }
+
+            let _ = app.emit(
+                "export-quick-progress",
+                serde_json::json!({
+                    "current": idx + 1,
+                    "total": total,
+                    "file": item.relative_path,
+                }),
+            );
+        }
+
         Ok(count)
     })
     .await
@@ -639,15 +861,19 @@ pub async fn execute_export(
         }
     }
 
-    // 1. Copy New & Modified files
-    push_log(format!("Found {} new/modified audio files to copy.", report.new_files.len()), &mut logs);
+    // 1. Copy New & Updated files
+    let mut files_to_copy: Vec<&ExportTrackItem> = Vec::new();
+    files_to_copy.extend(report.new_files.iter());
+    files_to_copy.extend(report.updated_files.iter());
+
+    push_log(format!("Found {} new and {} updated audio files to copy.", report.new_files.len(), report.updated_files.len()), &mut logs);
     push_log(format!("Skipping {} up-to-date audio files.", report.up_to_date_files.len()), &mut logs);
 
-    let total_files = report.new_files.len();
-    let total_bytes = report.total_bytes_to_copy;
+    let total_files = files_to_copy.len();
+    let total_bytes = report.total_bytes_to_copy + report.total_bytes_updated;
     let mut copied_bytes: u64 = 0;
 
-    for (idx, item) in report.new_files.iter().enumerate() {
+    for (idx, item) in files_to_copy.into_iter().enumerate() {
         if EXPORT_CANCELLED.load(Ordering::SeqCst) {
             push_log("Export stopped by user!".to_string(), &mut logs);
             return Err("Export stopped by user.".to_string());
