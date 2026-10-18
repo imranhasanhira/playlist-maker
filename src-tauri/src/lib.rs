@@ -698,6 +698,8 @@ pub fn run() {
             export::delete_export_files,
             export::cancel_export,
             export::clean_export_hidden_files,
+            export::apply_export_renames,
+            export::apply_export_copies,
             watcher::start_fs_watcher,
             watcher::stop_fs_watcher,
             downloader::start_download_job,
