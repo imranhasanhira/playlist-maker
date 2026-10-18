@@ -6,6 +6,7 @@ import {
   DeleteDuplicatesResult,
   DuplicateAnalysisProgressPayload,
   DuplicateAnalysisReport,
+  DuplicateCleanupGroup,
   DuplicateGroup,
   DuplicateTrackEntry,
   PruneCacheReport,
@@ -37,6 +38,162 @@ const formatEta = (seconds: number | null | undefined): string => {
   const hours = Math.floor(mins / 60);
   const remMins = mins % 60;
   return remMins > 0 ? `~${hours}h ${remMins}m remaining` : `~${hours}h remaining`;
+};
+
+export interface WinnerCriterion {
+  id: "clean_duration" | "format_quality" | "bitrate" | "source_priority" | "playlist_priority" | "file_size";
+  label: string;
+  desc: string;
+  enabled: boolean;
+}
+
+const DEFAULT_WINNER_CRITERIA: WinnerCriterion[] = [
+  { id: "clean_duration", label: "Clean Duration", desc: "Penalize files with intro/outro ads (>= 5s difference from cleanest track)", enabled: true },
+  { id: "format_quality", label: "Format Quality", desc: "Lossless & higher fidelity (.FLAC > .WAV > .M4A > .MP3 > .OGG)", enabled: true },
+  { id: "bitrate", label: "Audio Bitrate", desc: "Prefer higher bitrate (e.g. 320 kbps > 192 kbps)", enabled: true },
+  { id: "source_priority", label: "Source Folder Order", desc: "Prefer files located in earlier source folders from config", enabled: true },
+  { id: "playlist_priority", label: "Playlist Order", desc: "Prefer files in earlier playlists from config", enabled: true },
+  { id: "file_size", label: "File Size", desc: "Prefer larger file size on disk", enabled: false },
+];
+
+const getFormatQualityRank = (ext: string): number => {
+  switch (ext.toLowerCase()) {
+    case "flac": return 100;
+    case "wav":
+    case "alac": return 90;
+    case "m4a":
+    case "aac":
+    case "opus": return 80;
+    case "mp3": return 70;
+    case "ogg": return 60;
+    case "wma": return 50;
+    default: return 10;
+  }
+};
+
+const recalculateGroupWinners = (
+  groups: DuplicateGroup[],
+  criteria: WinnerCriterion[]
+): { updatedGroups: DuplicateGroup[]; redundantCount: number; redundantBytes: number } => {
+  const activeCriteria = criteria.filter((c) => c.enabled);
+  let redundantCount = 0;
+  let redundantBytes = 0;
+
+  const updatedGroups = groups.map((group) => {
+    if (group.tracks.length <= 1) {
+      return group;
+    }
+
+    const validDurs = group.tracks.map((t) => t.duration).filter((d) => d > 0);
+    const minDur = validDurs.length > 0 ? Math.min(...validDurs) : 0;
+
+    const sorted = [...group.tracks].sort((a, b) => {
+      for (const crit of activeCriteria) {
+        switch (crit.id) {
+          case "clean_duration": {
+            const aHasAd = minDur > 30 && a.duration >= minDur + 5;
+            const bHasAd = minDur > 30 && b.duration >= minDur + 5;
+            if (aHasAd !== bHasAd) {
+              return aHasAd ? 1 : -1;
+            }
+            break;
+          }
+          case "format_quality": {
+            const rankA = getFormatQualityRank(a.format_ext);
+            const rankB = getFormatQualityRank(b.format_ext);
+            if (rankA !== rankB) {
+              return rankB - rankA;
+            }
+            break;
+          }
+          case "bitrate": {
+            if (a.bitrate_kbps !== b.bitrate_kbps) {
+              return b.bitrate_kbps - a.bitrate_kbps;
+            }
+            break;
+          }
+          case "source_priority": {
+            if (a.source_index !== b.source_index) {
+              return a.source_index - b.source_index;
+            }
+            break;
+          }
+          case "file_size": {
+            if (a.size_bytes !== b.size_bytes) {
+              return b.size_bytes - a.size_bytes;
+            }
+            break;
+          }
+        }
+      }
+      return a.file_path.localeCompare(b.file_path);
+    });
+
+    const winner = sorted[0];
+    const second = sorted[1];
+
+    let winnerReason = "Selected winner";
+    for (const crit of activeCriteria) {
+      if (crit.id === "clean_duration") {
+        const aHasAd = minDur > 30 && winner.duration >= minDur + 5;
+        const bHasAd = minDur > 30 && second.duration >= minDur + 5;
+        if (!aHasAd && bHasAd) {
+          winnerReason = "Clean duration (no intro/outro sponsor ad)";
+          break;
+        }
+      }
+      if (crit.id === "format_quality") {
+        const rankA = getFormatQualityRank(winner.format_ext);
+        const rankB = getFormatQualityRank(second.format_ext);
+        if (rankA > rankB) {
+          winnerReason = `Superior format (.${winner.format_ext.toUpperCase()} > .${second.format_ext.toUpperCase()})`;
+          break;
+        }
+      }
+      if (crit.id === "bitrate") {
+        if (winner.bitrate_kbps > second.bitrate_kbps) {
+          winnerReason = `Higher bitrate (${winner.bitrate_kbps} kbps vs ${second.bitrate_kbps} kbps)`;
+          break;
+        }
+      }
+      if (crit.id === "source_priority") {
+        if (winner.source_index < second.source_index) {
+          winnerReason = `Source #${winner.source_index + 1} Priority (${winner.source_folder})`;
+          break;
+        }
+      }
+      if (crit.id === "file_size") {
+        if (winner.size_bytes > second.size_bytes) {
+          winnerReason = `Larger file size (${formatSize(winner.size_bytes)} vs ${formatSize(second.size_bytes)})`;
+          break;
+        }
+      }
+    }
+
+    const finalTracks = sorted.map((t, idx) => {
+      const isWinner = idx === 0;
+      if (!isWinner) {
+        redundantCount += 1;
+        redundantBytes += t.size_bytes;
+      }
+      return {
+        ...t,
+        is_winner: isWinner,
+        winner_reason: isWinner
+          ? winnerReason
+          : t.source_folder
+          ? `Source #${t.source_index + 1}`
+          : "Alternative duplicate",
+      };
+    });
+
+    return {
+      ...group,
+      tracks: finalTracks,
+    };
+  });
+
+  return { updatedGroups, redundantCount, redundantBytes };
 };
 
 type DuplicateAnalysisModalProps = {
@@ -72,11 +229,56 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
     }
   });
   const [searchQuery, setSearchQuery] = useState<string>("");
-  const [tierFilter, setTierFilter] = useState<string>("all");
+  const ALL_TIER_KEYS = useMemo(() => ["exact_hash", "youtube_id", "acoustic", "metadata"], []);
+  const [selectedTiers, setSelectedTiers] = useState<Set<string>>(
+    () => new Set(["exact_hash", "youtube_id", "acoustic", "metadata"])
+  );
+  const [sortBy, setSortBy] = useState<string>(() => {
+    try {
+      return localStorage.getItem("dedup_sort_by") || "tier_exact";
+    } catch (e) {
+      return "tier_exact";
+    }
+  });
+  const [sortAsc, setSortAsc] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem("dedup_sort_asc");
+      return saved !== null ? saved === "true" : true;
+    } catch (e) {
+      return true;
+    }
+  });
   const [pruneStatus, setPruneStatus] = useState<string>("");
   const [isPruning, setIsPruning] = useState<boolean>(false);
   const [isDeleting, setIsDeleting] = useState<boolean>(false);
   const [actionStatus, setActionStatus] = useState<string>("");
+  const [showRulesConfig, setShowRulesConfig] = useState<boolean>(false);
+  const [winnerCriteria, setWinnerCriteria] = useState<WinnerCriterion[]>(() => {
+    try {
+      const saved = localStorage.getItem("dedup_winner_rules");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const existingIds = new Set(parsed.map((p: WinnerCriterion) => p.id));
+          const missing = DEFAULT_WINNER_CRITERIA.filter((d) => !existingIds.has(d.id));
+          return [...parsed, ...missing];
+        }
+      }
+    } catch (e) {
+      console.warn("Failed to load dedup winner rules from storage:", e);
+    }
+    return DEFAULT_WINNER_CRITERIA;
+  });
+  const [pageSize, setPageSize] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem("dedup_page_size");
+      return saved ? parseInt(saved, 10) : 50;
+    } catch (e) {
+      return 50;
+    }
+  });
+  const [currentPage, setCurrentPage] = useState<number>(1);
+  const tableContainerRef = React.useRef<HTMLDivElement>(null);
   const [confirmModal, setConfirmModal] = useState<{
     title: string;
     message: string;
@@ -84,6 +286,7 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
     onConfirm: () => void;
   } | null>(null);
   const [excludedTrackPaths, setExcludedTrackPaths] = useState<Set<string>>(new Set());
+  const [selectedGroupIds, setSelectedGroupIds] = useState<Set<string>>(new Set());
 
   const handleToggleExcludeTrack = (filePath: string) => {
     setExcludedTrackPaths((prev) => {
@@ -97,8 +300,22 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
     });
   };
 
+  const handleToggleSelectGroup = (groupId: string) => {
+    setSelectedGroupIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(groupId)) {
+        next.delete(groupId);
+      } else {
+        next.add(groupId);
+      }
+      return next;
+    });
+  };
+
   const handleDetachTrack = (group: DuplicateGroup, track: DuplicateTrackEntry) => {
     const fileName = track.file_path.split(/[/\\]/).pop() || track.title;
+    const savedScrollTop = tableContainerRef.current?.scrollTop;
+
     setReport((prev) => {
       if (!prev) return null;
       const groupToUpdate = prev.duplicate_groups.find((g) => g.group_id === group.group_id);
@@ -106,6 +323,11 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
 
       const remainingTracks = groupToUpdate.tracks.filter((t) => t.file_path !== track.file_path);
       if (remainingTracks.length <= 1) {
+        setSelectedGroupIds((s) => {
+          const next = new Set(s);
+          next.delete(group.group_id);
+          return next;
+        });
         // Group dissolved because only 1 or 0 tracks remain
         const newGroups = prev.duplicate_groups.filter((g) => g.group_id !== group.group_id);
         const lostRedundant = Math.max(0, groupToUpdate.tracks.length - 1);
@@ -141,9 +363,18 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
       };
     });
     setActionStatus(`Detached "${fileName}" from duplicate group. It is now kept and preserved.`);
+
+    if (savedScrollTop !== undefined && savedScrollTop > 0) {
+      requestAnimationFrame(() => {
+        if (tableContainerRef.current) {
+          tableContainerRef.current.scrollTop = savedScrollTop;
+        }
+      });
+    }
   };
 
   const handleMakeWinner = (group: DuplicateGroup, track: DuplicateTrackEntry) => {
+    const savedScrollTop = tableContainerRef.current?.scrollTop;
     setReport((prev) => {
       if (!prev) return null;
       const updatedGroups = prev.duplicate_groups.map((g) => {
@@ -166,42 +397,60 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
     });
     const fileName = track.file_path.split(/[/\\]/).pop() || track.title;
     setActionStatus(`Set "${fileName}" as the KEPT winner for this duplicate group.`);
+
+    if (savedScrollTop !== undefined && savedScrollTop > 0) {
+      requestAnimationFrame(() => {
+        if (tableContainerRef.current) {
+          tableContainerRef.current.scrollTop = savedScrollTop;
+        }
+      });
+    }
   };
 
   useEffect(() => {
-    if (!isOpen) return;
     let unlisten: (() => void) | null = null;
     let isMounted = true;
 
-    const setupListener = async () => {
-      try {
-        const u = await listen<DuplicateAnalysisProgressPayload>(
-          "duplicate-analysis-progress",
-          (event) => {
-            if (isMounted) {
-              setAnalysisProgress(event.payload);
-            }
-          }
-        );
+    listen<DuplicateAnalysisProgressPayload>(
+      "duplicate-analysis-progress",
+      (event) => {
         if (isMounted) {
-          unlisten = u;
-        } else {
-          u();
+          setAnalysisProgress((prev) => {
+            const isStageChange = Boolean(prev && prev.stage !== event.payload.stage);
+            const currentFile = event.payload.current_file
+              ? event.payload.current_file
+              : isStageChange || event.payload.phase === "done"
+              ? undefined
+              : prev?.current_file;
+            return {
+              ...event.payload,
+              current_file: currentFile,
+            };
+          });
         }
-      } catch (e) {
-        console.error("Failed to attach duplicate progress listener:", e);
       }
-    };
-
-    setupListener();
+    ).then((u) => {
+      if (isMounted) {
+        unlisten = u;
+      } else {
+        u();
+      }
+    }).catch((e) => {
+      console.error("Failed to attach duplicate progress listener:", e);
+    });
 
     return () => {
       isMounted = false;
       if (unlisten) {
         unlisten();
       }
-      invoke("cancel_any_task", { taskId: "duplicate_analysis" }).catch(() => {});
     };
+  }, []);
+
+  useEffect(() => {
+    if (!isOpen) {
+      invoke("cancel_any_task", { taskId: "duplicate_analysis" }).catch(() => {});
+    }
   }, [isOpen]);
 
   const handleClose = () => {
@@ -228,8 +477,14 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
         formats,
         computeAcoustic: useAcoustic,
         maxAcousticSeconds: maxSecs,
+        winnerCriteria: winnerCriteria.filter((c) => c.enabled).map((c) => c.id),
       });
       setReport(res);
+      setSelectedGroupIds(new Set(res.duplicate_groups.map((g) => g.group_id)));
+      setCurrentPage(1);
+      if (tableContainerRef.current) {
+        tableContainerRef.current.scrollTop = 0;
+      }
     } catch (e) {
       setError(String(e));
     } finally {
@@ -242,6 +497,73 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
       runAnalysis();
     }
   }, [isOpen, configPath, playlistIndex]);
+
+  const handleToggleCriterion = (id: string) => {
+    setWinnerCriteria((prev) => {
+      const updated = prev.map((c) => (c.id === id ? { ...c, enabled: !c.enabled } : c));
+      try {
+        localStorage.setItem("dedup_winner_rules", JSON.stringify(updated));
+      } catch (e) {}
+      if (report) {
+        const { updatedGroups, redundantCount, redundantBytes } = recalculateGroupWinners(
+          report.duplicate_groups,
+          updated
+        );
+        setReport({
+          ...report,
+          duplicate_groups: updatedGroups,
+          redundant_files_count: redundantCount,
+          redundant_bytes: redundantBytes,
+        });
+      }
+      return updated;
+    });
+  };
+
+  const handleMoveCriterion = (index: number, direction: "up" | "down") => {
+    setWinnerCriteria((prev) => {
+      const targetIndex = direction === "up" ? index - 1 : index + 1;
+      if (targetIndex < 0 || targetIndex >= prev.length) return prev;
+      const copy = [...prev];
+      const [moved] = copy.splice(index, 1);
+      copy.splice(targetIndex, 0, moved);
+      try {
+        localStorage.setItem("dedup_winner_rules", JSON.stringify(copy));
+      } catch (e) {}
+      if (report) {
+        const { updatedGroups, redundantCount, redundantBytes } = recalculateGroupWinners(
+          report.duplicate_groups,
+          copy
+        );
+        setReport({
+          ...report,
+          duplicate_groups: updatedGroups,
+          redundant_files_count: redundantCount,
+          redundant_bytes: redundantBytes,
+        });
+      }
+      return copy;
+    });
+  };
+
+  const handleResetCriteria = () => {
+    setWinnerCriteria(DEFAULT_WINNER_CRITERIA);
+    try {
+      localStorage.setItem("dedup_winner_rules", JSON.stringify(DEFAULT_WINNER_CRITERIA));
+    } catch (e) {}
+    if (report) {
+      const { updatedGroups, redundantCount, redundantBytes } = recalculateGroupWinners(
+        report.duplicate_groups,
+        DEFAULT_WINNER_CRITERIA
+      );
+      setReport({
+        ...report,
+        duplicate_groups: updatedGroups,
+        redundant_files_count: redundantCount,
+        redundant_bytes: redundantBytes,
+      });
+    }
+  };
 
   const handlePruneCache = async (clearAll = false) => {
     setIsPruning(true);
@@ -273,55 +595,6 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
     }
   };
 
-  const handleDeleteAllDuplicates = async () => {
-    if (!report || report.redundant_files_count === 0 || isDeleting) return;
-
-    const toDelete: string[] = [];
-    let totalBytes = 0;
-    for (const group of report.duplicate_groups) {
-      for (const track of group.tracks) {
-        if (!track.is_winner && !excludedTrackPaths.has(track.file_path)) {
-          toDelete.push(track.file_path);
-          totalBytes += track.size_bytes;
-        }
-      }
-    }
-
-    if (toDelete.length === 0) {
-      alert("No duplicate files are currently marked for deletion (all remaining tracks are marked as kept).");
-      return;
-    }
-
-    const confirmMsg = `Permanently delete all ${toDelete.length} redundant duplicate copies (${formatSize(totalBytes)}) from disk?\n\nThe kept winner and any manually preserved files of each group will be preserved. This operation cannot be undone.`;
-    setConfirmModal({
-      title: "🗑️ Delete Duplicate Files",
-      message: confirmMsg,
-      confirmText: `Delete ${toDelete.length} Files`,
-      onConfirm: async () => {
-        setConfirmModal(null);
-        setIsDeleting(true);
-        setActionStatus("");
-        try {
-          const res = await invoke<DeleteDuplicatesResult>("delete_duplicate_files", {
-            filePaths: toDelete,
-          });
-
-          if (res.errors.length > 0) {
-            alert(
-              `Deleted ${res.deleted_count} duplicate files (${formatSize(res.freed_bytes)} freed), but encountered ${res.failed_count} errors:\n\n${res.errors.slice(0, 5).join("\n")}`
-            );
-          }
-
-          setActionStatus(`Deleted ${res.deleted_count} duplicate file(s) and freed ${formatSize(res.freed_bytes)} of disk space.`);
-          await runAnalysis();
-        } catch (e) {
-          alert(`Error deleting duplicates: ${e}`);
-        } finally {
-          setIsDeleting(false);
-        }
-      },
-    });
-  };
 
   const handleKeepThisAndDeleteOthers = async (group: DuplicateGroup, keepTrack: DuplicateTrackEntry) => {
     if (isDeleting) return;
@@ -350,16 +623,31 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
         setActionStatus("");
         try {
           const filePaths = otherTracks.map((t) => t.file_path);
+          const groupYtId =
+            keepTrack.youtube_id || otherTracks.find((t) => t.youtube_id)?.youtube_id || null;
+          const cleanupGroups: DuplicateCleanupGroup[] = [
+            {
+              kept_file_path: keepTrack.file_path,
+              files_to_delete: filePaths,
+              youtube_id: groupYtId,
+            },
+          ];
           const res = await invoke<DeleteDuplicatesResult>("delete_duplicate_files", {
             filePaths,
+            cleanupGroups,
           });
 
           if (res.errors.length > 0) {
             alert(`Failed to delete some files:\n\n${res.errors.join("\n")}`);
           }
 
-          setActionStatus(`Kept "${fileName}" and deleted ${res.deleted_count} duplicate file(s) (${formatSize(res.freed_bytes)} freed).`);
+          let statusMsg = `Kept "${fileName}" and deleted ${res.deleted_count} duplicate file(s) (${formatSize(res.freed_bytes)} freed).`;
+          if (res.tags_transferred_count && res.tags_transferred_count > 0) {
+            statusMsg += ` Preserved YouTube ID to kept file tags.`;
+          }
+          setActionStatus(statusMsg);
 
+          const savedScrollTop = tableContainerRef.current?.scrollTop;
           // Immediately remove this group from the report view
           setReport((prev) => {
             if (!prev) return null;
@@ -371,6 +659,19 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
               redundant_bytes: Math.max(0, prev.redundant_bytes - otherBytes),
             };
           });
+          setSelectedGroupIds((prev) => {
+            const next = new Set(prev);
+            next.delete(group.group_id);
+            return next;
+          });
+
+          if (savedScrollTop !== undefined && savedScrollTop > 0) {
+            requestAnimationFrame(() => {
+              if (tableContainerRef.current) {
+                tableContainerRef.current.scrollTop = savedScrollTop;
+              }
+            });
+          }
         } catch (e) {
           alert(`Error deleting duplicate files: ${e}`);
         } finally {
@@ -396,11 +697,68 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
     onPlayTrack(target, queue, `Duplicates: ${group.canonical_title}`);
   };
 
+  const tierCounts = useMemo(() => {
+    const counts: Record<string, number> = {
+      all: 0,
+      exact_hash: 0,
+      youtube_id: 0,
+      acoustic: 0,
+      metadata: 0,
+    };
+    if (!report) return counts;
+    counts.all = report.duplicate_groups.length;
+    for (const g of report.duplicate_groups) {
+      if (g.match_tier in counts) {
+        counts[g.match_tier]++;
+      }
+    }
+    return counts;
+  }, [report]);
+
+  const isAllTiersSelected = useMemo(() => {
+    return ALL_TIER_KEYS.every((t) => selectedTiers.has(t));
+  }, [ALL_TIER_KEYS, selectedTiers]);
+
+  const handleToggleTier = (tierKey: string) => {
+    if (tierKey === "all") {
+      setSelectedTiers(new Set(ALL_TIER_KEYS));
+      return;
+    }
+
+    setSelectedTiers((prev) => {
+      // If currently all are selected, clicking one isolates that specific tier
+      if (ALL_TIER_KEYS.every((t) => prev.has(t))) {
+        return new Set([tierKey]);
+      }
+
+      const next = new Set(prev);
+      if (next.has(tierKey)) {
+        next.delete(tierKey);
+        // If none remain, revert back to all
+        if (next.size === 0) {
+          return new Set(ALL_TIER_KEYS);
+        }
+      } else {
+        next.add(tierKey);
+      }
+      return next;
+    });
+  };
+
+  const TIER_PRIORITIES: Record<string, Record<string, number>> = {
+    tier_exact: { exact_hash: 1, youtube_id: 2, acoustic: 3, metadata: 4 },
+    tier_youtube: { youtube_id: 1, acoustic: 2, exact_hash: 3, metadata: 4 },
+    tier_acoustic: { acoustic: 1, youtube_id: 2, exact_hash: 3, metadata: 4 },
+    tier_metadata: { metadata: 1, youtube_id: 2, acoustic: 3, exact_hash: 4 },
+  };
+
   const filteredGroups = useMemo(() => {
     if (!report) return [];
     const q = searchQuery.trim().toLowerCase();
-    return report.duplicate_groups.filter((g) => {
-      if (tierFilter !== "all" && g.match_tier !== tierFilter) {
+
+    // 1. Filter by selected tiers and search query
+    const filtered = report.duplicate_groups.filter((g) => {
+      if (!selectedTiers.has(g.match_tier)) {
         return false;
       }
       if (!q) return true;
@@ -419,7 +777,486 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
           t.source_folder.toLowerCase().includes(q)
       );
     });
-  }, [report, searchQuery, tierFilter]);
+
+    // 2. Sort groups
+    filtered.sort((a, b) => {
+      let cmp = 0;
+      if (sortBy in TIER_PRIORITIES) {
+        const priorities = TIER_PRIORITIES[sortBy];
+        const rankA = priorities[a.match_tier] ?? 99;
+        const rankB = priorities[b.match_tier] ?? 99;
+        cmp = rankA - rankB;
+        if (cmp === 0) {
+          cmp = b.confidence - a.confidence || a.canonical_title.localeCompare(b.canonical_title);
+        }
+      } else {
+        switch (sortBy) {
+          case "redundant_bytes": {
+            const bytesA = a.tracks.filter((t) => !t.is_winner).reduce((s, t) => s + t.size_bytes, 0);
+            const bytesB = b.tracks.filter((t) => !t.is_winner).reduce((s, t) => s + t.size_bytes, 0);
+            cmp = bytesB - bytesA; // naturally highest bytes first
+            break;
+          }
+          case "versions_count": {
+            cmp = b.tracks.length - a.tracks.length; // naturally most versions first
+            break;
+          }
+          case "confidence": {
+            cmp = b.confidence - a.confidence; // naturally highest confidence first
+            break;
+          }
+          case "title": {
+            cmp = a.canonical_title.localeCompare(b.canonical_title);
+            break;
+          }
+          case "artist": {
+            cmp = a.canonical_artist.localeCompare(b.canonical_artist);
+            break;
+          }
+          default:
+            cmp = 0;
+        }
+      }
+
+      return sortAsc ? cmp : -cmp;
+    });
+
+    return filtered;
+  }, [report, searchQuery, selectedTiers, sortBy, sortAsc]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+    if (tableContainerRef.current) {
+      tableContainerRef.current.scrollTop = 0;
+    }
+  }, [searchQuery, selectedTiers, sortBy, sortAsc]);
+
+  const totalGroups = filteredGroups.length;
+  const totalPages = pageSize === -1 ? 1 : Math.max(1, Math.ceil(totalGroups / pageSize));
+  const safePage = Math.min(currentPage, totalPages);
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [totalPages, currentPage]);
+
+  const displayedGroups = useMemo(() => {
+    if (pageSize === -1) return filteredGroups;
+    const start = (safePage - 1) * pageSize;
+    return filteredGroups.slice(start, start + pageSize);
+  }, [filteredGroups, safePage, pageSize]);
+
+  const filteredGroupIds = useMemo(() => {
+    return filteredGroups.map((g) => g.group_id);
+  }, [filteredGroups]);
+
+  const isAllFilteredSelected = useMemo(() => {
+    if (filteredGroupIds.length === 0) return false;
+    return filteredGroupIds.every((id) => selectedGroupIds.has(id));
+  }, [filteredGroupIds, selectedGroupIds]);
+
+  const isSomeFilteredSelected = useMemo(() => {
+    if (filteredGroupIds.length === 0) return false;
+    const count = filteredGroupIds.filter((id) => selectedGroupIds.has(id)).length;
+    return count > 0 && count < filteredGroupIds.length;
+  }, [filteredGroupIds, selectedGroupIds]);
+
+  const handleToggleSelectAllFiltered = () => {
+    setSelectedGroupIds((prev) => {
+      const next = new Set(prev);
+      if (isAllFilteredSelected) {
+        for (const id of filteredGroupIds) {
+          next.delete(id);
+        }
+      } else {
+        for (const id of filteredGroupIds) {
+          next.add(id);
+        }
+      }
+      return next;
+    });
+  };
+
+  const handlePageChange = (newPage: number) => {
+    const clamped = Math.max(1, Math.min(newPage, totalPages));
+    setCurrentPage(clamped);
+    if (tableContainerRef.current) {
+      tableContainerRef.current.scrollTop = 0;
+    }
+  };
+
+  const handlePageSizeChange = (newSize: number) => {
+    setPageSize(newSize);
+    setCurrentPage(1);
+    try {
+      localStorage.setItem("dedup_page_size", String(newSize));
+    } catch (e) {}
+    if (tableContainerRef.current) {
+      tableContainerRef.current.scrollTop = 0;
+    }
+  };
+
+  const currentTabSelectedGroupCount = useMemo(() => {
+    return filteredGroups.filter((g) => selectedGroupIds.has(g.group_id)).length;
+  }, [filteredGroups, selectedGroupIds]);
+
+  const {
+    currentTabSelectedRedundantCount,
+    currentTabSelectedRedundantBytes,
+    currentTabSelectedGroupsWithRedundantCount,
+  } = useMemo(() => {
+    let count = 0;
+    let bytes = 0;
+    let groupsCount = 0;
+
+    for (const group of filteredGroups) {
+      if (!selectedGroupIds.has(group.group_id)) continue;
+      let groupHasRedundant = false;
+      for (const track of group.tracks) {
+        if (!track.is_winner && !excludedTrackPaths.has(track.file_path)) {
+          count++;
+          bytes += track.size_bytes;
+          groupHasRedundant = true;
+        }
+      }
+      if (groupHasRedundant) {
+        groupsCount++;
+      }
+    }
+
+    return {
+      currentTabSelectedRedundantCount: count,
+      currentTabSelectedRedundantBytes: bytes,
+      currentTabSelectedGroupsWithRedundantCount: groupsCount,
+    };
+  }, [filteredGroups, selectedGroupIds, excludedTrackPaths]);
+
+  const handleFixSelectedGroups = async () => {
+    if (!report || isDeleting) return;
+
+    const toDelete: string[] = [];
+    const cleanupGroups: DuplicateCleanupGroup[] = [];
+    const affectedGroupIds: string[] = [];
+    let totalBytes = 0;
+
+    for (const group of filteredGroups) {
+      if (!selectedGroupIds.has(group.group_id)) continue;
+
+      const groupToDelete: string[] = [];
+      let keptTrack: DuplicateTrackEntry | undefined = group.tracks.find(
+        (t) => t.is_winner && !excludedTrackPaths.has(t.file_path)
+      );
+      if (!keptTrack) {
+        keptTrack = group.tracks.find((t) => excludedTrackPaths.has(t.file_path));
+      }
+      if (!keptTrack) {
+        keptTrack = group.tracks.find((t) => t.is_winner);
+      }
+
+      for (const track of group.tracks) {
+        if (!track.is_winner && !excludedTrackPaths.has(track.file_path)) {
+          groupToDelete.push(track.file_path);
+          toDelete.push(track.file_path);
+          totalBytes += track.size_bytes;
+        }
+      }
+
+      if (groupToDelete.length > 0) {
+        const groupYtId =
+          group.tracks.find((t) => t.youtube_id)?.youtube_id || null;
+        cleanupGroups.push({
+          kept_file_path: keptTrack ? keptTrack.file_path : null,
+          files_to_delete: groupToDelete,
+          youtube_id: groupYtId,
+        });
+        affectedGroupIds.push(group.group_id);
+      }
+    }
+
+    if (toDelete.length === 0) {
+      alert("No redundant duplicate files are currently marked for deletion in the selected groups.");
+      return;
+    }
+
+    const isAllInView = currentTabSelectedGroupCount >= filteredGroups.length && filteredGroups.length > 0;
+    const confirmMsg = isAllInView
+      ? `Permanently delete all ${toDelete.length} redundant duplicate copies (${formatSize(totalBytes)}) from disk across all ${cleanupGroups.length} duplicate groups in this view?\n\nThe kept winner of each group will be preserved (and any missing YouTube ID tag will be transferred to it). This operation cannot be undone.`
+      : `Permanently delete ${toDelete.length} redundant duplicate copies (${formatSize(totalBytes)}) from disk across the ${cleanupGroups.length} selected duplicate groups in this view?\n\nThe kept winner of each group will be preserved (and any missing YouTube ID tag will be transferred to it). This operation cannot be undone.`;
+
+    setConfirmModal({
+      title: isAllInView ? "🗑️ Delete All Redundant Copies in View" : "🗑️ Fix Selected Duplicate Groups",
+      message: confirmMsg,
+      confirmText: `Delete ${toDelete.length} Files`,
+      onConfirm: async () => {
+        setConfirmModal(null);
+        setIsDeleting(true);
+        setActionStatus("");
+        try {
+          const res = await invoke<DeleteDuplicatesResult>("delete_duplicate_files", {
+            filePaths: toDelete,
+            cleanupGroups,
+          });
+
+          if (res.errors.length > 0) {
+            alert(
+              `Deleted ${res.deleted_count} duplicate files (${formatSize(res.freed_bytes)} freed), but encountered ${res.failed_count} errors:\n\n${res.errors.slice(0, 5).join("\n")}`
+            );
+          }
+
+          let statusMsg = `Fixed ${cleanupGroups.length} group(s): deleted ${res.deleted_count} duplicate file(s) and freed ${formatSize(res.freed_bytes)} of disk space.`;
+          if (res.tags_transferred_count && res.tags_transferred_count > 0) {
+            statusMsg += ` Preserved YouTube ID to ${res.tags_transferred_count} kept file tags.`;
+          }
+          setActionStatus(statusMsg);
+
+          const savedScrollTop = tableContainerRef.current?.scrollTop;
+          const affectedSet = new Set(affectedGroupIds);
+          const deletedSet = new Set(toDelete);
+
+          setReport((prev) => {
+            if (!prev) return null;
+            const updatedGroups: DuplicateGroup[] = [];
+            for (const g of prev.duplicate_groups) {
+              if (!affectedSet.has(g.group_id)) {
+                updatedGroups.push(g);
+                continue;
+              }
+              const remaining = g.tracks.filter((t) => !deletedSet.has(t.file_path));
+              if (remaining.length > 1) {
+                updatedGroups.push({ ...g, tracks: remaining });
+              }
+            }
+            return {
+              ...prev,
+              duplicate_groups: updatedGroups,
+              redundant_files_count: Math.max(0, prev.redundant_files_count - res.deleted_count),
+              redundant_bytes: Math.max(0, prev.redundant_bytes - res.freed_bytes),
+            };
+          });
+
+          setSelectedGroupIds((prev) => {
+            const next = new Set(prev);
+            for (const id of affectedGroupIds) {
+              next.delete(id);
+            }
+            return next;
+          });
+
+          if (savedScrollTop !== undefined && savedScrollTop > 0) {
+            requestAnimationFrame(() => {
+              if (tableContainerRef.current) {
+                tableContainerRef.current.scrollTop = savedScrollTop;
+              }
+            });
+          }
+        } catch (e) {
+          alert(`Error deleting duplicates: ${e}`);
+        } finally {
+          setIsDeleting(false);
+        }
+      },
+    });
+  };
+
+  const renderPaginationBar = (position: "top" | "bottom") => {
+    if (totalGroups === 0) return null;
+
+    if (position === "top") {
+      return (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "10px",
+            padding: "0 2px 2px 2px",
+            fontSize: "0.78rem",
+            color: "var(--text-secondary)",
+            flexWrap: "wrap",
+            flexShrink: 0,
+          }}
+        >
+          {/* Master Checkbox */}
+          <label
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "6px",
+              cursor: "pointer",
+              userSelect: "none",
+              fontWeight: 600,
+              fontSize: "0.76rem",
+              color: "var(--text-primary)",
+              padding: "2px 7px",
+              borderRadius: "5px",
+              backgroundColor: "var(--bg-secondary)",
+              border: "1px solid var(--border-color)",
+            }}
+            title={isAllFilteredSelected ? "Deselect all visible duplicate groups" : "Select all visible duplicate groups"}
+          >
+            <input
+              type="checkbox"
+              checked={isAllFilteredSelected}
+              ref={(el) => {
+                if (el) el.indeterminate = isSomeFilteredSelected;
+              }}
+              onChange={handleToggleSelectAllFiltered}
+              style={{
+                cursor: "pointer",
+                width: "14px",
+                height: "14px",
+                accentColor: "var(--accent-purple)",
+                margin: 0,
+              }}
+            />
+            <span>
+              {currentTabSelectedGroupCount >= totalGroups && totalGroups > 0
+                ? `All ${totalGroups} selected`
+                : `${currentTabSelectedGroupCount} of ${totalGroups} selected`}
+            </span>
+          </label>
+
+          {/* Fix Selected Button */}
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={handleFixSelectedGroups}
+            disabled={isDeleting || currentTabSelectedRedundantCount === 0}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "6px",
+              padding: "2px 10px",
+              fontSize: "0.76rem",
+              fontWeight: 600,
+              backgroundColor: currentTabSelectedRedundantCount > 0 ? "rgba(239, 68, 68, 0.18)" : "var(--bg-secondary)",
+              color: currentTabSelectedRedundantCount > 0 ? "#f87171" : "var(--text-muted)",
+              border: `1px solid ${currentTabSelectedRedundantCount > 0 ? "rgba(239, 68, 68, 0.5)" : "var(--border-color)"}`,
+              borderRadius: "6px",
+              height: "24px",
+              cursor: currentTabSelectedRedundantCount > 0 && !isDeleting ? "pointer" : "not-allowed",
+              whiteSpace: "nowrap",
+            }}
+            title={
+              currentTabSelectedRedundantCount > 0
+                ? currentTabSelectedGroupCount >= totalGroups && totalGroups > 0
+                  ? `Fix all ${totalGroups} duplicate groups in this view: permanently delete redundant duplicate copies from disk and preserve the kept winner`
+                  : `Fix ${currentTabSelectedGroupsWithRedundantCount} selected duplicate groups in this view: permanently delete redundant duplicate copies from disk and preserve the kept winner`
+                : `No redundant duplicate files in selected groups of this view`
+            }
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="3 6 5 6 21 6"></polyline>
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+            </svg>
+            <span>
+              {currentTabSelectedGroupCount >= totalGroups && totalGroups > 0
+                ? `Fix All (${currentTabSelectedRedundantCount} dups • ${formatSize(currentTabSelectedRedundantBytes)})`
+                : `Fix Selected (${currentTabSelectedGroupsWithRedundantCount} groups • ${currentTabSelectedRedundantCount} dups • ${formatSize(currentTabSelectedRedundantBytes)})`}
+            </span>
+          </button>
+        </div>
+      );
+    }
+
+    const startIdx = pageSize === -1 ? 1 : (safePage - 1) * pageSize + 1;
+    const endIdx = pageSize === -1 ? totalGroups : Math.min(safePage * pageSize, totalGroups);
+
+    return (
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          padding: "6px 2px 0 2px",
+          fontSize: "0.78rem",
+          color: "var(--text-secondary)",
+          flexWrap: "wrap",
+          gap: "8px",
+          flexShrink: 0,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+          <span>
+            Showing groups <strong>{startIdx}–{endIdx}</strong> of <strong>{totalGroups}</strong>
+          </span>
+          <span style={{ color: "var(--text-muted)" }}>•</span>
+          <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+            <span style={{ fontSize: "0.74rem" }}>Page size:</span>
+            {[25, 50, 100, 250, -1].map((size) => (
+              <button
+                key={size}
+                type="button"
+                className={`btn ${pageSize === size ? "btn-primary" : "btn-secondary"}`}
+                onClick={() => handlePageSizeChange(size)}
+                style={{
+                  padding: "1px 7px",
+                  fontSize: "0.72rem",
+                  borderRadius: "4px",
+                  fontWeight: pageSize === size ? 700 : 500,
+                  height: "22px",
+                  lineHeight: 1,
+                }}
+              >
+                {size === -1 ? "All" : size}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {totalPages > 1 && (
+          <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => handlePageChange(1)}
+              disabled={safePage <= 1}
+              style={{ padding: "2px 7px", fontSize: "0.72rem", height: "24px" }}
+              title="First Page"
+            >
+              ⏮
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => handlePageChange(safePage - 1)}
+              disabled={safePage <= 1}
+              style={{ padding: "2px 8px", fontSize: "0.72rem", height: "24px" }}
+              title="Previous Page"
+            >
+              ◀ Prev
+            </button>
+
+            <span style={{ padding: "0 6px", fontWeight: 600, color: "var(--text-primary)", fontSize: "0.76rem" }}>
+              Page {safePage} of {totalPages}
+            </span>
+
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => handlePageChange(safePage + 1)}
+              disabled={safePage >= totalPages}
+              style={{ padding: "2px 8px", fontSize: "0.72rem", height: "24px" }}
+              title="Next Page"
+            >
+              Next ▶
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => handlePageChange(totalPages)}
+              disabled={safePage >= totalPages}
+              style={{ padding: "2px 7px", fontSize: "0.72rem", height: "24px" }}
+              title="Last Page"
+            >
+              ⏭
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  };
+
 
   if (!isOpen) return null;
 
@@ -638,36 +1475,6 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
               </svg>
             </button>
 
-            {report && report.redundant_files_count > 0 && (
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={handleDeleteAllDuplicates}
-                disabled={isLoading || isDeleting}
-                style={{
-                  width: "30px",
-                  height: "30px",
-                  padding: 0,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  borderRadius: "6px",
-                  backgroundColor: "rgba(239, 68, 68, 0.15)",
-                  border: "1px solid var(--danger)",
-                  color: "var(--danger)",
-                  cursor: isDeleting ? "not-allowed" : "pointer",
-                }}
-                title={`Delete all dups found: Permanently delete all ${report.redundant_files_count} redundant duplicate copies (${formatSize(report.redundant_bytes)}) from disk, preserving the chosen winner of each group`}
-              >
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="3 6 5 6 21 6"></polyline>
-                  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-                  <line x1="10" y1="11" x2="10" y2="17"></line>
-                  <line x1="14" y1="11" x2="14" y2="17"></line>
-                </svg>
-              </button>
-            )}
-
             <button
               type="button"
               className="btn btn-secondary"
@@ -774,35 +1581,10 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
                 padding: "8px 12px",
               }}
             >
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div>
                 <span style={{ fontSize: "0.7rem", color: "var(--text-secondary)", textTransform: "uppercase", fontWeight: 600 }}>
                   Skipped Redundant Copies
                 </span>
-                {report.redundant_files_count > 0 && (
-                  <button
-                    type="button"
-                    onClick={handleDeleteAllDuplicates}
-                    disabled={isLoading || isDeleting}
-                    style={{
-                      background: "rgba(239, 68, 68, 0.15)",
-                      border: "1px solid var(--danger)",
-                      color: "var(--danger)",
-                      borderRadius: "4px",
-                      cursor: isDeleting ? "not-allowed" : "pointer",
-                      padding: "2px 5px",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      lineHeight: 1,
-                    }}
-                    title={`Delete all duplicates found: Permanently delete all ${report.redundant_files_count} redundant duplicate copies (${formatSize(report.redundant_bytes)}) from disk, preserving the kept winner of each group`}
-                  >
-                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                      <polyline points="3 6 5 6 21 6"></polyline>
-                      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-                    </svg>
-                  </button>
-                )}
               </div>
               <div style={{ fontSize: "1.05rem", fontWeight: 700, color: "var(--text-primary)", marginTop: "2px" }}>
                 {report.redundant_files_count} files ({formatSize(report.redundant_bytes)})
@@ -878,105 +1660,377 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
           </div>
         )}
 
-        {/* Filter & Search Bar */}
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "10px" }}>
-          <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+        {/* Filter & Sort Bar */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+          {/* Multi-Select Match Analysis Filter Tabs */}
+          <div style={{ display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap" }}>
             {[
               {
                 key: "all",
-                title: "All Types: View all duplicate groups",
+                label: "All",
+                title: "Show all duplicate groups regardless of matching analysis",
+                count: tierCounts.all,
+                isActive: isAllTiersSelected,
                 icon: (
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                     <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
                     <polyline points="2 17 12 22 22 17"></polyline>
                     <polyline points="2 12 12 17 22 12"></polyline>
                   </svg>
                 ),
+                activeBg: "var(--accent-purple-glow)",
+                activeColor: "var(--accent-purple)",
+                activeBorder: "var(--accent-purple)",
               },
               {
                 key: "exact_hash",
-                title: "Exact Audio: Identical decoded audio stream hash",
+                label: "Exact Audio",
+                title: "Exact Audio: Identical decoded audio stream hash (100% byte identical)",
+                count: tierCounts.exact_hash,
+                isActive: selectedTiers.has("exact_hash") && !isAllTiersSelected,
                 icon: (
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                     <line x1="4" y1="9" x2="20" y2="9"></line>
                     <line x1="4" y1="15" x2="20" y2="15"></line>
                     <line x1="10" y1="3" x2="8" y2="21"></line>
                     <line x1="16" y1="3" x2="14" y2="21"></line>
                   </svg>
                 ),
+                activeBg: "rgba(34, 197, 94, 0.16)",
+                activeColor: "var(--success)",
+                activeBorder: "rgba(34, 197, 94, 0.4)",
               },
               {
                 key: "youtube_id",
-                title: "Same YouTube ID: Video ID embedded in metadata or filename",
+                label: "Same YT ID",
+                title: "Same YouTube ID: Video ID embedded in metadata tags or filename",
+                count: tierCounts.youtube_id,
+                isActive: selectedTiers.has("youtube_id") && !isAllTiersSelected,
                 icon: (
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                     <rect x="2" y="4" width="20" height="16" rx="2.18" ry="2.18"></rect>
                     <polygon points="10 8 16 12 10 16 10 8" fill="currentColor"></polygon>
                   </svg>
                 ),
+                activeBg: "rgba(239, 68, 68, 0.16)",
+                activeColor: "#f87171",
+                activeBorder: "rgba(239, 68, 68, 0.4)",
               },
               {
                 key: "acoustic",
+                label: "Acoustic",
                 title: "Acoustic / Ad Offset: Sliding spectral fingerprint match (detects intro/outro ads)",
+                count: tierCounts.acoustic,
+                isActive: selectedTiers.has("acoustic") && !isAllTiersSelected,
                 icon: (
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M3 18v-6a9 9 0 0 1 18 0v6"></path>
                     <path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"></path>
                   </svg>
                 ),
+                activeBg: "rgba(138, 92, 246, 0.18)",
+                activeColor: "var(--accent-purple-hover)",
+                activeBorder: "rgba(138, 92, 246, 0.4)",
               },
               {
                 key: "metadata",
+                label: "Metadata",
                 title: "Title & Artist: Normalized alphanumeric tag match",
+                count: tierCounts.metadata,
+                isActive: selectedTiers.has("metadata") && !isAllTiersSelected,
                 icon: (
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path>
                     <line x1="7" y1="7" x2="7.01" y2="7"></line>
                   </svg>
                 ),
+                activeBg: "rgba(245, 158, 11, 0.16)",
+                activeColor: "var(--warning)",
+                activeBorder: "rgba(245, 158, 11, 0.4)",
               },
-            ].map((tab) => (
-              <button
-                key={tab.key}
-                type="button"
-                className={`btn ${tierFilter === tab.key ? "btn-primary" : "btn-secondary"}`}
-                onClick={() => setTierFilter(tab.key)}
-                style={{
-                  width: "30px",
-                  height: "30px",
-                  padding: 0,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  borderRadius: "6px",
-                }}
-                title={tab.title}
-              >
-                {tab.icon}
-              </button>
-            ))}
+            ].map((tab) => {
+              const isSelected = tab.isActive;
+              return (
+                <button
+                  key={tab.key}
+                  type="button"
+                  onClick={() => handleToggleTier(tab.key)}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "5px",
+                    padding: "3px 8px",
+                    borderRadius: "6px",
+                    fontSize: "0.74rem",
+                    fontWeight: isSelected ? 700 : 500,
+                    backgroundColor: isSelected ? tab.activeBg : "var(--bg-secondary)",
+                    color: isSelected ? tab.activeColor : "var(--text-secondary)",
+                    border: `1px solid ${isSelected ? tab.activeBorder : "var(--border-color)"}`,
+                    cursor: "pointer",
+                    transition: "all 0.15s ease",
+                    whiteSpace: "nowrap",
+                    height: "28px",
+                  }}
+                  title={tab.title}
+                >
+                  {tab.icon}
+                  <span>{tab.label}</span>
+                  <span
+                    style={{
+                      fontSize: "0.68rem",
+                      padding: "1px 5px",
+                      borderRadius: "999px",
+                      backgroundColor: isSelected ? "rgba(0,0,0,0.2)" : "var(--bg-tertiary)",
+                      color: isSelected ? "inherit" : "var(--text-muted)",
+                      fontWeight: 700,
+                      lineHeight: 1,
+                    }}
+                  >
+                    {tab.count}
+                  </span>
+                </button>
+              );
+            })}
           </div>
 
-          <div style={{ width: "240px" }}>
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="🔍 Filter duplicates..."
-              style={{ padding: "5px 10px", fontSize: "0.8rem", width: "100%" }}
-            />
+          {/* Right side: Sort Controls, Winner Rules, Search Filter */}
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+            {/* Sort Selector */}
+            <div style={{ display: "flex", alignItems: "center", gap: "5px" }}>
+              <span style={{ fontSize: "0.74rem", color: "var(--text-secondary)", fontWeight: 600 }}>
+                Sort:
+              </span>
+              <select
+                value={sortBy}
+                onChange={(e) => {
+                  setSortBy(e.target.value);
+                  try {
+                    localStorage.setItem("dedup_sort_by", e.target.value);
+                  } catch (err) {}
+                }}
+                style={{
+                  fontSize: "0.74rem",
+                  padding: "3px 8px",
+                  borderRadius: "6px",
+                  backgroundColor: "var(--bg-secondary)",
+                  color: "var(--text-primary)",
+                  border: "1px solid var(--border-color)",
+                  cursor: "pointer",
+                  height: "28px",
+                  outline: "none",
+                }}
+                title="Sort duplicate groups by match analysis type or metrics"
+              >
+                <optgroup label="Matching Analysis">
+                  <option value="tier_exact">Exact Audio First</option>
+                  <option value="tier_youtube">Same YouTube ID First</option>
+                  <option value="tier_acoustic">Acoustic Match First</option>
+                  <option value="tier_metadata">Metadata Match First</option>
+                </optgroup>
+                <optgroup label="Metrics & Information">
+                  <option value="redundant_bytes">Wasted Disk Space (High → Low)</option>
+                  <option value="versions_count">Duplicate Versions (Most Copies)</option>
+                  <option value="confidence">Confidence Score</option>
+                  <option value="title">Song Title (A → Z)</option>
+                  <option value="artist">Artist Name (A → Z)</option>
+                </optgroup>
+              </select>
+
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => {
+                  setSortAsc((prev) => {
+                    const next = !prev;
+                    try {
+                      localStorage.setItem("dedup_sort_asc", String(next));
+                    } catch (err) {}
+                    return next;
+                  });
+                }}
+                style={{
+                  fontSize: "0.74rem",
+                  padding: "0 8px",
+                  height: "28px",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "3px",
+                  borderRadius: "6px",
+                }}
+                title={`Sort direction: ${sortAsc ? "Ascending (default)" : "Descending (reversed)"}. Click to toggle.`}
+              >
+                <span>{sortAsc ? "▲ Asc" : "▼ Desc"}</span>
+              </button>
+            </div>
+
+            <button
+              type="button"
+              className={`btn ${showRulesConfig ? "btn-primary" : "btn-secondary"}`}
+              onClick={() => setShowRulesConfig((prev) => !prev)}
+              style={{
+                fontSize: "0.74rem",
+                padding: "4px 9px",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "5px",
+                borderRadius: "6px",
+                whiteSpace: "nowrap",
+                height: "28px",
+              }}
+              title="Configure priority rules for choosing which file is kept as the winner (🏆 KEPT)"
+            >
+              <span>⚙️ Winner Rules</span>
+              <span style={{ fontSize: "0.68rem", opacity: 0.85 }}>({winnerCriteria.filter((c) => c.enabled).length})</span>
+              <span style={{ fontSize: "0.68rem" }}>{showRulesConfig ? "▲" : "▼"}</span>
+            </button>
+
+            <div style={{ width: "200px" }}>
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="🔍 Search tracks..."
+                style={{ padding: "4px 9px", fontSize: "0.76rem", width: "100%", height: "28px" }}
+              />
+            </div>
           </div>
         </div>
 
-        {/* Main Content List */}
+        {/* Expandable Winner Selection Rules Accordion */}
+        {showRulesConfig && (
+          <div
+            style={{
+              backgroundColor: "var(--bg-tertiary)",
+              border: "1px solid var(--border-color)",
+              borderRadius: "8px",
+              padding: "12px 14px",
+              display: "flex",
+              flexDirection: "column",
+              gap: "10px",
+              boxShadow: "var(--shadow-sm)",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div>
+                <span style={{ fontSize: "0.85rem", fontWeight: 700, color: "var(--text-primary)" }}>
+                  ⚙️ Winner Selection Priority Rules
+                </span>
+                <span style={{ fontSize: "0.75rem", color: "var(--text-secondary)", marginLeft: "8px" }}>
+                  Evaluated from top (#1) to bottom. Changes apply immediately in-memory.
+                </span>
+              </div>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={handleResetCriteria}
+                style={{ fontSize: "0.72rem", padding: "2px 8px" }}
+                title="Reset rules to default priority order"
+              >
+                Reset to Defaults
+              </button>
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))", gap: "8px" }}>
+              {winnerCriteria.map((crit, idx) => (
+                <div
+                  key={crit.id}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    padding: "6px 10px",
+                    backgroundColor: crit.enabled ? "var(--bg-surface)" : "var(--bg-secondary)",
+                    border: `1px solid ${crit.enabled ? "var(--border-color)" : "transparent"}`,
+                    borderRadius: "6px",
+                    opacity: crit.enabled ? 1 : 0.55,
+                    gap: "8px",
+                  }}
+                >
+                  <label
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "8px",
+                      cursor: "pointer",
+                      minWidth: 0,
+                      flex: 1,
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={crit.enabled}
+                      onChange={() => handleToggleCriterion(crit.id)}
+                      style={{ cursor: "pointer" }}
+                    />
+                    <span
+                      style={{
+                        fontSize: "0.7rem",
+                        fontWeight: 700,
+                        padding: "1px 5px",
+                        borderRadius: "4px",
+                        backgroundColor: crit.enabled ? "var(--accent-purple-glow)" : "var(--bg-tertiary)",
+                        color: crit.enabled ? "var(--accent-purple)" : "var(--text-secondary)",
+                        fontFamily: "var(--font-mono)",
+                      }}
+                    >
+                      #{idx + 1}
+                    </span>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: "0.8rem", fontWeight: 600, color: "var(--text-primary)" }}>
+                        {crit.label}
+                      </div>
+                      <div
+                        style={{
+                          fontSize: "0.7rem",
+                          color: "var(--text-secondary)",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                        title={crit.desc}
+                      >
+                        {crit.desc}
+                      </div>
+                    </div>
+                  </label>
+
+                  <div style={{ display: "flex", gap: "2px", flexShrink: 0 }}>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => handleMoveCriterion(idx, "up")}
+                      disabled={idx === 0}
+                      style={{ width: "22px", height: "22px", padding: 0, fontSize: "0.7rem", display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+                      title="Move rule higher in priority"
+                    >
+                      ▲
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => handleMoveCriterion(idx, "down")}
+                      disabled={idx === winnerCriteria.length - 1}
+                      style={{ width: "22px", height: "22px", padding: 0, fontSize: "0.7rem", display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+                      title="Move rule lower in priority"
+                    >
+                      ▼
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Main Content Area */}
         <div
           style={{
             flex: 1,
-            overflowY: "auto",
+            minHeight: 0,
             display: "flex",
             flexDirection: "column",
-            gap: "10px",
-            paddingRight: "4px",
+            gap: "8px",
+            overflow: "hidden",
           }}
         >
           {isLoading ? (
@@ -1047,22 +2101,7 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
                           textOverflow: "ellipsis",
                         }}
                       >
-                        {analysisProgress?.stage_label || analysisProgress?.phase_label || "Analyzing tracks & computing fingerprints..."}
-                      </div>
-                      <div
-                        style={{
-                          fontSize: "0.78rem",
-                          color: "var(--text-secondary)",
-                          whiteSpace: "nowrap",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                        }}
-                      >
-                        {analysisProgress?.stage === 1
-                          ? "Pass 1: Parallel tag reading & 64-bit audio stream hashing (zero FFmpeg)"
-                          : analysisProgress?.stage === 2
-                          ? "Pass 2: On-demand acoustic waveform decoding for ambiguous candidate pairs"
-                          : "Pass 3: Transitive duplicate clustering with centroid anti-chaining protection"}
+                        {analysisProgress?.phase_label || analysisProgress?.stage_label || "Analyzing tracks..."}
                       </div>
                     </div>
                   </div>
@@ -1086,21 +2125,9 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
                 {/* 3-Stage Step Progress Stepper */}
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "8px" }}>
                   {[
-                    {
-                      num: 1,
-                      title: "1. Tags & Hashes",
-                      desc: "Fast metadata pass",
-                    },
-                    {
-                      num: 2,
-                      title: "2. Acoustic Verify",
-                      desc: "On-demand waveforms",
-                    },
-                    {
-                      num: 3,
-                      title: "3. Clustering",
-                      desc: "Centroid anti-chaining",
-                    },
+                    { num: 1, title: "1. Tags & Hashes" },
+                    { num: 2, title: "2. Acoustic Verify" },
+                    { num: 3, title: "3. Clustering" },
                   ].map((step) => {
                     const currentStage = analysisProgress?.stage ?? 1;
                     const isDone = currentStage > step.num || analysisProgress?.phase === "done";
@@ -1111,7 +2138,7 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
                       <div
                         key={step.num}
                         style={{
-                          padding: "8px 10px",
+                          padding: "7px 10px",
                           borderRadius: "8px",
                           backgroundColor: isActive
                             ? "rgba(139, 92, 246, 0.12)"
@@ -1126,63 +2153,49 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
                               : "var(--border-color)"
                           }`,
                           display: "flex",
-                          flexDirection: "column",
-                          gap: "2px",
+                          alignItems: "center",
+                          gap: "8px",
                           transition: "all 0.25s ease",
                         }}
                       >
-                        <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                          <span
-                            style={{
-                              width: "18px",
-                              height: "18px",
-                              borderRadius: "50%",
-                              display: "inline-flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              fontSize: "0.68rem",
-                              fontWeight: 700,
-                              backgroundColor: isDone
-                                ? "var(--success)"
-                                : isActive
-                                ? "var(--accent-purple)"
-                                : "var(--bg-surface)",
-                              color: isDone || isActive ? "#fff" : "var(--text-secondary)",
-                              border: isPending ? "1px solid var(--border-color)" : "none",
-                              flexShrink: 0,
-                            }}
-                          >
-                            {isDone ? "✓" : step.num}
-                          </span>
-                          <span
-                            style={{
-                              fontSize: "0.75rem",
-                              fontWeight: 600,
-                              color: isActive
-                                ? "var(--accent-purple)"
-                                : isDone
-                                ? "var(--success)"
-                                : "var(--text-secondary)",
-                              whiteSpace: "nowrap",
-                              overflow: "hidden",
-                              textOverflow: "ellipsis",
-                            }}
-                          >
-                            {step.title}
-                          </span>
-                        </div>
-                        <div
+                        <span
                           style={{
-                            fontSize: "0.65rem",
-                            color: "var(--text-secondary)",
-                            paddingLeft: "24px",
+                            width: "18px",
+                            height: "18px",
+                            borderRadius: "50%",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            fontSize: "0.68rem",
+                            fontWeight: 700,
+                            backgroundColor: isDone
+                              ? "var(--success)"
+                              : isActive
+                              ? "var(--accent-purple)"
+                              : "var(--bg-surface)",
+                            color: isDone || isActive ? "#fff" : "var(--text-secondary)",
+                            border: isPending ? "1px solid var(--border-color)" : "none",
+                            flexShrink: 0,
+                          }}
+                        >
+                          {isDone ? "✓" : step.num}
+                        </span>
+                        <span
+                          style={{
+                            fontSize: "0.75rem",
+                            fontWeight: 600,
+                            color: isActive
+                              ? "var(--accent-purple)"
+                              : isDone
+                              ? "var(--success)"
+                              : "var(--text-secondary)",
                             whiteSpace: "nowrap",
                             overflow: "hidden",
                             textOverflow: "ellipsis",
                           }}
                         >
-                          {step.desc}
-                        </div>
+                          {step.title}
+                        </span>
                       </div>
                     );
                   })}
@@ -1206,31 +2219,38 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
                       height: "100%",
                       background: "linear-gradient(90deg, var(--accent-indigo), var(--accent-purple))",
                       borderRadius: "999px",
-                      transition: "width 0.6s ease-out",
+                      transition: "width 0.2s cubic-bezier(0.4, 0, 0.2, 1)",
                     }}
                   />
                 </div>
 
-                {/* Current file scanning label */}
-                {analysisProgress?.current_file && (
-                  <div
-                    style={{
-                      fontSize: "0.72rem",
-                      color: "var(--text-secondary)",
-                      fontFamily: "var(--font-mono)",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                      backgroundColor: "var(--bg-surface)",
-                      padding: "4px 8px",
-                      borderRadius: "6px",
-                      border: "1px solid var(--border-color)",
-                    }}
-                    title={analysisProgress.current_file}
-                  >
-                    📄 Scanning: {analysisProgress.current_file}
-                  </div>
-                )}
+                {/* Current item being processed */}
+                <div
+                  style={{
+                    fontSize: "0.75rem",
+                    color: "var(--text-secondary)",
+                    fontFamily: "var(--font-mono)",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    backgroundColor: "var(--bg-surface)",
+                    padding: "6px 10px",
+                    borderRadius: "6px",
+                    border: "1px solid var(--border-color)",
+                    minHeight: "30px",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "6px",
+                  }}
+                  title={analysisProgress?.current_file || analysisProgress?.phase_label || "Processing..."}
+                >
+                  <span style={{ flexShrink: 0 }}>🎵</span>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {analysisProgress?.current_file
+                      ? analysisProgress.current_file
+                      : analysisProgress?.phase_label || "Processing tracks..."}
+                  </span>
+                </div>
 
                 {/* Stats & ETA row */}
                 <div
@@ -1287,18 +2307,6 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
                     <span>{formatEta(analysisProgress?.eta_secs)}</span>
                   </div>
                 </div>
-
-                {/* Helpful footnote */}
-                <div
-                  style={{
-                    fontSize: "0.72rem",
-                    color: "var(--text-muted)",
-                    textAlign: "center",
-                    lineHeight: 1.4,
-                  }}
-                >
-                  Deterministic duplicate analysis computes exact audio hashes, YouTube IDs, normalized metadata tags, and sliding acoustic fingerprints. Cached fingerprints skip re-computation on subsequent runs.
-                </div>
               </div>
             </div>
           ) : error ? (
@@ -1312,326 +2320,567 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
                 : "No duplicate groups match your current filter."}
             </div>
           ) : (
-            filteredGroups.map((group, gIdx) => {
-              const badge = getTierBadgeStyle(group.match_tier);
-              return (
-                <div
-                  key={group.group_id}
+            <div
+              style={{
+                flex: 1,
+                minHeight: 0,
+                display: "flex",
+                flexDirection: "column",
+                gap: "8px",
+              }}
+            >
+              {/* Top Pagination Bar */}
+              {renderPaginationBar("top")}
+
+              {/* Single Unified Table for All Duplicate Groups */}
+              <div
+                ref={tableContainerRef}
+                style={{
+                  flex: 1,
+                  minHeight: 0,
+                  overflowY: "auto",
+                  overflowX: "auto",
+                  border: "1px solid var(--border-color)",
+                  borderRadius: "8px",
+                  backgroundColor: "var(--bg-tertiary)",
+                }}
+              >
+                <table
                   style={{
-                    backgroundColor: "var(--bg-tertiary)",
-                    border: "1px solid var(--border-color)",
-                    borderRadius: "8px",
-                    overflow: "hidden",
-                    flexShrink: 0,
+                    width: "100%",
+                    tableLayout: "fixed",
+                    borderCollapse: "collapse",
+                    fontSize: "0.8rem",
                   }}
                 >
-                  {/* Group Header */}
-                  <div
+                  <colgroup>
+                    <col style={{ width: "36px" }} />
+                    <col style={{ width: "135px" }} />
+                    <col /> {/* File Name / Title expands */}
+                    <col style={{ width: "170px" }} />
+                    <col style={{ width: "135px" }} />
+                    <col style={{ width: "70px" }} />
+                    <col style={{ width: "80px" }} />
+                    <col style={{ width: "125px" }} />
+                  </colgroup>
+                  <thead
                     style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      padding: "8px 12px",
+                      position: "sticky",
+                      top: 0,
+                      zIndex: 10,
                       backgroundColor: "var(--bg-surface)",
                       borderBottom: "1px solid var(--border-color)",
+                      boxShadow: "0 1px 3px rgba(0,0,0,0.1)",
                     }}
                   >
-                    <div style={{ display: "flex", alignItems: "center", gap: "8px", minWidth: 0 }}>
-                      <span
-                        style={{
-                          fontSize: "0.72rem",
-                          fontFamily: "var(--font-mono)",
-                          color: "var(--text-secondary)",
-                          fontWeight: 600,
-                        }}
-                      >
-                        #{gIdx + 1}
-                      </span>
-                      <span
-                        style={{
-                          fontWeight: 700,
-                          fontSize: "0.9rem",
-                          color: "var(--text-primary)",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {group.canonical_title}
-                      </span>
-                      {group.canonical_artist && (
-                        <span style={{ fontSize: "0.8rem", color: "var(--text-secondary)" }}>
-                          — {group.canonical_artist}
-                        </span>
-                      )}
-                    </div>
-
-                    <div style={{ display: "flex", alignItems: "center", gap: "6px", flexShrink: 0 }}>
-                      <span
-                        style={{
-                          fontSize: "0.72rem",
-                          padding: "2px 8px",
-                          borderRadius: "10px",
-                          backgroundColor: badge.bg,
-                          color: badge.color,
-                          border: `1px solid ${badge.border}`,
-                          fontWeight: 600,
-                        }}
-                      >
-                        {badge.icon} {group.match_label} ({group.confidence}%)
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Tracks inside group table */}
-                  <div style={{ overflowX: "auto" }}>
-                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.8rem" }}>
-                      <thead>
-                        <tr
-                          style={{
-                            borderBottom: "1px solid var(--border-color)",
-                            backgroundColor: "var(--bg-surface)",
-                            color: "var(--text-secondary)",
-                            fontSize: "0.68rem",
-                            textTransform: "uppercase",
-                            letterSpacing: "0.5px",
+                    <tr
+                      style={{
+                        color: "var(--text-secondary)",
+                        fontSize: "0.68rem",
+                        textTransform: "uppercase",
+                        letterSpacing: "0.5px",
+                      }}
+                    >
+                      <th style={{ width: "36px", padding: "8px 6px", textAlign: "center" }}>
+                        <input
+                          type="checkbox"
+                          checked={isAllFilteredSelected}
+                          ref={(el) => {
+                            if (el) el.indeterminate = isSomeFilteredSelected;
                           }}
-                        >
-                          <th style={{ width: "34px", padding: "6px 8px", textAlign: "center" }}></th>
-                          <th style={{ width: "110px", padding: "6px 8px", textAlign: "left" }}>Status</th>
-                          <th style={{ padding: "6px 8px", textAlign: "left" }}>File Name</th>
-                          <th style={{ width: "160px", padding: "6px 8px", textAlign: "left" }}>Source Folder</th>
-                          <th style={{ width: "125px", padding: "6px 8px", textAlign: "right" }}>Format</th>
-                          <th style={{ width: "65px", padding: "6px 8px", textAlign: "right" }}>Duration</th>
-                          <th style={{ width: "75px", padding: "6px 8px", textAlign: "right" }}>Size</th>
-                          <th style={{ width: "105px", padding: "6px 8px", textAlign: "center" }}>Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {group.tracks.map((t, tIdx) => {
-                          const fileName = t.file_path.split(/[/\\]/).pop() || t.title;
-                          return (
-                            <tr
-                              key={tIdx}
-                              className={t.is_winner ? "row-winner" : undefined}
-                              data-winner={t.is_winner}
-                              style={{
-                                borderBottom: tIdx < group.tracks.length - 1 ? "1px solid var(--border-color)" : "none",
-                              }}
-                            >
-                              {/* 1. Play Button */}
-                              <td style={{ padding: "6px 8px", textAlign: "center", verticalAlign: "middle" }}>
-                                <button
-                                  type="button"
-                                  className="btn btn-secondary"
-                                  onClick={() => handlePlayGroupTrack(group, t)}
-                                  style={{
-                                    width: "24px",
-                                    height: "24px",
-                                    padding: 0,
-                                    borderRadius: "50%",
-                                    display: "inline-flex",
-                                    alignItems: "center",
-                                    justifyContent: "center",
-                                    backgroundColor: "var(--accent-purple)",
-                                    color: "#fff",
-                                    border: "none",
-                                    cursor: "pointer",
-                                  }}
-                                  title={`Play "${fileName}"`}
-                                >
-                                  <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
-                                    <polygon points="5 3 19 12 5 21 5 3"></polygon>
-                                  </svg>
-                                </button>
-                              </td>
+                          onChange={handleToggleSelectAllFiltered}
+                          style={{
+                            cursor: "pointer",
+                            width: "14px",
+                            height: "14px",
+                            accentColor: "var(--accent-purple)",
+                            margin: 0,
+                          }}
+                          title={isAllFilteredSelected ? "Deselect all visible duplicate groups" : "Select all visible duplicate groups"}
+                        />
+                      </th>
+                      <th style={{ width: "135px", padding: "8px 8px", textAlign: "left" }}>Status</th>
+                      <th style={{ padding: "8px 8px", textAlign: "left" }}>File Name</th>
+                      <th style={{ width: "170px", padding: "8px 8px", textAlign: "left" }}>Source Folder</th>
+                      <th style={{ width: "135px", padding: "8px 8px", textAlign: "right" }}>Format</th>
+                      <th style={{ width: "70px", padding: "8px 8px", textAlign: "right" }}>Duration</th>
+                      <th style={{ width: "80px", padding: "8px 8px", textAlign: "right" }}>Size</th>
+                      <th style={{ width: "125px", padding: "8px 8px", textAlign: "center" }}>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {displayedGroups.map((group, gIdx) => {
+                      const badge = getTierBadgeStyle(group.match_tier);
+                      const groupNumber = (pageSize === -1 ? 0 : (safePage - 1) * pageSize) + gIdx + 1;
+                      const isGroupSelected = selectedGroupIds.has(group.group_id);
+                      const groupRedundantTracks = group.tracks.filter(
+                        (t) => !t.is_winner && !excludedTrackPaths.has(t.file_path)
+                      );
+                      const groupRedundantBytes = groupRedundantTracks.reduce((sum, t) => sum + t.size_bytes, 0);
 
-                              {/* 2. Status Badge */}
-                              <td style={{ padding: "6px 8px", textAlign: "left", verticalAlign: "middle" }}>
-                                {t.is_winner ? (
+                      return (
+                        <React.Fragment key={group.group_id}>
+                          {/* Group Header Row */}
+                          <tr
+                            onClick={() => handleToggleSelectGroup(group.group_id)}
+                            style={{
+                              backgroundColor: isGroupSelected ? "rgba(139, 92, 246, 0.08)" : "var(--bg-secondary)",
+                              borderTop: gIdx > 0 ? "2px solid var(--border-color)" : "none",
+                              borderBottom: "1px solid var(--border-color)",
+                              borderLeft: isGroupSelected ? "3px solid var(--accent-purple)" : "3px solid transparent",
+                              cursor: "pointer",
+                              transition: "background-color 0.15s ease",
+                            }}
+                          >
+                            {/* Dedicated Checkbox column */}
+                            <td style={{ width: "36px", textAlign: "center", verticalAlign: "middle", padding: "6px 4px" }}>
+                              <input
+                                type="checkbox"
+                                checked={isGroupSelected}
+                                onChange={() => handleToggleSelectGroup(group.group_id)}
+                                onClick={(e) => e.stopPropagation()}
+                                style={{
+                                  cursor: "pointer",
+                                  width: "14px",
+                                  height: "14px",
+                                  accentColor: "var(--accent-purple)",
+                                  margin: 0,
+                                }}
+                                title={isGroupSelected ? "Deselect this group" : "Select this group"}
+                              />
+                            </td>
+                            {/* Remaining Columns */}
+                            <td colSpan={7} style={{ padding: "7px 10px" }}>
+                              <div
+                                style={{
+                                  display: "flex",
+                                  justifyContent: "space-between",
+                                  alignItems: "center",
+                                  gap: "8px",
+                                }}
+                              >
+                                <div style={{ display: "flex", alignItems: "center", gap: "8px", minWidth: 0 }}>
                                   <span
                                     style={{
-                                      fontSize: "0.68rem",
-                                      padding: "2px 6px",
-                                      borderRadius: "4px",
-                                      backgroundColor: "rgba(34, 197, 94, 0.16)",
-                                      color: "var(--success)",
-                                      border: "1px solid rgba(34, 197, 94, 0.4)",
-                                      fontWeight: 700,
-                                      whiteSpace: "nowrap",
-                                      display: "inline-block",
-                                    }}
-                                    title={`Kept as Superior File: ${t.winner_reason}`}
-                                  >
-                                    🏆 KEPT
-                                  </span>
-                                ) : excludedTrackPaths.has(t.file_path) ? (
-                                  <button
-                                    type="button"
-                                    onClick={() => handleToggleExcludeTrack(t.file_path)}
-                                    style={{
-                                      fontSize: "0.68rem",
-                                      padding: "2px 6px",
-                                      borderRadius: "4px",
-                                      backgroundColor: "rgba(59, 130, 246, 0.16)",
-                                      color: "#60a5fa",
-                                      border: "1px solid rgba(59, 130, 246, 0.4)",
-                                      fontWeight: 700,
-                                      cursor: "pointer",
-                                      whiteSpace: "nowrap",
-                                      display: "inline-block",
-                                    }}
-                                    title="Click to mark for deletion instead"
-                                  >
-                                    🛡️ KEPT (Manual)
-                                  </button>
-                                ) : (
-                                  <button
-                                    type="button"
-                                    onClick={() => handleToggleExcludeTrack(t.file_path)}
-                                    style={{
-                                      fontSize: "0.68rem",
-                                      padding: "2px 6px",
-                                      borderRadius: "4px",
-                                      backgroundColor: "rgba(239, 68, 68, 0.12)",
-                                      color: "var(--danger)",
-                                      border: "1px solid rgba(239, 68, 68, 0.35)",
+                                      fontSize: "0.72rem",
+                                      fontFamily: "var(--font-mono)",
+                                      color: isGroupSelected ? "var(--accent-purple)" : "var(--text-secondary)",
                                       fontWeight: 600,
-                                      cursor: "pointer",
-                                      whiteSpace: "nowrap",
-                                      display: "inline-block",
                                     }}
-                                    title={`Skipped duplicate (${t.winner_reason}) - Click to KEEP this file instead`}
                                   >
-                                    🗑️ DELETE
-                                  </button>
-                                )}
-                              </td>
-
-                              {/* 3. File Name (Hover shows full path) */}
-                              <td style={{ padding: "6px 8px", textAlign: "left", verticalAlign: "middle", minWidth: 0 }}>
-                                <div
-                                  style={{
-                                    fontSize: "0.82rem",
-                                    fontWeight: 600,
-                                    fontFamily: "var(--font-mono)",
-                                    color: t.is_winner ? "var(--text-primary)" : "var(--text-secondary)",
-                                    overflow: "hidden",
-                                    textOverflow: "ellipsis",
-                                    whiteSpace: "nowrap",
-                                    cursor: "pointer",
-                                  }}
-                                  title={t.file_path}
-                                >
-                                  {fileName}
-                                </div>
-                                {t.playlist_names.length > 0 && playlistIndex === null && (
-                                  <div
+                                    #{groupNumber}
+                                  </span>
+                                  <span
                                     style={{
-                                      fontSize: "0.68rem",
+                                      fontWeight: 700,
+                                      fontSize: "0.88rem",
+                                      color: "var(--text-primary)",
+                                      overflow: "hidden",
+                                      textOverflow: "ellipsis",
+                                      whiteSpace: "nowrap",
+                                    }}
+                                  >
+                                    {group.canonical_title}
+                                  </span>
+                                  {group.canonical_artist && (
+                                    <span
+                                      style={{
+                                        fontSize: "0.8rem",
+                                        color: "var(--text-secondary)",
+                                        overflow: "hidden",
+                                        textOverflow: "ellipsis",
+                                        whiteSpace: "nowrap",
+                                      }}
+                                    >
+                                      — {group.canonical_artist}
+                                    </span>
+                                  )}
+                                  <span
+                                    style={{
+                                      fontSize: "0.72rem",
+                                      color: "var(--text-secondary)",
+                                      whiteSpace: "nowrap",
+                                    }}
+                                  >
+                                    ({group.tracks.length} versions)
+                                  </span>
+                                </div>
+
+                                <div style={{ display: "flex", alignItems: "center", gap: "6px", flexShrink: 0 }}>
+                                  {groupRedundantTracks.length > 0 ? (
+                                    <span
+                                      style={{
+                                        fontSize: "0.7rem",
+                                        padding: "2px 7px",
+                                        borderRadius: "10px",
+                                        backgroundColor: "rgba(239, 68, 68, 0.12)",
+                                        color: "#f87171",
+                                        border: "1px solid rgba(239, 68, 68, 0.3)",
+                                        fontWeight: 600,
+                                        whiteSpace: "nowrap",
+                                      }}
+                                      title={`${groupRedundantTracks.length} redundant duplicate file(s) will be deleted if fixed`}
+                                    >
+                                      {groupRedundantTracks.length} dup{groupRedundantTracks.length > 1 ? "s" : ""} • {formatSize(groupRedundantBytes)}
+                                    </span>
+                                  ) : (
+                                    <span
+                                      style={{
+                                        fontSize: "0.7rem",
+                                        padding: "2px 7px",
+                                        borderRadius: "10px",
+                                        backgroundColor: "rgba(34, 197, 94, 0.12)",
+                                        color: "var(--success)",
+                                        border: "1px solid rgba(34, 197, 94, 0.3)",
+                                        fontWeight: 600,
+                                        whiteSpace: "nowrap",
+                                      }}
+                                    >
+                                      ✓ All Kept
+                                    </span>
+                                  )}
+                                  <span
+                                    style={{
+                                      fontSize: "0.72rem",
+                                      padding: "2px 8px",
+                                      borderRadius: "10px",
+                                      backgroundColor: badge.bg,
+                                      color: badge.color,
+                                      border: `1px solid ${badge.border}`,
+                                      fontWeight: 600,
+                                    }}
+                                  >
+                                    {badge.icon} {group.match_label} ({group.confidence}%)
+                                  </span>
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
+
+                          {/* Track Rows for Group */}
+                          {group.tracks.map((t) => {
+                            const fileName = t.file_path.split(/[/\\]/).pop() || t.title;
+                            return (
+                              <tr
+                                key={t.file_path}
+                                className={t.is_winner ? "row-winner" : undefined}
+                                data-winner={t.is_winner}
+                                style={{
+                                  borderBottom: "1px solid var(--border-color)",
+                                }}
+                              >
+                                {/* 1. Checkbox Column: Empty in track rows to prevent any eye strain */}
+                                <td style={{ width: "36px", padding: "6px 4px", textAlign: "center", verticalAlign: "middle" }}></td>
+
+                                {/* 2. Status: Visible Keep / Delete Toggle Icon Buttons */}
+                                <td style={{ width: "135px", padding: "6px 8px", textAlign: "left", verticalAlign: "middle" }}>
+                                  {t.is_winner ? (
+                                    <div
+                                      style={{
+                                        display: "inline-flex",
+                                        alignItems: "center",
+                                        gap: "4px",
+                                        padding: "2px 7px",
+                                        borderRadius: "4px",
+                                        backgroundColor: "rgba(34, 197, 94, 0.16)",
+                                        color: "var(--success)",
+                                        border: "1px solid rgba(34, 197, 94, 0.4)",
+                                        fontWeight: 700,
+                                        fontSize: "0.68rem",
+                                        whiteSpace: "nowrap",
+                                        lineHeight: 1.3,
+                                      }}
+                                      title={`Kept as Superior Winner: ${t.winner_reason}`}
+                                    >
+                                      <span>🏆</span>
+                                      <span>Winner</span>
+                                    </div>
+                                  ) : (
+                                    <div
+                                      style={{
+                                        display: "inline-flex",
+                                        alignItems: "center",
+                                        backgroundColor: "var(--bg-surface)",
+                                        border: "1px solid var(--border-color)",
+                                        borderRadius: "5px",
+                                        padding: "1px",
+                                        gap: "1px",
+                                      }}
+                                    >
+                                      {/* Keep Toggle Icon Button */}
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          if (!excludedTrackPaths.has(t.file_path)) {
+                                            handleToggleExcludeTrack(t.file_path);
+                                          }
+                                        }}
+                                        style={{
+                                          display: "inline-flex",
+                                          alignItems: "center",
+                                          gap: "3px",
+                                          padding: "2px 6px",
+                                          fontSize: "0.68rem",
+                                          fontWeight: excludedTrackPaths.has(t.file_path) ? 700 : 500,
+                                          borderRadius: "3px",
+                                          border: "none",
+                                          backgroundColor: excludedTrackPaths.has(t.file_path)
+                                            ? "rgba(59, 130, 246, 0.22)"
+                                            : "transparent",
+                                          color: excludedTrackPaths.has(t.file_path) ? "#60a5fa" : "var(--text-muted)",
+                                          cursor: excludedTrackPaths.has(t.file_path) ? "default" : "pointer",
+                                          transition: "all 0.15s ease",
+                                          lineHeight: 1.2,
+                                        }}
+                                        title={
+                                          excludedTrackPaths.has(t.file_path)
+                                            ? "Currently marked as Kept (Preserved)"
+                                            : "Click to Keep and preserve this file"
+                                        }
+                                      >
+                                        <span style={{ fontSize: "0.7rem" }}>🛡️</span>
+                                        <span>Keep</span>
+                                      </button>
+
+                                      {/* Delete Toggle Icon Button */}
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          if (excludedTrackPaths.has(t.file_path)) {
+                                            handleToggleExcludeTrack(t.file_path);
+                                          }
+                                        }}
+                                        style={{
+                                          display: "inline-flex",
+                                          alignItems: "center",
+                                          gap: "3px",
+                                          padding: "2px 6px",
+                                          fontSize: "0.68rem",
+                                          fontWeight: !excludedTrackPaths.has(t.file_path) ? 700 : 500,
+                                          borderRadius: "3px",
+                                          border: "none",
+                                          backgroundColor: !excludedTrackPaths.has(t.file_path)
+                                            ? "rgba(239, 68, 68, 0.18)"
+                                            : "transparent",
+                                          color: !excludedTrackPaths.has(t.file_path) ? "#f87171" : "var(--text-muted)",
+                                          cursor: !excludedTrackPaths.has(t.file_path) ? "default" : "pointer",
+                                          transition: "all 0.15s ease",
+                                          lineHeight: 1.2,
+                                        }}
+                                        title={
+                                          !excludedTrackPaths.has(t.file_path)
+                                            ? "Currently marked for Deletion (Duplicate copy)"
+                                            : "Click to mark for deletion when fixed"
+                                        }
+                                      >
+                                        <span style={{ fontSize: "0.7rem" }}>🗑️</span>
+                                        <span>Delete</span>
+                                      </button>
+                                    </div>
+                                  )}
+                                </td>
+
+                                {/* 3. File Name (with subtle play button just before filename) */}
+                                <td style={{ padding: "6px 8px", textAlign: "left", verticalAlign: "middle", minWidth: 0, overflow: "hidden" }}>
+                                  <div style={{ display: "flex", alignItems: "center", gap: "7px", minWidth: 0 }}>
+                                    {/* Subtle Play Button */}
+                                    <button
+                                      type="button"
+                                      onClick={() => handlePlayGroupTrack(group, t)}
+                                      style={{
+                                        width: "20px",
+                                        height: "20px",
+                                        padding: 0,
+                                        borderRadius: "4px",
+                                        display: "inline-flex",
+                                        alignItems: "center",
+                                        justifyContent: "center",
+                                        backgroundColor: "var(--bg-tertiary)",
+                                        color: "var(--text-secondary)",
+                                        border: "1px solid var(--border-color)",
+                                        cursor: "pointer",
+                                        flexShrink: 0,
+                                        transition: "all 0.15s ease",
+                                      }}
+                                      onMouseEnter={(e) => {
+                                        e.currentTarget.style.color = "var(--accent-purple)";
+                                        e.currentTarget.style.borderColor = "var(--accent-purple)";
+                                        e.currentTarget.style.backgroundColor = "var(--accent-purple-glow)";
+                                      }}
+                                      onMouseLeave={(e) => {
+                                        e.currentTarget.style.color = "var(--text-secondary)";
+                                        e.currentTarget.style.borderColor = "var(--border-color)";
+                                        e.currentTarget.style.backgroundColor = "var(--bg-tertiary)";
+                                      }}
+                                      title={`Play "${fileName}"`}
+                                    >
+                                      <svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor">
+                                        <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                                      </svg>
+                                    </button>
+
+                                    <div style={{ minWidth: 0, overflow: "hidden" }}>
+                                      <div
+                                        style={{
+                                          fontSize: "0.82rem",
+                                          fontWeight: 600,
+                                          fontFamily: "var(--font-mono)",
+                                          color: t.is_winner ? "var(--text-primary)" : "var(--text-secondary)",
+                                          overflow: "hidden",
+                                          textOverflow: "ellipsis",
+                                          whiteSpace: "nowrap",
+                                        }}
+                                        title={t.file_path}
+                                      >
+                                        {fileName}
+                                      </div>
+                                      {t.playlist_names.length > 0 && playlistIndex === null && (
+                                        <div
+                                          style={{
+                                            fontSize: "0.68rem",
+                                            color: "var(--text-secondary)",
+                                            overflow: "hidden",
+                                            textOverflow: "ellipsis",
+                                            whiteSpace: "nowrap",
+                                            marginTop: "1px",
+                                          }}
+                                          title={t.playlist_names.join(", ")}
+                                        >
+                                          🎶 {t.playlist_names.join(", ")}
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+                                </td>
+
+                                {/* 4. Source Folder */}
+                                <td style={{ padding: "6px 8px", textAlign: "left", verticalAlign: "middle", overflow: "hidden" }}>
+                                  <span
+                                    style={{
+                                      fontSize: "0.72rem",
                                       color: "var(--text-secondary)",
                                       overflow: "hidden",
                                       textOverflow: "ellipsis",
                                       whiteSpace: "nowrap",
-                                      marginTop: "1px",
+                                      display: "block",
                                     }}
-                                    title={t.playlist_names.join(", ")}
+                                    title={`Source folder: ${t.source_folder}`}
                                   >
-                                    🎶 {t.playlist_names.join(", ")}
-                                  </div>
-                                )}
-                              </td>
+                                    📁 {t.source_folder}
+                                  </span>
+                                </td>
 
-                              {/* 4. Source Folder */}
-                              <td style={{ padding: "6px 8px", textAlign: "left", verticalAlign: "middle" }}>
-                                <span
-                                  style={{
-                                    fontSize: "0.72rem",
-                                    color: "var(--text-secondary)",
-                                    overflow: "hidden",
-                                    textOverflow: "ellipsis",
-                                    whiteSpace: "nowrap",
-                                    display: "block",
-                                  }}
-                                  title={`Source folder: ${t.source_folder}`}
-                                >
-                                  📁 {t.source_folder}
-                                </span>
-                              </td>
-
-                              {/* 5. Format & Bitrate (with optional ad offset) */}
-                              <td style={{ padding: "6px 8px", textAlign: "right", verticalAlign: "middle", whiteSpace: "nowrap" }}>
-                                {t.offset_secs !== undefined && t.offset_secs !== null && Math.abs(t.offset_secs) >= 1 && (
+                                {/* 5. Format & Bitrate */}
+                                <td style={{ padding: "6px 8px", textAlign: "right", verticalAlign: "middle", whiteSpace: "nowrap" }}>
+                                  {t.offset_secs !== undefined && t.offset_secs !== null && Math.abs(t.offset_secs) >= 1 && (
+                                    <span
+                                      style={{
+                                        fontSize: "0.68rem",
+                                        padding: "1px 5px",
+                                        borderRadius: "4px",
+                                        backgroundColor: "rgba(245, 158, 11, 0.16)",
+                                        color: "var(--warning)",
+                                        border: "1px solid rgba(245, 158, 11, 0.35)",
+                                        fontFamily: "var(--font-mono)",
+                                        marginRight: "4px",
+                                      }}
+                                      title="Duration difference compared to kept version (e.g. extra intro/outro ad)"
+                                    >
+                                      {t.offset_secs > 0 ? `+${t.offset_secs.toFixed(0)}s` : `${t.offset_secs.toFixed(0)}s`}
+                                    </span>
+                                  )}
                                   <span
                                     style={{
-                                      fontSize: "0.68rem",
-                                      padding: "1px 5px",
+                                      fontSize: "0.7rem",
+                                      padding: "2px 6px",
                                       borderRadius: "4px",
-                                      backgroundColor: "rgba(245, 158, 11, 0.16)",
-                                      color: "var(--warning)",
-                                      border: "1px solid rgba(245, 158, 11, 0.35)",
+                                      backgroundColor: "var(--bg-primary)",
+                                      border: "1px solid var(--border-color)",
                                       fontFamily: "var(--font-mono)",
-                                      marginRight: "4px",
+                                      color: "var(--text-primary)",
                                     }}
-                                    title="Duration difference compared to kept version (e.g. extra intro/outro ad)"
+                                    title={`Format: ${t.format_ext} | Bitrate: ${t.bitrate_kbps} kbps`}
                                   >
-                                    {t.offset_secs > 0 ? `+${t.offset_secs.toFixed(0)}s` : `${t.offset_secs.toFixed(0)}s`}
+                                    {t.format_ext} {t.bitrate_kbps > 0 ? `• ${t.bitrate_kbps}k` : ""}
                                   </span>
-                                )}
-                                <span
+                                </td>
+
+                                {/* 6. Duration */}
+                                <td
                                   style={{
-                                    fontSize: "0.7rem",
-                                    padding: "2px 6px",
-                                    borderRadius: "4px",
-                                    backgroundColor: "var(--bg-primary)",
-                                    border: "1px solid var(--border-color)",
+                                    padding: "6px 8px",
+                                    textAlign: "right",
+                                    verticalAlign: "middle",
+                                    fontSize: "0.74rem",
                                     fontFamily: "var(--font-mono)",
-                                    color: "var(--text-primary)",
+                                    color: "var(--text-secondary)",
+                                    whiteSpace: "nowrap",
                                   }}
-                                  title={`Format: ${t.format_ext} | Bitrate: ${t.bitrate_kbps} kbps`}
                                 >
-                                  {t.format_ext} {t.bitrate_kbps > 0 ? `• ${t.bitrate_kbps}k` : ""}
-                                </span>
-                              </td>
+                                  {formatDuration(t.duration)}
+                                </td>
 
-                              {/* 6. Duration */}
-                              <td
-                                style={{
-                                  padding: "6px 8px",
-                                  textAlign: "right",
-                                  verticalAlign: "middle",
-                                  fontSize: "0.74rem",
-                                  fontFamily: "var(--font-mono)",
-                                  color: "var(--text-secondary)",
-                                  whiteSpace: "nowrap",
-                                }}
-                              >
-                                {formatDuration(t.duration)}
-                              </td>
+                                {/* 7. Size */}
+                                <td
+                                  style={{
+                                    padding: "6px 8px",
+                                    textAlign: "right",
+                                    verticalAlign: "middle",
+                                    fontSize: "0.72rem",
+                                    fontFamily: "var(--font-mono)",
+                                    color: "var(--text-secondary)",
+                                    whiteSpace: "nowrap",
+                                  }}
+                                >
+                                  {formatSize(t.size_bytes)}
+                                </td>
 
-                              {/* 7. Size */}
-                              <td
-                                style={{
-                                  padding: "6px 8px",
-                                  textAlign: "right",
-                                  verticalAlign: "middle",
-                                  fontSize: "0.72rem",
-                                  fontFamily: "var(--font-mono)",
-                                  color: "var(--text-secondary)",
-                                  whiteSpace: "nowrap",
-                                }}
-                              >
-                                {formatSize(t.size_bytes)}
-                              </td>
+                                {/* 8. Actions (Vertically aligned in 4 fixed button slots) */}
+                                <td style={{ padding: "6px 8px", textAlign: "center", verticalAlign: "middle", whiteSpace: "nowrap" }}>
+                                  <div style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
+                                    {/* Slot 1: Make Winner / Current Winner indicator */}
+                                    {!t.is_winner ? (
+                                      <button
+                                        type="button"
+                                        className="btn btn-secondary"
+                                        onClick={() => handleMakeWinner(group, t)}
+                                        disabled={isDeleting}
+                                        style={{
+                                          width: "24px",
+                                          height: "24px",
+                                          padding: 0,
+                                          display: "inline-flex",
+                                          alignItems: "center",
+                                          justifyContent: "center",
+                                          borderRadius: "4px",
+                                          fontSize: "0.8rem",
+                                        }}
+                                        title={`Set as Kept Winner: Prefer "${fileName}" as the winner for this duplicate group`}
+                                      >
+                                        👑
+                                      </button>
+                                    ) : (
+                                      <div
+                                        style={{
+                                          width: "24px",
+                                          height: "24px",
+                                          display: "inline-flex",
+                                          alignItems: "center",
+                                          justifyContent: "center",
+                                          fontSize: "0.8rem",
+                                          opacity: 0.85,
+                                        }}
+                                        title="Current Kept Winner"
+                                      >
+                                        👑
+                                      </div>
+                                    )}
 
-                              {/* 8. Actions: Make Winner, Detach, Keep this & delete others, Reveal in Finder */}
-                              <td style={{ padding: "6px 8px", textAlign: "center", verticalAlign: "middle", whiteSpace: "nowrap" }}>
-                                <div style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
-                                  {!t.is_winner && (
+                                    {/* Slot 2: Detach */}
                                     <button
                                       type="button"
                                       className="btn btn-secondary"
-                                      onClick={() => handleMakeWinner(group, t)}
+                                      onClick={() => handleDetachTrack(group, t)}
                                       disabled={isDeleting}
                                       style={{
                                         width: "24px",
@@ -1641,93 +2890,81 @@ export const DuplicateAnalysisModal: React.FC<DuplicateAnalysisModalProps> = ({
                                         alignItems: "center",
                                         justifyContent: "center",
                                         borderRadius: "4px",
-                                        fontSize: "0.8rem",
+                                        color: "var(--accent-purple)",
                                       }}
-                                      title={`Set as Kept Winner: Prefer "${fileName}" as the winner for this duplicate group`}
+                                      title={`✂️ Detach from Group: Disconnect "${fileName}" so it is treated as a separate unique song and preserved`}
                                     >
-                                      👑
+                                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                                        <circle cx="6" cy="6" r="3" />
+                                        <circle cx="6" cy="18" r="3" />
+                                        <line x1="20" y1="4" x2="8.12" y2="15.88" />
+                                        <line x1="14.47" y1="14.48" x2="20" y2="20" />
+                                        <line x1="8.12" y1="8.12" x2="12" y2="12" />
+                                      </svg>
                                     </button>
-                                  )}
-                                  <button
-                                    type="button"
-                                    className="btn btn-secondary"
-                                    onClick={() => handleDetachTrack(group, t)}
-                                    disabled={isDeleting}
-                                    style={{
-                                      width: "24px",
-                                      height: "24px",
-                                      padding: 0,
-                                      display: "inline-flex",
-                                      alignItems: "center",
-                                      justifyContent: "center",
-                                      borderRadius: "4px",
-                                      color: "var(--accent-purple)",
-                                    }}
-                                    title={`✂️ Detach from Group: Disconnect "${fileName}" so it is treated as a separate unique song and preserved`}
-                                  >
-                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                                      <circle cx="6" cy="6" r="3" />
-                                      <circle cx="6" cy="18" r="3" />
-                                      <line x1="20" y1="4" x2="8.12" y2="15.88" />
-                                      <line x1="14.47" y1="14.48" x2="20" y2="20" />
-                                      <line x1="8.12" y1="8.12" x2="12" y2="12" />
-                                    </svg>
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="btn btn-secondary"
-                                    onClick={() => handleKeepThisAndDeleteOthers(group, t)}
-                                    disabled={isDeleting || group.tracks.length <= 1}
-                                    style={{
-                                      width: "24px",
-                                      height: "24px",
-                                      padding: 0,
-                                      display: "inline-flex",
-                                      alignItems: "center",
-                                      justifyContent: "center",
-                                      borderRadius: "4px",
-                                      backgroundColor: t.is_winner ? "rgba(34, 197, 94, 0.18)" : "rgba(139, 92, 246, 0.12)",
-                                      borderColor: t.is_winner ? "rgba(34, 197, 94, 0.45)" : "rgba(139, 92, 246, 0.35)",
-                                      color: t.is_winner ? "var(--success)" : "var(--accent-purple)",
-                                      cursor: isDeleting ? "not-allowed" : "pointer",
-                                    }}
-                                    title={`Keep this, and delete others: Keep "${fileName}" and permanently delete other duplicate copies from disk`}
-                                  >
-                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                                      <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
-                                      <polyline points="22 4 12 14.01 9 11.01" />
-                                    </svg>
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="btn btn-secondary"
-                                    onClick={() => handleRevealInFinder(t.file_path)}
-                                    style={{
-                                      width: "24px",
-                                      height: "24px",
-                                      padding: 0,
-                                      display: "inline-flex",
-                                      alignItems: "center",
-                                      justifyContent: "center",
-                                      borderRadius: "4px",
-                                    }}
-                                    title={`Reveal in Finder: ${t.file_path}`}
-                                  >
-                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                                      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
-                                    </svg>
-                                  </button>
-                                </div>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              );
-            })
+
+                                    {/* Slot 3: Keep this & delete others */}
+                                    <button
+                                      type="button"
+                                      className="btn btn-secondary"
+                                      onClick={() => handleKeepThisAndDeleteOthers(group, t)}
+                                      disabled={isDeleting || group.tracks.length <= 1}
+                                      style={{
+                                        width: "24px",
+                                        height: "24px",
+                                        padding: 0,
+                                        display: "inline-flex",
+                                        alignItems: "center",
+                                        justifyContent: "center",
+                                        borderRadius: "4px",
+                                        backgroundColor: t.is_winner ? "rgba(34, 197, 94, 0.18)" : "rgba(139, 92, 246, 0.12)",
+                                        borderColor: t.is_winner ? "rgba(34, 197, 94, 0.45)" : "rgba(139, 92, 246, 0.35)",
+                                        color: t.is_winner ? "var(--success)" : "var(--accent-purple)",
+                                        cursor: isDeleting ? "not-allowed" : "pointer",
+                                      }}
+                                      title={`Keep this, and delete others: Keep "${fileName}" and permanently delete other duplicate copies from disk`}
+                                    >
+                                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                        <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+                                        <polyline points="22 4 12 14.01 9 11.01" />
+                                      </svg>
+                                    </button>
+
+                                    {/* Slot 4: Reveal in Finder */}
+                                    <button
+                                      type="button"
+                                      className="btn btn-secondary"
+                                      onClick={() => handleRevealInFinder(t.file_path)}
+                                      style={{
+                                        width: "24px",
+                                        height: "24px",
+                                        padding: 0,
+                                        display: "inline-flex",
+                                        alignItems: "center",
+                                        justifyContent: "center",
+                                        borderRadius: "4px",
+                                      }}
+                                      title={`Reveal in Finder: ${t.file_path}`}
+                                    >
+                                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                                        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                                      </svg>
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </React.Fragment>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Bottom Pagination Bar */}
+              {renderPaginationBar("bottom")}
+            </div>
           )}
         </div>
       </div>

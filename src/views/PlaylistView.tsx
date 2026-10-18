@@ -341,6 +341,11 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
           return newItem;
         });
       });
+      // Also refresh active playlist preview and buckets if a playlist is selected
+      if (selectedPlaylistIndexRef.current !== null) {
+        invalidateCacheFor(selectedPlaylistIndexRef.current);
+        loadPreview(true, undefined, activeCfg, true);
+      }
     } catch (e) {
       console.warn("Failed to fetch playlist summaries:", e);
     } finally {
@@ -425,6 +430,13 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     setSelectedBucketKey("all");
     if (activePlaylist && selectedPlaylistIndex !== null) {
       loadPreview(false, "all");
+      // If active playlist is configured with year split and buckets are not yet prepared, prepare them immediately from config
+      if (activePlaylist.year_split?.enabled) {
+        const summary = summaries.find((s) => s.index === selectedPlaylistIndex);
+        if (!summary || summary.buckets.length === 0) {
+          fetchSinglePlaylistSummary(selectedPlaylistIndex);
+        }
+      }
     } else {
       setPreviews([]);
     }

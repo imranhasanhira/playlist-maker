@@ -107,6 +107,16 @@ export interface ExportOrphanItem {
   is_playlist: boolean;
 }
 
+export interface ExportDuplicateOrphanItem {
+  file_path: string;
+  relative_path: string;
+  size_bytes: number;
+  matched_file_path: string;
+  matched_dest_relative_path: string;
+  match_tier: string;
+  match_reason: string;
+}
+
 export interface ExportPlaylistItem {
   name: string;
   filename: string;
@@ -137,6 +147,7 @@ export interface ExportDiffReport {
   up_to_date_files: ExportTrackItem[];
   renamed_files?: ExportTrackItem[];
   orphan_files: ExportOrphanItem[];
+  duplicate_orphans?: ExportDuplicateOrphanItem[];
   playlists: ExportPlaylistItem[];
   warnings?: ExportWarningItem[];
   total_bytes_to_copy: number;
@@ -144,6 +155,7 @@ export interface ExportDiffReport {
   total_bytes_up_to_date: number;
   total_bytes_renamed?: number;
   total_bytes_orphans: number;
+  total_bytes_duplicate_orphans?: number;
 }
 
 export interface ExportProgressPayload {
@@ -341,11 +353,18 @@ export interface DuplicateAnalysisProgressPayload {
   speed: number;
 }
 
+export interface DuplicateCleanupGroup {
+  kept_file_path?: string | null;
+  files_to_delete: string[];
+  youtube_id?: string | null;
+}
+
 export interface DeleteDuplicatesResult {
   deleted_count: number;
   failed_count: number;
   freed_bytes: number;
   errors: string[];
+  tags_transferred_count?: number;
 }
 
 export interface Mp3UpgradeCandidate {

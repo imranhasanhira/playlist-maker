@@ -55,6 +55,17 @@ pub struct ExportOrphanItem {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ExportDuplicateOrphanItem {
+    pub file_path: String,
+    pub relative_path: String,
+    pub size_bytes: u64,
+    pub matched_file_path: String,
+    pub matched_dest_relative_path: String,
+    pub match_tier: String,
+    pub match_reason: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ExportPlaylistItem {
     pub name: String,
     pub filename: String,
@@ -79,6 +90,7 @@ pub struct ExportDiffReport {
     pub up_to_date_files: Vec<ExportTrackItem>,
     pub renamed_files: Vec<ExportTrackItem>,
     pub orphan_files: Vec<ExportOrphanItem>,
+    pub duplicate_orphans: Vec<ExportDuplicateOrphanItem>,
     pub playlists: Vec<ExportPlaylistItem>,
     pub warnings: Vec<ExportWarningItem>,
     pub total_bytes_to_copy: u64,
@@ -86,6 +98,7 @@ pub struct ExportDiffReport {
     pub total_bytes_up_to_date: u64,
     pub total_bytes_renamed: u64,
     pub total_bytes_orphans: u64,
+    pub total_bytes_duplicate_orphans: u64,
 }
 
 use crate::utils::{canonical_path_str, get_file_mtime_and_size};
@@ -450,9 +463,140 @@ fn is_os_system_junk(filename: &str) -> bool {
         }
     }
 
-    // Truly Orphaned audio tracks (not matched to any renamed track)
-    for (idx, (dest_path, rel_clean, size)) in candidate_dest_orphans.into_iter().enumerate() {
-        if !matched_orphan_indices.contains(&idx) {
+    // Pass 3: Cross-check candidate destination orphans against all expected library tracks
+    let mut duplicate_orphans: Vec<ExportDuplicateOrphanItem> = Vec::new();
+    let mut total_bytes_duplicate_orphans: u64 = 0;
+
+    let unmatched_dest_orphans: Vec<(std::path::PathBuf, String, u64)> = candidate_dest_orphans
+        .into_iter()
+        .enumerate()
+        .filter(|(idx, _)| !matched_orphan_indices.contains(idx))
+        .map(|(_, item)| item)
+        .collect();
+
+    if !unmatched_dest_orphans.is_empty() && !required_tracks.is_empty() {
+        // Collect fingerprints for all expected export tracks
+        // Each entry: (dest_rel_path, src_abs_path, TrackFingerprintRecord)
+        let expected_records: Vec<(String, String, crate::dedup::TrackFingerprintRecord)> = required_tracks
+            .iter()
+            .map(|(rel_path, (src_abs_path, _track))| {
+                let p = Path::new(src_abs_path);
+                let (mtime, size) = get_file_mtime_and_size(p).unwrap_or((0, 0));
+                let rec = crate::dedup::get_or_compute_fingerprint(p, mtime, size, false);
+                (format!("music/{}", rel_path), src_abs_path.clone(), rec)
+            })
+            .collect();
+
+        // Build fast hash & stem indexes for expected tracks
+        let mut expected_audio_hash_map: HashMap<String, usize> = HashMap::new();
+        let mut expected_yt_map: HashMap<String, usize> = HashMap::new();
+        let mut expected_stem_map: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut expected_title_map: HashMap<String, Vec<usize>> = HashMap::new();
+
+        for (idx, (_dest_rel, _src_abs, rec)) in expected_records.iter().enumerate() {
+            if rec.size_bytes > 1024 && !rec.audio_hash.is_empty() {
+                expected_audio_hash_map.entry(rec.audio_hash.clone()).or_insert(idx);
+            }
+            if let Some(ref ytid) = rec.youtube_id {
+                if !ytid.is_empty() {
+                    expected_yt_map.entry(ytid.clone()).or_insert(idx);
+                }
+            }
+            if !rec.norm_stem.is_empty() {
+                expected_stem_map.entry(rec.norm_stem.clone()).or_default().push(idx);
+            }
+            if !rec.norm_title.is_empty() {
+                expected_title_map.entry(rec.norm_title.clone()).or_default().push(idx);
+            }
+        }
+
+        for (dest_path, rel_clean, size) in unmatched_dest_orphans {
+            let (mtime, _) = get_file_mtime_and_size(&dest_path).unwrap_or((0, size));
+            let orphan_rec = crate::dedup::get_or_compute_fingerprint(&dest_path, mtime, size, false);
+
+            let mut matched_expected: Option<(usize, crate::dedup::MatchEdge)> = None;
+
+            // Tier 1A: Exact audio stream hash match
+            if orphan_rec.size_bytes > 1024 && !orphan_rec.audio_hash.is_empty() {
+                if let Some(&exp_idx) = expected_audio_hash_map.get(&orphan_rec.audio_hash) {
+                    matched_expected = Some((exp_idx, crate::dedup::MatchEdge {
+                        tier: "exact_hash",
+                        label: "Exact Audio Stream Match".to_string(),
+                        confidence: 100,
+                        offset_secs: Some(0.0),
+                    }));
+                }
+            }
+
+            // Tier 1B: YouTube ID match
+            if matched_expected.is_none() {
+                if let Some(ref ytid) = orphan_rec.youtube_id {
+                    if let Some(&exp_idx) = expected_yt_map.get(ytid) {
+                        let diff = (orphan_rec.duration_secs as f32) - (expected_records[exp_idx].2.duration_secs as f32);
+                        matched_expected = Some((exp_idx, crate::dedup::MatchEdge {
+                            tier: "youtube_id",
+                            label: format!("Same YouTube ID ({})", ytid),
+                            confidence: 99,
+                            offset_secs: if diff.abs() >= 1.0 { Some(-diff) } else { None },
+                        }));
+                    }
+                }
+            }
+
+            // Tier 2: Check matching normalized stem or title candidates
+            if matched_expected.is_none() {
+                let candidate_indices: Vec<usize> = expected_stem_map.get(&orphan_rec.norm_stem)
+                    .into_iter()
+                    .flatten()
+                    .chain(expected_title_map.get(&orphan_rec.norm_title).into_iter().flatten())
+                    .copied()
+                    .collect();
+
+                for exp_idx in candidate_indices {
+                    if let Some(edge) = crate::dedup::check_pair_duplicate(&orphan_rec, &expected_records[exp_idx].2, 60) {
+                        matched_expected = Some((exp_idx, edge));
+                        break;
+                    }
+                }
+            }
+
+            // Tier 2 fuzzy fallback: check expected tracks within duration window (+/- 20s)
+            if matched_expected.is_none() && orphan_rec.duration_secs > 15 {
+                for (exp_idx, (_dest_rel, _src_abs, exp_rec)) in expected_records.iter().enumerate() {
+                    let dur_diff = (orphan_rec.duration_secs as i64 - exp_rec.duration_secs as i64).unsigned_abs() as u32;
+                    if dur_diff <= 20 {
+                        if let Some(edge) = crate::dedup::check_pair_duplicate(&orphan_rec, exp_rec, 60) {
+                            matched_expected = Some((exp_idx, edge));
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if let Some((exp_idx, edge)) = matched_expected {
+                let (exp_dest_rel, exp_src_abs, _) = &expected_records[exp_idx];
+                total_bytes_duplicate_orphans += size;
+                duplicate_orphans.push(ExportDuplicateOrphanItem {
+                    file_path: dest_path.to_string_lossy().to_string(),
+                    relative_path: format!("music/{}", rel_clean),
+                    size_bytes: size,
+                    matched_file_path: exp_src_abs.clone(),
+                    matched_dest_relative_path: exp_dest_rel.clone(),
+                    match_tier: edge.tier.to_string(),
+                    match_reason: edge.label,
+                });
+            } else {
+                total_bytes_orphans += size;
+                orphan_files.push(ExportOrphanItem {
+                    file_path: dest_path.to_string_lossy().to_string(),
+                    relative_path: format!("music/{}", rel_clean),
+                    size_bytes: size,
+                    is_playlist: false,
+                });
+            }
+        }
+    } else {
+        for (dest_path, rel_clean, size) in unmatched_dest_orphans {
             total_bytes_orphans += size;
             orphan_files.push(ExportOrphanItem {
                 file_path: dest_path.to_string_lossy().to_string(),
@@ -590,6 +734,7 @@ fn is_os_system_junk(filename: &str) -> bool {
     up_to_date_files.sort_by(|a, b| a.relative_path.to_lowercase().cmp(&b.relative_path.to_lowercase()));
     renamed_files.sort_by(|a, b| a.relative_path.to_lowercase().cmp(&b.relative_path.to_lowercase()));
     orphan_files.sort_by(|a, b| a.relative_path.to_lowercase().cmp(&b.relative_path.to_lowercase()));
+    duplicate_orphans.sort_by(|a, b| a.relative_path.to_lowercase().cmp(&b.relative_path.to_lowercase()));
     playlist_items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
     Ok(ExportDiffReport {
@@ -599,6 +744,7 @@ fn is_os_system_junk(filename: &str) -> bool {
         up_to_date_files,
         renamed_files,
         orphan_files,
+        duplicate_orphans,
         playlists: playlist_items,
         warnings,
         total_bytes_to_copy,
@@ -606,6 +752,7 @@ fn is_os_system_junk(filename: &str) -> bool {
         total_bytes_up_to_date,
         total_bytes_renamed,
         total_bytes_orphans,
+        total_bytes_duplicate_orphans,
     })
 }
 
@@ -1002,19 +1149,30 @@ pub async fn execute_export(
         }
     }
 
-    // 3. Delete Orphans if requested
-    if delete_orphans && !report.orphan_files.is_empty() {
-        push_log(format!("Cleaning up {} orphan files from destination...", report.orphan_files.len()), &mut logs);
-        for orphan in &report.orphan_files {
-            let orphan_path = Path::new(&orphan.file_path);
-            if orphan_path.exists() {
-                if orphan_path.is_dir() {
-                    if fs::remove_dir_all(orphan_path).is_ok() {
-                        push_log(format!("Removed orphan folder: {}", orphan.relative_path), &mut logs);
+    // 3. Delete Orphans and Duplicate Orphans if requested
+    if delete_orphans {
+        let total_orphans = report.orphan_files.len() + report.duplicate_orphans.len();
+        if total_orphans > 0 {
+            push_log(format!("Cleaning up {} orphan and duplicate orphan files from destination...", total_orphans), &mut logs);
+            for orphan in &report.orphan_files {
+                let orphan_path = Path::new(&orphan.file_path);
+                if orphan_path.exists() {
+                    if orphan_path.is_dir() {
+                        if fs::remove_dir_all(orphan_path).is_ok() {
+                            push_log(format!("Removed orphan folder: {}", orphan.relative_path), &mut logs);
+                        }
+                    } else {
+                        if fs::remove_file(orphan_path).is_ok() {
+                            push_log(format!("Removed orphan file: {}", orphan.relative_path), &mut logs);
+                        }
                     }
-                } else {
-                    if fs::remove_file(orphan_path).is_ok() {
-                        push_log(format!("Removed orphan file: {}", orphan.relative_path), &mut logs);
+                }
+            }
+            for dup in &report.duplicate_orphans {
+                let dup_path = Path::new(&dup.file_path);
+                if dup_path.exists() {
+                    if fs::remove_file(dup_path).is_ok() {
+                        push_log(format!("Removed duplicate orphan: {}", dup.relative_path), &mut logs);
                     }
                 }
             }
@@ -1076,6 +1234,30 @@ mod tests {
         assert_eq!(src_a, dest_a);
 
         // Clean up
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_duplicate_orphan_metadata_matching() {
+        let temp_dir = std::env::temp_dir().join("playlist_maker_test_dup_orphan");
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let lib_track = temp_dir.join("Polli Geeti - Shona Bondho.mp3");
+        let orphan_track = temp_dir.join("Polli Geeti - Sona Bondhe.mp3");
+
+        let payload = vec![0x33u8; 4096];
+        fs::write(&lib_track, &payload).unwrap();
+        fs::write(&orphan_track, &payload).unwrap();
+
+        let (lib_mtime, lib_size) = get_file_mtime_and_size(&lib_track).unwrap();
+        let (orphan_mtime, orphan_size) = get_file_mtime_and_size(&orphan_track).unwrap();
+
+        let rec_lib = crate::dedup::get_or_compute_fingerprint(&lib_track, lib_mtime, lib_size, false);
+        let rec_orphan = crate::dedup::get_or_compute_fingerprint(&orphan_track, orphan_mtime, orphan_size, false);
+
+        let match_edge = crate::dedup::check_pair_duplicate(&rec_lib, &rec_orphan, 60);
+        assert!(match_edge.is_some(), "Expected duplicate match between Polli Geeti variants");
+
         let _ = fs::remove_dir_all(&temp_dir);
     }
 }
