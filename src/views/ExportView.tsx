@@ -5,6 +5,7 @@ import {
   ExportStatus,
   ExportTrackItem,
   ExportOrphanItem,
+  ExportDuplicateOrphanItem,
   ExportPlaylistItem,
   ExportDiffReport,
 } from "../types";
@@ -12,7 +13,7 @@ import { formatSize, formatSpeed, formatEta } from "../utils/formatters";
 import { useDebounce } from "../hooks/useDebounce";
 import { ConfirmModal } from "../components/common/ConfirmModal";
 
-export type { ExportStatus, ExportTrackItem, ExportOrphanItem, ExportPlaylistItem, ExportDiffReport };
+export type { ExportStatus, ExportTrackItem, ExportOrphanItem, ExportDuplicateOrphanItem, ExportPlaylistItem, ExportDiffReport };
 
 type ExportViewProps = {
   configPath: string;
@@ -51,7 +52,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [exportLogs, setExportLogs] = useState<string[]>([]);
   const [showLogsModal, setShowLogsModal] = useState<boolean>(false);
-  const [activeTab, setActiveTab] = useState<"new" | "updated" | "renamed" | "uptodate" | "orphans" | "warnings">("new");
+  const [activeTab, setActiveTab] = useState<"new" | "updated" | "renamed" | "uptodate" | "orphans" | "duplicate_orphans" | "warnings">("new");
   const [inspectDiffItem, setInspectDiffItem] = useState<ExportTrackItem | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>("");
   const debouncedSearchQuery = useDebounce(searchQuery, 250);
@@ -70,11 +71,12 @@ export const ExportView: React.FC<ExportViewProps> = ({
   };
 
   const filteredItems = useMemo(() => {
-    if (!diffReport) return { newFiles: [], updatedFiles: [], renamedFiles: [], upToDateFiles: [], orphanFiles: [], warningItems: [] };
+    if (!diffReport) return { newFiles: [], updatedFiles: [], renamedFiles: [], upToDateFiles: [], orphanFiles: [], duplicateOrphans: [], warningItems: [] };
     const q = debouncedSearchQuery.trim().toLowerCase();
     const warnings = diffReport.warnings || [];
     const renamed = diffReport.renamed_files || [];
     const updated = diffReport.updated_files || [];
+    const duplicateOrphans = diffReport.duplicate_orphans || [];
     
     if (!q) {
       return {
@@ -83,6 +85,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
         renamedFiles: renamed,
         upToDateFiles: diffReport.up_to_date_files,
         orphanFiles: diffReport.orphan_files,
+        duplicateOrphans,
         warningItems: warnings,
       };
     }
@@ -102,6 +105,9 @@ export const ExportView: React.FC<ExportViewProps> = ({
       ),
       orphanFiles: diffReport.orphan_files.filter(
         (item) => item.relative_path.toLowerCase().includes(q)
+      ),
+      duplicateOrphans: duplicateOrphans.filter(
+        (item) => item.relative_path.toLowerCase().includes(q) || item.matched_dest_relative_path.toLowerCase().includes(q) || item.match_reason.toLowerCase().includes(q)
       ),
       warningItems: warnings.filter(
         (item) => item.target_path.toLowerCase().includes(q) || item.message.toLowerCase().includes(q)
@@ -148,19 +154,19 @@ export const ExportView: React.FC<ExportViewProps> = ({
   };
 
   const sortedItems = useMemo(() => {
-    const sortList = <T extends { status?: string; is_playlist?: boolean; relative_path: string; dest_relative_path?: string; size_bytes?: number }>(items: T[]): T[] => {
+    const sortList = <T extends { status?: string; match_tier?: string; is_playlist?: boolean; relative_path: string; dest_relative_path?: string; matched_dest_relative_path?: string; size_bytes?: number }>(items: T[]): T[] => {
       if (!sortField) return items;
       return [...items].sort((a, b) => {
         let comp = 0;
         if (sortField === "status") {
-          const sa = a.status || (a.is_playlist ? "PLAYLIST" : "AUDIO");
-          const sb = b.status || (b.is_playlist ? "PLAYLIST" : "AUDIO");
+          const sa = a.status || a.match_tier || (a.is_playlist ? "PLAYLIST" : "AUDIO");
+          const sb = b.status || b.match_tier || (b.is_playlist ? "PLAYLIST" : "AUDIO");
           comp = sa.localeCompare(sb);
         } else if (sortField === "source") {
           comp = a.relative_path.localeCompare(b.relative_path);
         } else if (sortField === "dest") {
-          const da = a.dest_relative_path || "";
-          const db = b.dest_relative_path || "";
+          const da = a.dest_relative_path || a.matched_dest_relative_path || "";
+          const db = b.dest_relative_path || b.matched_dest_relative_path || "";
           comp = da.localeCompare(db);
         } else if (sortField === "size") {
           comp = (a.size_bytes || 0) - (b.size_bytes || 0);
@@ -175,6 +181,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
       renamedFiles: sortList(filteredItems.renamedFiles),
       upToDateFiles: sortList(filteredItems.upToDateFiles),
       orphanFiles: sortList(filteredItems.orphanFiles),
+      duplicateOrphans: sortList(filteredItems.duplicateOrphans),
       warningItems: filteredItems.warningItems,
     };
   }, [filteredItems, sortField, sortOrder]);
@@ -235,6 +242,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
     (diffReport.renamed_files || []).forEach((f) => map.set(f.relative_path, f.file_path));
     diffReport.up_to_date_files.forEach((f) => map.set(f.relative_path, f.file_path));
     diffReport.orphan_files.forEach((f) => map.set(f.relative_path, f.file_path));
+    (diffReport.duplicate_orphans || []).forEach((f) => map.set(f.relative_path, f.file_path));
     
     const absPaths: string[] = [];
     selectedItemPaths.forEach((rel) => {
@@ -435,6 +443,53 @@ export const ExportView: React.FC<ExportViewProps> = ({
           await handleAnalyzeDiff();
         } catch (e) {
           setNotification({ message: "Error deleting orphans: " + e, type: "error" });
+          setConfirmModal(null);
+        } finally {
+          setIsApplyingAction(false);
+        }
+      },
+    });
+  };
+
+  const handleDeleteDuplicateOrphans = (selectedOnly?: boolean, singleItem?: ExportDuplicateOrphanItem) => {
+    const targetDir = exportDir || diffReport?.destination;
+    if (!targetDir) {
+      setNotification({ message: "No export destination directory specified.", type: "error" });
+      return;
+    }
+    const toProcess = singleItem
+      ? [singleItem]
+      : selectedOnly
+        ? sortedItems.duplicateOrphans.filter(item => selectedItemPaths.has(item.relative_path))
+        : sortedItems.duplicateOrphans;
+
+    if (toProcess.length === 0) {
+      setNotification({
+        message: selectedOnly ? "No duplicate orphan files selected to delete." : "No duplicate orphan files to delete.",
+        type: "info",
+      });
+      return;
+    }
+
+    const totalBytes = toProcess.reduce((sum, item) => sum + item.size_bytes, 0);
+
+    setConfirmModal({
+      title: "🗑 Confirm Duplicate Orphan Deletion",
+      message: `Permanently delete ${toProcess.length} redundant duplicate orphan file(s) (${formatSize(totalBytes)}) from destination USB?\n\nThese destination files duplicate tracks already present in your library/playlists. The kept versions will remain completely untouched.`,
+      confirmText: `Delete ${toProcess.length} Duplicate(s)`,
+      confirmVariant: "danger",
+      executingText: "Deleting duplicate orphan files...",
+      onConfirm: async () => {
+        setIsApplyingAction(true);
+        try {
+          const filePaths = toProcess.map(o => o.file_path);
+          const count = await invoke<number>("delete_export_files", { filePaths });
+          setNotification({ message: `Successfully deleted ${count} duplicate orphan file(s) (${formatSize(totalBytes)} freed)!`, type: "success" });
+          setSelectedItemPaths(new Set());
+          setConfirmModal(null);
+          await handleAnalyzeDiff();
+        } catch (e) {
+          setNotification({ message: "Error deleting duplicate orphans: " + e, type: "error" });
           setConfirmModal(null);
         } finally {
           setIsApplyingAction(false);
@@ -847,6 +902,18 @@ export const ExportView: React.FC<ExportViewProps> = ({
 
           <div className="card" style={{ padding: "12px 14px", margin: 0 }}>
             <div className="text-secondary" style={{ fontSize: "0.75rem", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>
+              👥 Duplicate Orphans
+            </div>
+            <div style={{ fontSize: "1.2rem", fontWeight: 700, marginTop: "4px", color: (diffReport.duplicate_orphans?.length || 0) > 0 ? "var(--warning)" : "var(--text-primary)" }}>
+              {diffReport.duplicate_orphans?.length || 0} files
+            </div>
+            <div className="text-secondary" style={{ fontSize: "0.78rem", fontFamily: "var(--font-mono)", marginTop: "2px" }}>
+              {formatSize(diffReport.total_bytes_duplicate_orphans || 0)}
+            </div>
+          </div>
+
+          <div className="card" style={{ padding: "12px 14px", margin: 0 }}>
+            <div className="text-secondary" style={{ fontSize: "0.75rem", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>
               🔴 Destination Orphans
             </div>
             <div style={{ fontSize: "1.2rem", fontWeight: 700, marginTop: "4px", color: diffReport.orphan_files.length > 0 ? "var(--danger)" : "var(--text-primary)" }}>
@@ -914,6 +981,18 @@ export const ExportView: React.FC<ExportViewProps> = ({
                 style={{ padding: "4px 12px", fontSize: "0.8rem" }}
               >
                 ⚪ Up-to-Date ({filteredItems.upToDateFiles.length})
+              </button>
+              <button
+                className={`btn ${activeTab === "duplicate_orphans" ? "btn-primary" : "btn-secondary"}`}
+                onClick={() => setActiveTab("duplicate_orphans")}
+                style={{
+                  padding: "4px 12px",
+                  fontSize: "0.8rem",
+                  borderColor: filteredItems.duplicateOrphans.length > 0 ? "var(--warning)" : undefined,
+                  color: filteredItems.duplicateOrphans.length > 0 && activeTab !== "duplicate_orphans" ? "var(--warning)" : undefined,
+                }}
+              >
+                👥 Duplicate Orphans ({filteredItems.duplicateOrphans.length})
               </button>
               <button
                 className={`btn ${activeTab === "orphans" ? "btn-primary" : "btn-secondary"}`}
@@ -990,6 +1069,17 @@ export const ExportView: React.FC<ExportViewProps> = ({
                       <span>⚡ Apply All Renames ({filteredItems.renamedFiles.length})</span>
                     </button>
                   )}
+                  {activeTab === "duplicate_orphans" && filteredItems.duplicateOrphans.length > 0 && (
+                    <button
+                      className="btn btn-secondary"
+                      disabled={isApplyingAction}
+                      onClick={() => handleDeleteDuplicateOrphans(false)}
+                      style={{ padding: "3px 10px", fontSize: "0.75rem", borderColor: "var(--warning)", color: "var(--warning)", fontWeight: 600, marginLeft: "4px", display: "inline-flex", alignItems: "center", gap: "4px" }}
+                      title="Delete all detected duplicate orphan files from destination USB"
+                    >
+                      <span>🗑 Clean All Duplicates ({filteredItems.duplicateOrphans.length})</span>
+                    </button>
+                  )}
                   {activeTab === "orphans" && filteredItems.orphanFiles.length > 0 && (
                     <button
                       className="btn btn-secondary"
@@ -1054,6 +1144,17 @@ export const ExportView: React.FC<ExportViewProps> = ({
                       title={`Force re-copy ${selectedItemPaths.size} selected file(s) to destination`}
                     >
                       <span>🔄 Apply / Re-copy ({selectedItemPaths.size})</span>
+                    </button>
+                  )}
+                  {activeTab === "duplicate_orphans" && (
+                    <button
+                      className="btn btn-danger"
+                      disabled={isApplyingAction}
+                      onClick={() => handleDeleteDuplicateOrphans(true)}
+                      style={{ padding: "3px 10px", fontSize: "0.75rem", fontWeight: 600, display: "flex", alignItems: "center", gap: "4px" }}
+                      title={`Delete ${selectedItemPaths.size} selected duplicate orphan file(s) from destination USB`}
+                    >
+                      <span>🗑 Apply / Delete ({selectedItemPaths.size})</span>
                     </button>
                   )}
                   {activeTab === "orphans" && (
@@ -1615,6 +1716,177 @@ export const ExportView: React.FC<ExportViewProps> = ({
               ) : (
                 <div className="no-data">
                   {searchQuery ? "No matching files found." : "No up-to-date files found. Run export to populate destination."}
+                </div>
+              )
+            )}
+
+            {activeTab === "duplicate_orphans" && (
+              sortedItems.duplicateOrphans.length > 0 ? (
+                <>
+                  <table style={{ tableLayout: "fixed", width: "100%" }}>
+                    <thead>
+                      <tr>
+                        <th style={{ width: "36px", textAlign: "center" }}>
+                          <input
+                            type="checkbox"
+                            checked={
+                              sortedItems.duplicateOrphans.length > 0 &&
+                              sortedItems.duplicateOrphans.every((item) => selectedItemPaths.has(item.relative_path))
+                            }
+                            onChange={() => handleToggleSelectAll(sortedItems.duplicateOrphans)}
+                            style={{ cursor: "pointer" }}
+                          />
+                        </th>
+                        <th
+                          style={{ width: "120px", cursor: "pointer", userSelect: "none" }}
+                          onClick={() => handleToggleSort("status")}
+                          title="Click to sort by Match Type"
+                        >
+                          <div style={{ display: "inline-flex", alignItems: "center" }}>
+                            <span>Match Tier</span>
+                            {renderSortIndicator("status")}
+                          </div>
+                        </th>
+                        <th
+                          style={{ width: "38%", cursor: "pointer", userSelect: "none" }}
+                          onClick={() => handleToggleSort("source")}
+                          title="Click to sort by Destination Duplicate Path"
+                        >
+                          <div style={{ display: "inline-flex", alignItems: "center" }}>
+                            <span>Duplicate File on USB (Orphan)</span>
+                            {renderSortIndicator("source")}
+                          </div>
+                        </th>
+                        <th
+                          style={{ width: "38%", cursor: "pointer", userSelect: "none" }}
+                          onClick={() => handleToggleSort("dest")}
+                          title="Click to sort by Matched Active Track"
+                        >
+                          <div style={{ display: "inline-flex", alignItems: "center" }}>
+                            <span>Matches Active Track (Kept)</span>
+                            {renderSortIndicator("dest")}
+                          </div>
+                        </th>
+                        <th
+                          style={{ width: "85px", textAlign: "right", cursor: "pointer", userSelect: "none" }}
+                          onClick={() => handleToggleSort("size")}
+                          title="Click to sort by File Size"
+                        >
+                          <div style={{ display: "inline-flex", alignItems: "center", justifyContent: "flex-end" }}>
+                            <span>Size</span>
+                            {renderSortIndicator("size")}
+                          </div>
+                        </th>
+                        <th style={{ width: "75px", textAlign: "center" }}>
+                          <span>Action</span>
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sortedItems.duplicateOrphans.slice(0, visibleLimit).map((item, idx) => {
+                        const isSelected = selectedItemPaths.has(item.relative_path);
+                        const tierColor = item.match_tier === "exact_hash"
+                          ? "var(--success)"
+                          : item.match_tier === "youtube_id"
+                          ? "var(--accent-purple)"
+                          : item.match_tier === "acoustic"
+                          ? "var(--accent-blue)"
+                          : "var(--warning)";
+                        const tierBg = item.match_tier === "exact_hash"
+                          ? "rgba(34, 197, 94, 0.15)"
+                          : item.match_tier === "youtube_id"
+                          ? "rgba(168, 85, 247, 0.15)"
+                          : item.match_tier === "acoustic"
+                          ? "rgba(59, 130, 246, 0.15)"
+                          : "rgba(234, 179, 8, 0.15)";
+                        const tierLabel = item.match_tier === "exact_hash"
+                          ? "EXACT HASH"
+                          : item.match_tier === "youtube_id"
+                          ? "YOUTUBE ID"
+                          : item.match_tier === "acoustic"
+                          ? "ACOUSTIC"
+                          : "METADATA";
+
+                        return (
+                          <tr
+                            key={idx}
+                            className={isSelected ? "selected" : undefined}
+                            data-selected={isSelected}
+                            title={`Orphan: ${item.file_path}\nDuplicates: ${item.matched_file_path}\nReason: ${item.match_reason}`}
+                            onClick={(e) => handleToggleSelectItem(item.relative_path, idx, e.shiftKey, sortedItems.duplicateOrphans)}
+                            style={{ cursor: "pointer", userSelect: "none" }}
+                          >
+                            <td style={{ textAlign: "center" }} onClick={(e) => e.stopPropagation()}>
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={(e) => handleToggleSelectItem(item.relative_path, idx, (e.nativeEvent as MouseEvent).shiftKey, sortedItems.duplicateOrphans)}
+                                style={{ cursor: "pointer" }}
+                              />
+                            </td>
+                            <td>
+                              <span
+                                className="badge"
+                                style={{
+                                  backgroundColor: tierBg,
+                                  color: tierColor,
+                                  border: `1px solid ${tierColor}`,
+                                  padding: "2px 6px",
+                                  borderRadius: "4px",
+                                  fontSize: "0.70rem",
+                                  fontWeight: 600,
+                                }}
+                                title={item.match_reason}
+                              >
+                                {tierLabel}
+                              </span>
+                            </td>
+                            <td style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={item.file_path}>
+                              <div style={{ color: "var(--danger)", textDecoration: "line-through", opacity: 0.85, fontSize: "0.82rem" }}>
+                                {item.relative_path}
+                              </div>
+                            </td>
+                            <td style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={item.matched_file_path}>
+                              <div style={{ color: "var(--text-primary)", fontWeight: 500, fontSize: "0.82rem" }}>
+                                {item.matched_dest_relative_path}
+                              </div>
+                              <div className="text-secondary" style={{ fontSize: "0.72rem", opacity: 0.8 }}>
+                                ↳ {item.match_reason}
+                              </div>
+                            </td>
+                            <td style={{ fontFamily: "var(--font-mono)", textAlign: "right", fontSize: "0.78rem" }}>
+                              {formatSize(item.size_bytes)}
+                            </td>
+                            <td style={{ textAlign: "center" }} onClick={(e) => e.stopPropagation()}>
+                              <button
+                                className="btn btn-secondary"
+                                disabled={isApplyingAction}
+                                onClick={() => handleDeleteDuplicateOrphans(false, item)}
+                                style={{
+                                  padding: "2px 6px",
+                                  fontSize: "0.70rem",
+                                  color: "var(--danger)",
+                                  borderColor: "var(--danger)",
+                                }}
+                                title={`Permanently delete redundant duplicate copy "${item.relative_path}" from USB`}
+                              >
+                                🗑 Delete
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                  {sortedItems.duplicateOrphans.length > visibleLimit && (
+                    <div className="text-secondary" style={{ textAlign: "center", padding: "8px", fontSize: "0.75rem", fontFamily: "var(--font-mono)" }}>
+                      Showing {visibleLimit} of {sortedItems.duplicateOrphans.length} duplicate orphan files (Scroll down to load more)
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="no-data">
+                  {searchQuery ? "No matching duplicate orphan files found." : "✅ No duplicate orphan files found! All orphan files on destination are unique."}
                 </div>
               )
             )}

@@ -994,7 +994,8 @@ pub fn calculate_playlist_summaries(
             );
         }
 
-        if let Ok(item) = calculate_single_playlist_summary(None, None, config, source_dir, formats, index, false) {
+        let year_split_enabled = pl.year_split.as_ref().map(|y| y.enabled).unwrap_or(false);
+        if let Ok(item) = calculate_single_playlist_summary(None, None, config, source_dir, formats, index, year_split_enabled) {
             summaries.push(item);
         }
     }

@@ -4,7 +4,7 @@ use crate::utils::{canonical_path_str, get_file_mtime_and_size};
 use any_ascii::any_ascii;
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::probe::Probe;
-use lofty::tag::Accessor;
+use lofty::tag::{Accessor, Tag};
 use regex::Regex;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -84,11 +84,21 @@ pub struct PruneCacheReport {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DuplicateCleanupGroup {
+    pub kept_file_path: Option<String>,
+    pub files_to_delete: Vec<String>,
+    #[serde(default)]
+    pub youtube_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DeleteDuplicatesResult {
     pub deleted_count: usize,
     pub failed_count: usize,
     pub freed_bytes: u64,
     pub errors: Vec<String>,
+    #[serde(default)]
+    pub tags_transferred_count: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -469,7 +479,8 @@ pub fn compare_acoustic_fingerprints(
     let mut best_inner_skip = 0usize;
 
     // Stage 1: Coarse pass across initial 20-second window to find best alignment offset
-    for shift in -max_shift..=max_shift {
+    // Using step 2 for coarse scan, then refining ±1 around promising candidates
+    for shift in (-max_shift..=max_shift).step_by(2) {
         let (start_a, start_b) = if shift >= 0 {
             (0usize, shift as usize)
         } else {
@@ -506,6 +517,45 @@ pub fn compare_acoustic_fingerprints(
             best_bit_errors = bit_errors;
             best_offset = shift;
             best_inner_skip = inner_skip;
+        }
+    }
+
+    // Refine ±1 frame around best_offset if a promising candidate was found
+    if best_bit_errors != u32::MAX {
+        for &shift in &[best_offset - 1, best_offset + 1] {
+            if shift < -max_shift || shift > max_shift {
+                continue;
+            }
+            let (start_a, start_b) = if shift >= 0 {
+                (0usize, shift as usize)
+            } else {
+                ((-shift) as usize, 0usize)
+            };
+            if start_a >= fp_a.len() || start_b >= fp_b.len() {
+                continue;
+            }
+            let overlap = (fp_a.len() - start_a).min(fp_b.len() - start_b);
+            if overlap < min_window {
+                continue;
+            }
+            let inner_skip = if overlap > min_window + 32 { 32 } else { 0 };
+            let a_slice = &fp_a[start_a + inner_skip..start_a + inner_skip + min_window];
+            let b_slice = &fp_b[start_b + inner_skip..start_b + inner_skip + min_window];
+            let mut bit_errors = 0u32;
+            let mut exceeded = false;
+            let threshold = best_bit_errors;
+            for i in 0..min_window {
+                bit_errors += (a_slice[i] ^ b_slice[i]).count_ones();
+                if bit_errors >= threshold {
+                    exceeded = true;
+                    break;
+                }
+            }
+            if !exceeded && bit_errors < best_bit_errors {
+                best_bit_errors = bit_errors;
+                best_offset = shift;
+                best_inner_skip = inner_skip;
+            }
         }
     }
 
@@ -768,6 +818,57 @@ pub fn compute_raw_fingerprint(
     }
 }
 
+/// Retrieve fingerprint from SQLite cache if (path, mtime, size) match, otherwise compute raw fingerprint.
+pub fn get_or_compute_fingerprint(
+    path: &Path,
+    mtime_secs: u64,
+    size_bytes: u64,
+    compute_acoustic: bool,
+) -> TrackFingerprintRecord {
+    let canonical = canonical_path_str(path);
+    if let Some(conn) = open_cache_db() {
+        if let Ok(mut stmt) = conn.prepare_cached(
+            "SELECT mtime_secs, size_bytes, quick_hash, audio_hash, youtube_id,
+                    raw_title, raw_artist, norm_title, norm_artist, norm_stem,
+                    duration_secs, format_ext, bitrate_kbps, chromaprint
+             FROM track_fingerprints WHERE file_path = ?1",
+        ) {
+            if let Ok(rec) = stmt.query_row(params![&canonical], |row| {
+                let db_mtime: i64 = row.get(0)?;
+                let db_size: i64 = row.get(1)?;
+                let blob_opt: Option<Vec<u8>> = row.get(13)?;
+                Ok((
+                    db_mtime as u64,
+                    db_size as u64,
+                    TrackFingerprintRecord {
+                        file_path: canonical.clone(),
+                        mtime_secs: db_mtime as u64,
+                        size_bytes: db_size as u64,
+                        quick_hash: row.get(2)?,
+                        audio_hash: row.get(3)?,
+                        youtube_id: row.get(4)?,
+                        raw_title: row.get(5)?,
+                        raw_artist: row.get(6)?,
+                        norm_title: row.get(7)?,
+                        norm_artist: row.get(8)?,
+                        norm_stem: row.get(9)?,
+                        duration_secs: row.get::<_, i64>(10)? as u32,
+                        format_ext: row.get(11)?,
+                        bitrate_kbps: row.get::<_, i64>(12)? as u32,
+                        chromaprint: blob_opt.map(|b| decode_u32_blob(&b)),
+                    },
+                ))
+            }) {
+                let (db_mtime, db_size, cached) = rec;
+                if db_mtime == mtime_secs && db_size == size_bytes {
+                    return cached;
+                }
+            }
+        }
+    }
+    compute_raw_fingerprint(path, mtime_secs, size_bytes, compute_acoustic)
+}
+
 
 /// Remove stale fingerprint entries whose files no longer exist on disk (or clear all if requested)
 pub fn prune_stale_fingerprints_impl(conn: &Connection, clear_all: bool) -> (usize, usize) {
@@ -807,11 +908,11 @@ pub fn prune_stale_fingerprints_impl(conn: &Connection, clear_all: bool) -> (usi
 }
 
 #[derive(Debug, Clone)]
-struct MatchEdge {
-    tier: &'static str, // "exact_hash" | "youtube_id" | "acoustic" | "metadata"
-    label: String,
-    confidence: u8,
-    offset_secs: Option<f32>,
+pub struct MatchEdge {
+    pub tier: &'static str, // "exact_hash" | "youtube_id" | "acoustic" | "metadata"
+    pub label: String,
+    pub confidence: u8,
+    pub offset_secs: Option<f32>,
 }
 
 fn get_track_modifier(raw_title: &str, raw_stem: &str) -> Option<&'static str> {
@@ -831,7 +932,7 @@ fn get_track_modifier(raw_title: &str, raw_stem: &str) -> Option<&'static str> {
 }
 
 /// Determine whether two distinct files represent the same underlying song across the 3 tiers
-fn check_pair_duplicate(
+pub fn check_pair_duplicate(
     a: &TrackFingerprintRecord,
     b: &TrackFingerprintRecord,
     max_acoustic_secs: u32,
@@ -885,29 +986,7 @@ fn check_pair_duplicate(
 
     let dur_diff = (a.duration_secs as i64 - b.duration_secs as i64).unsigned_abs() as u32;
 
-    // Tier 3: Sliding-Window Progressive Acoustic Match (catches 10-15s extra intro/outro ads + different URLs/formats)
-    if dur_diff <= 26 {
-        if let (Some(fp_a), Some(fp_b)) = (&a.chromaprint, &b.chromaprint) {
-            if let Some((conf, offset, verified_secs)) =
-                compare_acoustic_fingerprints(fp_a, fp_b, max_acoustic_secs)
-            {
-                let offset_str = if offset.abs() >= 1.5 {
-                    format!(" ({:+.1}s offset)", offset)
-                } else {
-                    String::new()
-                };
-                let label = format!("Acoustic Match (verified {:.0}s{})", verified_secs, offset_str);
-                return Some(MatchEdge {
-                    tier: "acoustic",
-                    label,
-                    confidence: conf,
-                    offset_secs: Some(offset),
-                });
-            }
-        }
-    }
-
-    // Tier 2: Normalized Title + Artist / Filename Stem + Duration Window (within 20s for ads)
+    // Tier 2: Normalized Title + Artist / Filename Stem + Duration Window (evaluated FIRST for speed)
     if dur_diff <= 20 && a.duration_secs > 15 && b.duration_secs > 15 {
         let t_a = if a.norm_title.len() >= 3 {
             &a.norm_title
@@ -962,61 +1041,179 @@ fn check_pair_duplicate(
         }
     }
 
+    // Tier 3: Sliding-Window Progressive Acoustic Match (evaluated only when metadata did not match)
+    if dur_diff <= 26 {
+        if let (Some(fp_a), Some(fp_b)) = (&a.chromaprint, &b.chromaprint) {
+            // Plausibility candidate gating: require compatible artist or title/stem similarity
+            let artists_compatible = a.norm_artist.is_empty()
+                || b.norm_artist.is_empty()
+                || a.norm_artist == b.norm_artist
+                || a.norm_artist.contains(&b.norm_artist)
+                || b.norm_artist.contains(&a.norm_artist);
+
+            let t_a = if !a.norm_title.is_empty() { &a.norm_title } else { &a.norm_stem };
+            let t_b = if !b.norm_title.is_empty() { &b.norm_title } else { &b.norm_stem };
+            let plausible_candidate = if t_a.is_empty() || t_b.is_empty() || a.norm_artist.is_empty() || b.norm_artist.is_empty() {
+                true // untagged file or missing metadata
+            } else if artists_compatible {
+                t_a == t_b || t_a.contains(t_b) || t_b.contains(t_a) || jaro_winkler(t_a, t_b) >= 0.70
+            } else {
+                false // completely different artists and titles - skip expensive acoustic correlation!
+            };
+
+            if plausible_candidate {
+                if let Some((conf, offset, verified_secs)) =
+                    compare_acoustic_fingerprints(fp_a, fp_b, max_acoustic_secs)
+                {
+                    let offset_str = if offset.abs() >= 1.5 {
+                        format!(" ({:+.1}s offset)", offset)
+                    } else {
+                        String::new()
+                    };
+                    let label = format!("Acoustic Match (verified {:.0}s{})", verified_secs, offset_str);
+                    return Some(MatchEdge {
+                        tier: "acoustic",
+                        label,
+                        confidence: conf,
+                        offset_secs: Some(offset),
+                    });
+                }
+            }
+        }
+    }
+
     None
 }
 
 /// Rank two tracks within a duplicate cluster to determine which one is the Superior Winner.
-/// Order of precedence:
-/// 1. Lower `playlist_index` (Rule 1 for cross-playlist resolution; equal within a single playlist)
-/// 2. Lower `source_index` (First in `sources` list is highest priority)
-/// 3. Clean duration (if one track has 5-25s extra ad compared to the cleanest track in the cluster)
-/// 4. Format quality (`flac` > `wav`/`alac` > `m4a`/`aac`/`opus` > `mp3` > `ogg` > `wma`)
-/// 5. Higher bitrate (`bitrate_kbps`)
+/// Order of precedence is determined by `criteria`:
+/// - `clean_duration`: Penalize tracks with extra intro/outro ads (>= 5s difference from min duration)
+/// - `format_quality`: Format quality rank (`flac` > `wav`/`alac` > `m4a`/`aac`/`opus` > `mp3` > `ogg` > `wma`)
+/// - `bitrate`: Higher audio bitrate (`bitrate_kbps`)
+/// - `source_priority`: Lower `source_index` (First in sources list is highest priority)
+/// - `playlist_priority`: Lower `playlist_index` (Rule 1 for cross-playlist resolution)
+/// - `file_size`: Larger file size (`size_bytes`)
 fn compare_candidates_priority(
     cand_a: &CandidateTrack,
     rec_a: &TrackFingerprintRecord,
     cand_b: &CandidateTrack,
     rec_b: &TrackFingerprintRecord,
     min_cluster_duration: u32,
-) -> std::cmp::Ordering {
-    // 1. Playlist priority (Rule 1)
-    match cand_a.playlist_index.cmp(&cand_b.playlist_index) {
-        std::cmp::Ordering::Equal => {}
-        ord => return ord,
+    criteria: &[String],
+) -> (std::cmp::Ordering, String) {
+    for crit in criteria {
+        match crit.as_str() {
+            "playlist_priority" => {
+                if cand_a.playlist_index != cand_b.playlist_index {
+                    if cand_a.playlist_index < cand_b.playlist_index {
+                        return (
+                            std::cmp::Ordering::Less,
+                            format!("Higher Playlist Priority ({})", cand_a.playlist_name),
+                        );
+                    } else {
+                        return (
+                            std::cmp::Ordering::Greater,
+                            format!("Higher Playlist Priority ({})", cand_b.playlist_name),
+                        );
+                    }
+                }
+            }
+            "source_priority" => {
+                if cand_a.source_index != cand_b.source_index {
+                    if cand_a.source_index < cand_b.source_index {
+                        return (
+                            std::cmp::Ordering::Less,
+                            format!("Source #{} Priority ({})", cand_a.source_index + 1, cand_a.source_folder),
+                        );
+                    } else {
+                        return (
+                            std::cmp::Ordering::Greater,
+                            format!("Source #{} Priority ({})", cand_b.source_index + 1, cand_b.source_folder),
+                        );
+                    }
+                }
+            }
+            "clean_duration" => {
+                let a_has_extra_ad =
+                    min_cluster_duration > 30 && rec_a.duration_secs >= min_cluster_duration + 5;
+                let b_has_extra_ad =
+                    min_cluster_duration > 30 && rec_b.duration_secs >= min_cluster_duration + 5;
+                if a_has_extra_ad != b_has_extra_ad {
+                    if !a_has_extra_ad {
+                        return (
+                            std::cmp::Ordering::Less,
+                            "Clean duration (no intro/outro sponsor ad)".to_string(),
+                        );
+                    } else {
+                        return (
+                            std::cmp::Ordering::Greater,
+                            "Clean duration (no intro/outro sponsor ad)".to_string(),
+                        );
+                    }
+                }
+            }
+            "format_quality" => {
+                let rank_a = format_quality_rank(&rec_a.format_ext);
+                let rank_b = format_quality_rank(&rec_b.format_ext);
+                if rank_a != rank_b {
+                    if rank_a > rank_b {
+                        return (
+                            std::cmp::Ordering::Less,
+                            format!(
+                                "Superior format (.{} > .{})",
+                                rec_a.format_ext.to_uppercase(),
+                                rec_b.format_ext.to_uppercase()
+                            ),
+                        );
+                    } else {
+                        return (
+                            std::cmp::Ordering::Greater,
+                            format!(
+                                "Superior format (.{} > .{})",
+                                rec_b.format_ext.to_uppercase(),
+                                rec_a.format_ext.to_uppercase()
+                            ),
+                        );
+                    }
+                }
+            }
+            "bitrate" => {
+                if rec_a.bitrate_kbps != rec_b.bitrate_kbps {
+                    if rec_a.bitrate_kbps > rec_b.bitrate_kbps {
+                        return (
+                            std::cmp::Ordering::Less,
+                            format!(
+                                "Higher bitrate ({} kbps vs {} kbps)",
+                                rec_a.bitrate_kbps, rec_b.bitrate_kbps
+                            ),
+                        );
+                    } else {
+                        return (
+                            std::cmp::Ordering::Greater,
+                            format!(
+                                "Higher bitrate ({} kbps vs {} kbps)",
+                                rec_b.bitrate_kbps, rec_a.bitrate_kbps
+                            ),
+                        );
+                    }
+                }
+            }
+            "file_size" => {
+                if rec_a.size_bytes != rec_b.size_bytes {
+                    if rec_a.size_bytes > rec_b.size_bytes {
+                        return (std::cmp::Ordering::Less, "Larger file size".to_string());
+                    } else {
+                        return (std::cmp::Ordering::Greater, "Larger file size".to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
-    // 2. Source priority (0 = first in SOURCES)
-    match cand_a.source_index.cmp(&cand_b.source_index) {
-        std::cmp::Ordering::Equal => {}
-        ord => return ord,
-    }
-
-    // 3. Same source tie-breaker: Clean duration (penalize track if it has >= 5s extra intro/outro ad)
-    let a_has_extra_ad =
-        min_cluster_duration > 30 && rec_a.duration_secs >= min_cluster_duration + 5;
-    let b_has_extra_ad =
-        min_cluster_duration > 30 && rec_b.duration_secs >= min_cluster_duration + 5;
-    match a_has_extra_ad.cmp(&b_has_extra_ad) {
-        std::cmp::Ordering::Equal => {}
-        ord => return ord,
-    }
-
-    // 4. Format quality rank (higher is better, so reverse cmp)
-    let rank_a = format_quality_rank(&rec_a.format_ext);
-    let rank_b = format_quality_rank(&rec_b.format_ext);
-    match rank_b.cmp(&rank_a) {
-        std::cmp::Ordering::Equal => {}
-        ord => return ord,
-    }
-
-    // 5. Higher bitrate (higher is better)
-    match rec_b.bitrate_kbps.cmp(&rec_a.bitrate_kbps) {
-        std::cmp::Ordering::Equal => {}
-        ord => return ord,
-    }
-
-    // 6. Deterministic path tie-breaker
-    cand_a.canonical_path.cmp(&cand_b.canonical_path)
+    // Default tie breaker: canonical path
+    let ord = cand_a.canonical_path.cmp(&cand_b.canonical_path);
+    (ord, "First discovered path".to_string())
 }
 
 /// Core clustering engine: takes candidate tracks, loads/computes fingerprints, groups duplicates,
@@ -1029,6 +1226,7 @@ pub fn analyze_candidates(
     auto_prune: bool,
     app: Option<&AppHandle>,
     task_id: Option<&str>,
+    winner_criteria: Option<&[String]>,
 ) -> (
     Vec<PathBuf>,              // Winning deduplicated files
     HashMap<String, PathBuf>,  // Map: canonical_path of any track -> winning PathBuf (for superior replacement!)
@@ -1101,11 +1299,37 @@ pub fn analyze_candidates(
     let start_time = std::time::Instant::now();
     let mut last_emit = std::time::Instant::now();
 
+    // Emit immediate initial Stage 1 progress so the UI starts at Pass 1, 0% without delay
+    if let Some(app) = app {
+        let first_file = unique_candidates.first().and_then(|c| c.path.file_name().map(|f| f.to_string_lossy().to_string()));
+        let _ = app.emit(
+            "duplicate-analysis-progress",
+            DuplicateProgressPayload {
+                phase: "fingerprinting".to_string(),
+                phase_label: "Checking fingerprint cache".to_string(),
+                stage: 1,
+                stage_name: "metadata".to_string(),
+                stage_label: "1. Tags & Hashes".to_string(),
+                current: 0,
+                total: n,
+                progress: 0.0,
+                current_file: first_file,
+                eta_secs: None,
+                speed: 0.0,
+            },
+        );
+    }
+
     let mut records: Vec<Option<TrackFingerprintRecord>> = vec![None; n];
     let mut to_compute: Vec<(usize, CandidateTrack, u64, u64)> = Vec::new();
 
     // 1. Fast SQLite cache check on main thread
     for (idx, c) in unique_candidates.iter().enumerate() {
+        if let Some(tid) = task_id {
+            if crate::sanitizer::is_task_cancelled(tid) {
+                break;
+            }
+        }
         let (mtime_secs, size_bytes) = get_file_mtime_and_size(&c.path).unwrap_or((0, 0));
         let mut hit = false;
         if let Some(ref conn) = conn_opt {
@@ -1152,6 +1376,35 @@ pub fn analyze_candidates(
         if !hit {
             to_compute.push((idx, c.clone(), mtime_secs, size_bytes));
         }
+
+        if let Some(app) = app {
+            let is_last = idx + 1 == n;
+            let emit_step = (n / 50).clamp(1, 20);
+            if is_last || (idx % emit_step == 0 && last_emit.elapsed() >= std::time::Duration::from_millis(50)) {
+                let pct = if n > 0 { ((idx + 1) as f64 / (n as f64) * 33.33).clamp(0.0, 33.33) } else { 0.0 };
+                let elapsed = start_time.elapsed().as_secs_f64();
+                let speed = if elapsed > 0.05 { (idx + 1) as f64 / elapsed } else { 0.0 };
+                let remaining = (n.saturating_sub(idx + 1)) as f64;
+                let eta_secs = if speed > 5.0 { Some(remaining / speed) } else { None };
+                let _ = app.emit(
+                    "duplicate-analysis-progress",
+                    DuplicateProgressPayload {
+                        phase: "fingerprinting".to_string(),
+                        phase_label: "Checking fingerprint cache".to_string(),
+                        stage: 1,
+                        stage_name: "metadata".to_string(),
+                        stage_label: "1. Tags & Hashes".to_string(),
+                        current: idx + 1,
+                        total: n,
+                        progress: pct,
+                        current_file: c.path.file_name().map(|f| f.to_string_lossy().to_string()),
+                        eta_secs,
+                        speed,
+                    },
+                );
+                last_emit = std::time::Instant::now();
+            }
+        }
     }
 
     let initial_cached = n - to_compute.len();
@@ -1172,27 +1425,25 @@ pub fn analyze_candidates(
                 .file_name()
                 .map(|f| f.to_string_lossy().to_string())
                 .unwrap_or_else(|| to_compute[0].1.canonical_path.clone());
-            let pct = if n > 0 {
-                ((initial_cached as f64) / (n as f64) * 33.0).clamp(0.0, 33.0)
-            } else {
-                33.0
-            };
+            let current_done = initial_cached;
+            let start_pct = if n > 0 { (current_done as f64 / n as f64 * 33.33).clamp(0.0, 33.33) } else { 0.0 };
             let _ = app.emit(
                 "duplicate-analysis-progress",
                 DuplicateProgressPayload {
                     phase: "fingerprinting".to_string(),
-                    phase_label: format!("Stage 1/3: Reading tags & audio stream hashes ({} parallel workers)...", num_workers),
+                    phase_label: "Reading tags & audio hashes".to_string(),
                     stage: 1,
                     stage_name: "metadata".to_string(),
-                    stage_label: "Stage 1/3: Reading tags & audio stream hashes".to_string(),
-                    current: initial_cached,
+                    stage_label: "1. Tags & Hashes".to_string(),
+                    current: current_done,
                     total: n,
-                    progress: pct,
+                    progress: start_pct,
                     current_file: Some(first_fname),
                     eta_secs: None,
                     speed: 0.0,
                 },
             );
+            last_emit = std::time::Instant::now();
         }
 
         let mut computed_items: Vec<(usize, TrackFingerprintRecord)> =
@@ -1225,6 +1476,7 @@ pub fn analyze_candidates(
 
             let total_to_compute = to_compute.len();
             let mut completed_computed = 0usize;
+            let compute_start = std::time::Instant::now();
 
             while completed_computed < total_to_compute {
                 if let Some(tid) = task_id {
@@ -1232,7 +1484,7 @@ pub fn analyze_candidates(
                         break;
                     }
                 }
-                match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                match rx.recv_timeout(std::time::Duration::from_millis(50)) {
                     Ok((orig_idx, rec)) => {
                         let fname = Path::new(&rec.file_path)
                             .file_name()
@@ -1242,9 +1494,11 @@ pub fn analyze_candidates(
 
                         if let Some(app) = app {
                             let total_done = initial_cached + completed_computed;
-                            let elapsed = start_time.elapsed().as_secs_f64();
-                            let should_emit = completed_computed == total_to_compute
-                                || last_emit.elapsed() >= std::time::Duration::from_secs(1);
+                            let elapsed = compute_start.elapsed().as_secs_f64();
+                            let is_last = completed_computed == total_to_compute;
+                            let emit_step = (total_to_compute / 50).clamp(1, 10);
+                            let should_emit = is_last
+                                || (completed_computed % emit_step == 0 && last_emit.elapsed() >= std::time::Duration::from_millis(50));
                             if should_emit {
                                 let speed = if elapsed > 0.05 && completed_computed > 0 {
                                     (completed_computed as f64) / elapsed
@@ -1258,22 +1512,19 @@ pub fn analyze_candidates(
                                     None
                                 };
                                 let pct = if n > 0 {
-                                    ((total_done as f64) / (n as f64) * 33.0).clamp(0.0, 33.0)
+                                    ((total_done as f64) / (n as f64) * 33.33).clamp(0.0, 33.33)
                                 } else {
-                                    33.0
+                                    33.33
                                 };
 
                                 let _ = app.emit(
                                     "duplicate-analysis-progress",
                                     DuplicateProgressPayload {
                                         phase: "fingerprinting".to_string(),
-                                        phase_label: format!(
-                                            "Stage 1/3: Reading tags & audio stream hashes ({} parallel workers)...",
-                                            num_workers
-                                        ),
+                                        phase_label: "Reading tags & audio hashes".to_string(),
                                         stage: 1,
                                         stage_name: "metadata".to_string(),
-                                        stage_label: "Stage 1/3: Reading tags & audio stream hashes".to_string(),
+                                        stage_label: "1. Tags & Hashes".to_string(),
                                         current: total_done,
                                         total: n,
                                         progress: pct,
@@ -1288,9 +1539,9 @@ pub fn analyze_candidates(
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                         if let Some(app) = app {
-                            if last_emit.elapsed() >= std::time::Duration::from_secs(1) {
+                            if last_emit.elapsed() >= std::time::Duration::from_millis(100) {
                                 let total_done = initial_cached + completed_computed;
-                                let elapsed = start_time.elapsed().as_secs_f64();
+                                let elapsed = compute_start.elapsed().as_secs_f64();
                                 let speed = if elapsed > 0.05 && completed_computed > 0 {
                                     (completed_computed as f64) / elapsed
                                 } else {
@@ -1303,21 +1554,18 @@ pub fn analyze_candidates(
                                     None
                                 };
                                 let pct = if n > 0 {
-                                    ((total_done as f64) / (n as f64) * 33.0).clamp(0.0, 33.0)
+                                    ((total_done as f64) / (n as f64) * 33.33).clamp(0.0, 33.33)
                                 } else {
-                                    33.0
+                                    33.33
                                 };
                                 let _ = app.emit(
                                     "duplicate-analysis-progress",
                                     DuplicateProgressPayload {
                                         phase: "fingerprinting".to_string(),
-                                        phase_label: format!(
-                                            "Stage 1/3: Reading tags & audio stream hashes ({} parallel workers)...",
-                                            num_workers
-                                        ),
+                                        phase_label: "Reading tags & audio hashes".to_string(),
                                         stage: 1,
                                         stage_name: "metadata".to_string(),
-                                        stage_label: "Stage 1/3: Reading tags & audio stream hashes".to_string(),
+                                        stage_label: "1. Tags & Hashes".to_string(),
                                         current: total_done,
                                         total: n,
                                         progress: pct,
@@ -1382,6 +1630,24 @@ pub fn analyze_candidates(
                 let _ = tx.commit();
             }
         }
+    } else if let Some(app) = app {
+        let _ = app.emit(
+            "duplicate-analysis-progress",
+            DuplicateProgressPayload {
+                phase: "fingerprinting".to_string(),
+                phase_label: "Cached metadata verified".to_string(),
+                stage: 1,
+                stage_name: "metadata".to_string(),
+                stage_label: "1. Tags & Hashes".to_string(),
+                current: n,
+                total: n,
+                progress: 33.33,
+                current_file: None,
+                eta_secs: Some(0.0),
+                speed: 0.0,
+            },
+        );
+        last_emit = std::time::Instant::now();
     }
 
     let mut records: Vec<TrackFingerprintRecord> = records.into_iter().flatten().collect();
@@ -1457,7 +1723,9 @@ pub fn analyze_candidates(
     }
 
     // Stage 2: Targeted Acoustic Analysis (ONLY computed on unresolved candidate pairs)
+    let mut stage2_ran = false;
     if compute_acoustic {
+        stage2_ran = true;
         let mut already_matched: HashSet<usize> = HashSet::new();
         for i in 0..n {
             let root = find(&mut parent, i);
@@ -1471,66 +1739,113 @@ pub fn analyze_candidates(
         let mut sorted_by_dur: Vec<usize> = (0..n).collect();
         sorted_by_dur.sort_by_key(|&idx| records[idx].duration_secs);
 
+        // Precompute modifiers for all N tracks once - eliminates 4.5M string allocations in inner loop
+        let track_modifiers: Vec<Option<&'static str>> = records
+            .iter()
+            .map(|r| get_track_modifier(&r.raw_title, &r.norm_stem))
+            .collect();
+
+        let scan_start = std::time::Instant::now();
+        last_emit = std::time::Instant::now();
+
+        // Sub-stage 2A: Candidate Scanning & Verification (33.33% -> 50.0%)
         for (pos, &i) in sorted_by_dur.iter().enumerate() {
-            if already_matched.contains(&i) {
-                continue;
-            }
-            let dur_i = records[i].duration_secs;
-            for &j in &sorted_by_dur[(pos + 1)..] {
-                if already_matched.contains(&j) {
-                    continue;
-                }
-                let dur_j = records[j].duration_secs;
-                if dur_j > dur_i + 22 {
+            if let Some(tid) = task_id {
+                if crate::sanitizer::is_task_cancelled(tid) {
                     break;
                 }
-                let mod_a = get_track_modifier(&records[i].raw_title, &records[i].norm_stem);
-                let mod_b = get_track_modifier(&records[j].raw_title, &records[j].norm_stem);
-                if mod_a != mod_b {
-                    continue;
+            }
+            if !already_matched.contains(&i) {
+                let dur_i = records[i].duration_secs;
+                let mod_a = track_modifiers[i];
+
+                for &j in &sorted_by_dur[(pos + 1)..] {
+                    if already_matched.contains(&j) {
+                        continue;
+                    }
+                    let dur_j = records[j].duration_secs;
+                    if dur_j > dur_i + 22 {
+                        break;
+                    }
+                    let mod_b = track_modifiers[j];
+                    if mod_a != mod_b {
+                        continue;
+                    }
+
+                    let artist_same = !records[i].norm_artist.is_empty()
+                        && records[i].norm_artist == records[j].norm_artist;
+                    let artists_compat = artist_same
+                        || records[i].norm_artist.is_empty()
+                        || records[j].norm_artist.is_empty()
+                        || records[i].norm_artist.contains(&records[j].norm_artist)
+                        || records[j].norm_artist.contains(&records[i].norm_artist);
+
+                    let stem_exact = !records[i].norm_stem.is_empty() && records[i].norm_stem == records[j].norm_stem;
+                    let title_exact = !records[i].norm_title.is_empty() && records[i].norm_title == records[j].norm_title;
+
+                    let should_check_acoustic = if stem_exact || title_exact {
+                        artists_compat
+                    } else if artist_same {
+                        let t_i = &records[i].norm_title;
+                        let t_j = &records[j].norm_title;
+                        (t_i.len() >= 4 && t_j.len() >= 4 && (t_i.contains(t_j) || t_j.contains(t_i)))
+                            || jaro_winkler(t_i, t_j) >= 0.80
+                    } else if artists_compat {
+                        let t_i = &records[i].norm_title;
+                        let t_j = &records[j].norm_title;
+                        jaro_winkler(t_i, t_j) >= 0.88
+                    } else {
+                        false
+                    };
+
+                    if should_check_acoustic {
+                        needed_flags[i] = true;
+                        needed_flags[j] = true;
+                    }
                 }
+            }
 
-                let artist_same = !records[i].norm_artist.is_empty()
-                    && records[i].norm_artist == records[j].norm_artist;
-                let artists_compat = artist_same
-                    || records[i].norm_artist.is_empty()
-                    || records[j].norm_artist.is_empty()
-                    || records[i].norm_artist.contains(&records[j].norm_artist)
-                    || records[j].norm_artist.contains(&records[i].norm_artist);
-
-                let stem_exact = !records[i].norm_stem.is_empty() && records[i].norm_stem == records[j].norm_stem;
-                let title_exact = !records[i].norm_title.is_empty() && records[i].norm_title == records[j].norm_title;
-
-                let should_check_acoustic = if stem_exact || title_exact {
-                    artists_compat
-                } else if artist_same {
-                    let t_i = &records[i].norm_title;
-                    let t_j = &records[j].norm_title;
-                    (t_i.len() >= 4 && t_j.len() >= 4 && (t_i.contains(t_j) || t_j.contains(t_i)))
-                        || jaro_winkler(t_i, t_j) >= 0.80
-                } else if artists_compat {
-                    let t_i = &records[i].norm_title;
-                    let t_j = &records[j].norm_title;
-                    jaro_winkler(t_i, t_j) >= 0.88
-                } else {
-                    false
-                };
-
-                if should_check_acoustic {
-                    needed_flags[i] = true;
-                    needed_flags[j] = true;
+            if let Some(app) = app {
+                let is_last = pos + 1 == n;
+                let emit_step = (n / 50).clamp(1, 20);
+                if is_last || (pos % emit_step == 0 && last_emit.elapsed() >= std::time::Duration::from_millis(40)) {
+                    let pct = 33.33 + ((pos + 1) as f64 / (n as f64) * 16.67);
+                    let elapsed = scan_start.elapsed().as_secs_f64();
+                    let speed = if elapsed > 0.05 { (pos + 1) as f64 / elapsed } else { 0.0 };
+                    let remaining = (n.saturating_sub(pos + 1)) as f64;
+                    let eta_secs = if speed > 5.0 { Some(remaining / speed) } else { None };
+                    let _ = app.emit(
+                        "duplicate-analysis-progress",
+                        DuplicateProgressPayload {
+                            phase: "acoustic".to_string(),
+                            phase_label: "Scanning acoustic candidates".to_string(),
+                            stage: 2,
+                            stage_name: "acoustic".to_string(),
+                            stage_label: "2. Acoustic Verify".to_string(),
+                            current: pos + 1,
+                            total: n,
+                            progress: pct.clamp(33.33, 50.0),
+                            current_file: unique_candidates[i].path.file_name().map(|f| f.to_string_lossy().to_string()),
+                            eta_secs,
+                            speed,
+                        },
+                    );
+                    last_emit = std::time::Instant::now();
                 }
             }
         }
 
+        let total_flagged = needed_flags.iter().filter(|&&f| f).count();
         let needed_indices: Vec<usize> = (0..n)
             .filter(|&i| needed_flags[i] && records[i].chromaprint.is_none())
             .collect();
         let total_acoustic = needed_indices.len();
+        let _cached_acoustic = total_flagged - total_acoustic;
 
+        // Sub-stage 2B: Waveform Decoding (50.0% -> 66.66%)
         if total_acoustic > 0 {
             let acoustic_start = std::time::Instant::now();
-            let mut last_acoustic_emit = std::time::Instant::now();
+            last_emit = std::time::Instant::now();
 
             let num_workers = std::thread::available_parallelism()
                 .map(|p| p.get())
@@ -1540,24 +1855,25 @@ pub fn analyze_candidates(
             let work_idx = std::sync::atomic::AtomicUsize::new(0);
             let (tx, rx) = std::sync::mpsc::channel();
 
-            // Emit immediate start notice
+            let first_acoustic_fname = needed_indices.first().and_then(|&idx| unique_candidates[idx].path.file_name().map(|f| f.to_string_lossy().to_string()));
             if let Some(app) = app {
                 let _ = app.emit(
                     "duplicate-analysis-progress",
                     DuplicateProgressPayload {
                         phase: "acoustic".to_string(),
-                        phase_label: format!("Stage 2/3: Verifying {} candidate tracks with parallel acoustic waveforms...", total_acoustic),
+                        phase_label: "Decoding acoustic waveforms".to_string(),
                         stage: 2,
                         stage_name: "acoustic".to_string(),
-                        stage_label: "Stage 2/3: Acoustic waveform verification".to_string(),
+                        stage_label: "2. Acoustic Verify".to_string(),
                         current: 0,
                         total: total_acoustic,
-                        progress: 33.0,
-                        current_file: None,
+                        progress: 50.0,
+                        current_file: first_acoustic_fname,
                         eta_secs: None,
                         speed: 0.0,
                     },
                 );
+                last_emit = std::time::Instant::now();
             }
 
             let mut computed_fps = Vec::with_capacity(total_acoustic);
@@ -1595,15 +1911,17 @@ pub fn analyze_candidates(
                             break;
                         }
                     }
-                    match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                    match rx.recv_timeout(std::time::Duration::from_millis(50)) {
                         Ok((orig_idx, fp_opt)) => {
                             computed_fps.push((orig_idx, fp_opt));
                             completed += 1;
 
                             if let Some(app) = app {
                                 let elapsed = acoustic_start.elapsed().as_secs_f64();
-                                let should_emit = completed == total_acoustic
-                                    || last_acoustic_emit.elapsed() >= std::time::Duration::from_millis(400);
+                                let is_last = completed == total_acoustic;
+                                let emit_step = (total_acoustic / 20).clamp(1, 5);
+                                let should_emit = is_last
+                                    || (completed % emit_step == 0 && last_emit.elapsed() >= std::time::Duration::from_millis(50));
                                 if should_emit {
                                     let speed = if elapsed > 0.05 && completed > 0 {
                                         (completed as f64) / elapsed
@@ -1612,7 +1930,7 @@ pub fn analyze_candidates(
                                     };
                                     let remaining = (total_acoustic - completed) as f64;
                                     let eta = if speed > 0.1 { Some(remaining / speed) } else { None };
-                                    let pct = 33.0 + ((completed as f64) / (total_acoustic as f64) * 33.0);
+                                    let pct = 50.0 + ((completed as f64) / (total_acoustic as f64) * 16.66);
                                     let fname = Path::new(&unique_candidates[orig_idx].canonical_path)
                                         .file_name()
                                         .map(|f| f.to_string_lossy().to_string());
@@ -1620,23 +1938,54 @@ pub fn analyze_candidates(
                                         "duplicate-analysis-progress",
                                         DuplicateProgressPayload {
                                             phase: "acoustic".to_string(),
-                                            phase_label: format!("Stage 2/3: Acoustic decoding ({}/{})...", completed, total_acoustic),
+                                            phase_label: "Decoding acoustic waveforms".to_string(),
                                             stage: 2,
                                             stage_name: "acoustic".to_string(),
-                                            stage_label: "Stage 2/3: Acoustic waveform verification".to_string(),
+                                            stage_label: "2. Acoustic Verify".to_string(),
                                             current: completed,
                                             total: total_acoustic,
-                                            progress: pct.clamp(33.0, 66.0),
+                                            progress: pct.clamp(50.0, 66.66),
                                             current_file: fname,
                                             eta_secs: eta,
                                             speed,
                                         },
                                     );
-                                    last_acoustic_emit = std::time::Instant::now();
+                                    last_emit = std::time::Instant::now();
                                 }
                             }
                         }
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            if let Some(app) = app {
+                                if last_emit.elapsed() >= std::time::Duration::from_millis(100) {
+                                    let elapsed = acoustic_start.elapsed().as_secs_f64();
+                                    let speed = if elapsed > 0.05 && completed > 0 {
+                                        (completed as f64) / elapsed
+                                    } else {
+                                        0.0
+                                    };
+                                    let remaining = (total_acoustic - completed) as f64;
+                                    let eta = if speed > 0.1 { Some(remaining / speed) } else { None };
+                                    let pct = 50.0 + ((completed as f64) / (total_acoustic as f64) * 16.66);
+                                    let _ = app.emit(
+                                        "duplicate-analysis-progress",
+                                        DuplicateProgressPayload {
+                                            phase: "acoustic".to_string(),
+                                            phase_label: "Decoding acoustic waveforms".to_string(),
+                                            stage: 2,
+                                            stage_name: "acoustic".to_string(),
+                                            stage_label: "2. Acoustic Verify".to_string(),
+                                            current: completed,
+                                            total: total_acoustic,
+                                            progress: pct.clamp(50.0, 66.66),
+                                            current_file: None,
+                                            eta_secs: eta,
+                                            speed,
+                                        },
+                                    );
+                                    last_emit = std::time::Instant::now();
+                                }
+                            }
+                        }
                         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     }
                 }
@@ -1667,123 +2016,224 @@ pub fn analyze_candidates(
                 }
             }
         } else if let Some(app) = app {
+            let label = if total_flagged > 0 {
+                "Cached waveforms verified"
+            } else {
+                "Acoustic verify complete"
+            };
             let _ = app.emit(
                 "duplicate-analysis-progress",
                 DuplicateProgressPayload {
                     phase: "acoustic".to_string(),
-                    phase_label: "Stage 2/3: All candidates verified via stream hashes & metadata (acoustic decode skipped)".to_string(),
+                    phase_label: label.to_string(),
                     stage: 2,
                     stage_name: "acoustic".to_string(),
-                    stage_label: "Stage 2/3: Acoustic decode skipped (all resolved via metadata)".to_string(),
-                    current: 0,
-                    total: 0,
-                    progress: 66.0,
+                    stage_label: "2. Acoustic Verify".to_string(),
+                    current: n,
+                    total: n,
+                    progress: 66.66,
                     current_file: None,
                     eta_secs: Some(0.0),
                     speed: 0.0,
                 },
             );
+            last_emit = std::time::Instant::now();
         }
     } else if let Some(app) = app {
         let _ = app.emit(
             "duplicate-analysis-progress",
             DuplicateProgressPayload {
                 phase: "acoustic".to_string(),
-                phase_label: "Stage 2/3: Acoustic decoding disabled".to_string(),
+                phase_label: "Acoustic verify disabled".to_string(),
                 stage: 2,
                 stage_name: "acoustic".to_string(),
-                stage_label: "Stage 2/3: Acoustic decoding disabled".to_string(),
+                stage_label: "2. Acoustic Verify".to_string(),
                 current: 0,
                 total: 0,
-                progress: 66.0,
+                progress: 33.33,
                 current_file: None,
                 eta_secs: Some(0.0),
                 speed: 0.0,
             },
         );
+        last_emit = std::time::Instant::now();
     }
 
     // Stage 3: Duration-windowed candidate comparison for Tier 2 (Metadata) & Tier 3 (Acoustic)
+    let stage3_start_pct = if stage2_ran { 66.66 } else { 33.33 };
+    let stage3_range = 100.0 - stage3_start_pct;
+
     let mut sorted_indices: Vec<usize> = (0..n).collect();
     sorted_indices.sort_by_key(|&idx| records[idx].duration_secs);
 
     let cluster_start = std::time::Instant::now();
-    for (step, &i) in sorted_indices.iter().enumerate() {
-        if let Some(tid) = task_id {
-            if crate::sanitizer::is_task_cancelled(tid) {
-                break;
-            }
+    let num_cluster_workers = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4)
+        .clamp(2, 8)
+        .min(n.max(1));
+
+    let work_idx = std::sync::atomic::AtomicUsize::new(0);
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    std::thread::scope(|s| {
+        for _ in 0..num_cluster_workers {
+            let tx = tx.clone();
+            let work_idx = &work_idx;
+            let sorted_ref = &sorted_indices;
+            let records_ref = &records;
+            s.spawn(move || {
+                loop {
+                    if let Some(tid) = task_id {
+                        if crate::sanitizer::is_task_cancelled(tid) {
+                            break;
+                        }
+                    }
+                    let step = work_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if step >= n {
+                        break;
+                    }
+                    let i = sorted_ref[step];
+                    let dur_i = records_ref[i].duration_secs;
+                    let mut local_matches = Vec::new();
+                    for &j in &sorted_ref[(step + 1)..] {
+                        let dur_j = records_ref[j].duration_secs;
+                        if dur_j > dur_i + 26 {
+                            break;
+                        }
+                        if let Some(edge) = check_pair_duplicate(&records_ref[i], &records_ref[j], max_acoustic_secs) {
+                            local_matches.push((i, j, edge));
+                        }
+                    }
+                    let _ = tx.send((step, local_matches));
+                }
+            });
         }
+        drop(tx);
 
-        let dur_i = records[i].duration_secs;
-        for &j in &sorted_indices[(step + 1)..] {
-            let dur_j = records[j].duration_secs;
-            if dur_j > dur_i + 26 {
-                break;
-            }
-
-            let root_i = find(&mut parent, i);
-            let root_j = find(&mut parent, j);
-            if root_i == root_j {
-                continue;
-            }
-
-            // Anti-transitive chaining check: ensure j is compatible with the cluster representative
-            let rep_i = root_i;
-            if rep_i != i {
-                if check_pair_duplicate(&records[rep_i], &records[j], max_acoustic_secs).is_none() {
-                    continue;
+        let mut completed_steps = 0usize;
+        let mut current_clustering_file: Option<String> = None;
+        while completed_steps < n {
+            if let Some(tid) = task_id {
+                if crate::sanitizer::is_task_cancelled(tid) {
+                    break;
                 }
             }
+            match rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                Ok((step, local_matches)) => {
+                    completed_steps += 1;
+                    if step < sorted_indices.len() {
+                        let track_idx = sorted_indices[step];
+                        if track_idx < unique_candidates.len() {
+                            current_clustering_file = unique_candidates[track_idx]
+                                .path
+                                .file_name()
+                                .map(|f| f.to_string_lossy().to_string());
+                        }
+                    }
+                    for (i, j, edge) in local_matches {
+                        let root_i = find(&mut parent, i);
+                        let root_j = find(&mut parent, j);
+                        if root_i == root_j {
+                            continue;
+                        }
 
-            if let Some(edge) = check_pair_duplicate(&records[i], &records[j], max_acoustic_secs) {
-                let root_i = find(&mut parent, i);
-                let root_j = find(&mut parent, j);
-                if root_i != root_j {
-                    parent[root_j] = root_i;
+                        // Anti-transitive chaining check: ensure j is compatible with the cluster representative
+                        let rep_i = root_i;
+                        if rep_i != i {
+                            if check_pair_duplicate(&records[rep_i], &records[j], max_acoustic_secs).is_none() {
+                                continue;
+                            }
+                        }
+
+                        let root_i = find(&mut parent, i);
+                        let root_j = find(&mut parent, j);
+                        if root_i != root_j {
+                            parent[root_j] = root_i;
+                        }
+                        let pair = if i < j { (i, j) } else { (j, i) };
+                        edge_info.insert(pair, edge);
+                    }
+
+                    if let Some(app) = app {
+                        let is_last = completed_steps == n;
+                        let emit_step = (n / 50).clamp(1, 10);
+                        let should_emit = is_last
+                            || (completed_steps % emit_step == 0 && last_emit.elapsed() >= std::time::Duration::from_millis(50));
+                        if should_emit {
+                            let elapsed = cluster_start.elapsed().as_secs_f64();
+                            let speed = if elapsed > 0.05 && completed_steps > 0 {
+                                completed_steps as f64 / elapsed
+                            } else {
+                                0.0
+                            };
+                            let remaining = (n.saturating_sub(completed_steps)) as f64;
+                            let eta_secs = if speed > 0.1 {
+                                Some(remaining / speed)
+                            } else {
+                                None
+                            };
+                            let pct = stage3_start_pct + ((completed_steps as f64) / (n as f64) * stage3_range);
+                            let _ = app.emit(
+                                "duplicate-analysis-progress",
+                                DuplicateProgressPayload {
+                                    phase: "clustering".to_string(),
+                                    phase_label: "Clustering duplicate tracks".to_string(),
+                                    stage: 3,
+                                    stage_name: "clustering".to_string(),
+                                    stage_label: "3. Clustering".to_string(),
+                                    current: completed_steps,
+                                    total: n,
+                                    progress: pct.clamp(stage3_start_pct, 99.5),
+                                    current_file: current_clustering_file.clone(),
+                                    eta_secs,
+                                    speed,
+                                },
+                            );
+                            last_emit = std::time::Instant::now();
+                        }
+                    }
                 }
-                let pair = if i < j { (i, j) } else { (j, i) };
-                edge_info.insert(pair, edge);
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if let Some(app) = app {
+                        if last_emit.elapsed() >= std::time::Duration::from_millis(100) {
+                            let elapsed = cluster_start.elapsed().as_secs_f64();
+                            let speed = if elapsed > 0.05 && completed_steps > 0 {
+                                completed_steps as f64 / elapsed
+                            } else {
+                                0.0
+                            };
+                            let remaining = (n.saturating_sub(completed_steps)) as f64;
+                            let eta_secs = if speed > 0.1 {
+                                Some(remaining / speed)
+                            } else {
+                                None
+                            };
+                            let pct = stage3_start_pct + ((completed_steps as f64) / (n as f64) * stage3_range);
+                            let _ = app.emit(
+                                "duplicate-analysis-progress",
+                                DuplicateProgressPayload {
+                                    phase: "clustering".to_string(),
+                                    phase_label: "Clustering duplicate tracks".to_string(),
+                                    stage: 3,
+                                    stage_name: "clustering".to_string(),
+                                    stage_label: "3. Clustering".to_string(),
+                                    current: completed_steps,
+                                    total: n,
+                                    progress: pct.clamp(stage3_start_pct, 99.5),
+                                    current_file: current_clustering_file.clone(),
+                                    eta_secs,
+                                    speed,
+                                },
+                            );
+                            last_emit = std::time::Instant::now();
+                        }
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
-
-        if let Some(app) = app {
-            if (step % 25 == 0 || step + 1 == n)
-                && last_emit.elapsed() >= std::time::Duration::from_millis(500)
-            {
-                let elapsed = cluster_start.elapsed().as_secs_f64();
-                let speed = if elapsed > 0.05 && step > 0 {
-                    (step + 1) as f64 / elapsed
-                } else {
-                    0.0
-                };
-                let remaining = (n.saturating_sub(step + 1)) as f64;
-                let eta_secs = if speed > 0.1 {
-                    Some(remaining / speed)
-                } else {
-                    None
-                };
-                let pct = 66.0 + ((step as f64) / (n as f64) * 33.0);
-                let _ = app.emit(
-                    "duplicate-analysis-progress",
-                    DuplicateProgressPayload {
-                        phase: "clustering".to_string(),
-                        phase_label: "Stage 3/3: Comparing candidates & clustering duplicate groups...".to_string(),
-                        stage: 3,
-                        stage_name: "clustering".to_string(),
-                        stage_label: "Stage 3/3: Comparing candidates & clustering duplicate groups".to_string(),
-                        current: step + 1,
-                        total: n,
-                        progress: pct.clamp(66.0, 99.0),
-                        current_file: None,
-                        eta_secs,
-                        speed,
-                    },
-                );
-                last_emit = std::time::Instant::now();
-            }
-        }
-    }
+    });
 
     let mut clusters: HashMap<usize, Vec<usize>> = HashMap::new();
     for i in 0..n {
@@ -1820,7 +2270,16 @@ pub fn analyze_candidates(
             .min()
             .unwrap_or(0);
 
-        // Sort members so index 0 is the Superior Winner
+        let default_criteria = vec![
+            "clean_duration".to_string(),
+            "format_quality".to_string(),
+            "bitrate".to_string(),
+            "source_priority".to_string(),
+            "playlist_priority".to_string(),
+        ];
+        let active_criteria = winner_criteria.unwrap_or(&default_criteria);
+
+        // Sort members so index 0 is the Superior Winner according to configurable criteria
         members.sort_by(|&a, &b| {
             compare_candidates_priority(
                 &unique_candidates[a],
@@ -1828,7 +2287,9 @@ pub fn analyze_candidates(
                 &unique_candidates[b],
                 &records[b],
                 min_dur,
+                active_criteria,
             )
+            .0
         });
 
         let winner_idx = members[0];
@@ -1897,32 +2358,16 @@ pub fn analyze_candidates(
             };
 
             let winner_reason = if is_winner {
-                let second_cand = &unique_candidates[members[1]];
-                let second_rec = &records[members[1]];
-                if cand.playlist_index < second_cand.playlist_index {
-                    format!(
-                        "Higher Playlist Priority ({})",
-                        cand.playlist_name
-                    )
-                } else if cand.source_index < second_cand.source_index {
-                    format!("Source #{} Priority", cand.source_index + 1)
-                } else if min_dur > 30
-                    && rec.duration_secs < second_rec.duration_secs.saturating_sub(4)
-                {
-                    "Clean Duration (No Ad/Intro)".to_string()
-                } else if format_quality_rank(&rec.format_ext)
-                    > format_quality_rank(&second_rec.format_ext)
-                {
-                    format!(
-                        "Superior Format ({} > {})",
-                        rec.format_ext.to_uppercase(),
-                        second_rec.format_ext.to_uppercase()
-                    )
-                } else if rec.bitrate_kbps > second_rec.bitrate_kbps {
-                    format!("Higher Bitrate ({} kbps)", rec.bitrate_kbps)
-                } else {
-                    format!("Source #{} Priority", cand.source_index + 1)
-                }
+                let second_idx = members[1];
+                let (_, reason) = compare_candidates_priority(
+                    &unique_candidates[winner_idx],
+                    &records[winner_idx],
+                    &unique_candidates[second_idx],
+                    &records[second_idx],
+                    min_dur,
+                    active_criteria,
+                );
+                reason
             } else {
                 format!("Source #{}", cand.source_index + 1)
             };
@@ -2083,6 +2528,7 @@ pub async fn analyze_playlist_duplicates(
     formats: String,
     computeAcoustic: Option<bool>,
     maxAcousticSeconds: Option<u32>,
+    winnerCriteria: Option<Vec<String>>,
 ) -> Result<DuplicateAnalysisReport, String> {
     tokio::task::spawn_blocking(move || {
         let effective_task_id = taskId.as_deref().unwrap_or("duplicate_analysis");
@@ -2114,7 +2560,7 @@ pub async fn analyze_playlist_duplicates(
             let (candidates, _) =
                 gather_playlist_candidates(pl, pl_idx, &resolved_source_dir, &formats_set);
             let (_, _, mut report) =
-                analyze_candidates(&candidates, &resolved_source_dir, run_acoustic, max_acoustic_secs, false, Some(&app), Some(effective_task_id));
+                analyze_candidates(&candidates, &resolved_source_dir, run_acoustic, max_acoustic_secs, false, Some(&app), Some(effective_task_id), winnerCriteria.as_deref());
             report.scope_name = format!("Playlist: {}", pl.name);
             Ok(report)
         } else {
@@ -2142,7 +2588,7 @@ pub async fn analyze_playlist_duplicates(
             }
 
             let (_, _, mut report) =
-                analyze_candidates(&all_candidates, &resolved_source_dir, run_acoustic, max_acoustic_secs, true, Some(&app), Some(effective_task_id));
+                analyze_candidates(&all_candidates, &resolved_source_dir, run_acoustic, max_acoustic_secs, true, Some(&app), Some(effective_task_id), winnerCriteria.as_deref());
             report.scope_name = "All Playlists & Workspace".to_string();
             Ok(report)
         }
@@ -2166,19 +2612,235 @@ pub async fn prune_fingerprint_cache(clearAll: Option<bool>) -> Result<PruneCach
     .map_err(|e| format!("Thread execution error: {}", e))?
 }
 
+/// Inspect whether an audio file already has a YouTube URL or video ID embedded in its audio tags
+pub fn track_tags_contain_youtube_id(file_path: &Path) -> (bool, Option<String>) {
+    let (id_b, id_p, id_t, yt_url_re) = get_yt_regexes();
+    if let Ok(tagged_file) = Probe::open(file_path).and_then(|p| p.read()) {
+        if let Some(tag) = tagged_file.primary_tag().or_else(|| tagged_file.first_tag()) {
+            if let Some(comment) = tag.comment() {
+                if let Some(caps) = yt_url_re.captures(&comment) {
+                    if let Some(m) = caps.get(1) {
+                        return (true, Some(m.as_str().to_string()));
+                    }
+                }
+                let trim = comment.trim();
+                if crate::downloader::is_valid_standalone_youtube_id(trim) {
+                    return (true, Some(trim.to_string()));
+                }
+                if let Some(caps) = id_b.captures(trim).or_else(|| id_p.captures(trim)).or_else(|| id_t.captures(trim)) {
+                    if let Some(m) = caps.get(1) {
+                        return (true, Some(m.as_str().to_string()));
+                    }
+                }
+            }
+            for item in tag.items() {
+                if let Some(val) = item.value().text() {
+                    if let Some(caps) = yt_url_re.captures(val) {
+                        if let Some(m) = caps.get(1) {
+                            return (true, Some(m.as_str().to_string()));
+                        }
+                    }
+                    let trim = val.trim();
+                    if crate::downloader::is_valid_standalone_youtube_id(trim) {
+                        let key_str = format!("{:?}", item.key()).to_lowercase();
+                        if key_str.contains("comment")
+                            || key_str.contains("description")
+                            || key_str.contains("purl")
+                            || key_str.contains("txxx")
+                        {
+                            return (true, Some(trim.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (false, None)
+}
+
+/// During duplicate cleanup, ensure the kept file retains a YouTube URL/video ID in its audio tags.
+/// If the kept file does not have a YouTube ID in its tags, search the duplicate files being deleted
+/// (checking their tags, DB fingerprint cache, filename, or pre-extracted ID), embed the YouTube URL into the kept file's tags,
+/// and update the cache so the kept track retains the video ID permanently.
+pub fn transfer_youtube_id_to_kept_file(
+    kept_path: &Path,
+    delete_paths: &[String],
+    group_yt_id: Option<&str>,
+    conn_opt: &mut Option<Connection>,
+) -> bool {
+    if !kept_path.exists() {
+        return false;
+    }
+
+    // 1. If kept file already has YouTube ID in its audio tags, do nothing!
+    let (kept_has_tag, _) = track_tags_contain_youtube_id(kept_path);
+    if kept_has_tag {
+        return false;
+    }
+
+    let (id_b, id_p, id_t, _) = get_yt_regexes();
+    let mut found_yt_id: Option<String> = None;
+
+    // 2. Check pre-extracted group_yt_id first if provided
+    if let Some(id) = group_yt_id {
+        let trim = id.trim();
+        if crate::downloader::is_valid_standalone_youtube_id(trim) {
+            found_yt_id = Some(trim.to_string());
+        }
+    }
+
+    // 3. Search for YouTube ID from the duplicate files being deleted
+    if found_yt_id.is_none() {
+        for del_path_str in delete_paths {
+            let del_path = Path::new(del_path_str);
+
+            // A. From deleted file's audio tags
+            if del_path.exists() {
+                let (has_tag, tag_id) = track_tags_contain_youtube_id(del_path);
+                if has_tag {
+                    if let Some(id) = tag_id {
+                        found_yt_id = Some(id);
+                        break;
+                    }
+                }
+            }
+
+            // B. From DB cache
+            if let Some(ref conn) = conn_opt {
+                if let Ok(mut stmt) = conn.prepare("SELECT youtube_id FROM track_fingerprints WHERE file_path = ?1") {
+                    if let Ok(db_id) = stmt.query_row(rusqlite::params![del_path_str], |r| r.get::<_, Option<String>>(0)) {
+                        if let Some(id) = db_id {
+                            let trim = id.trim();
+                            if crate::downloader::is_valid_standalone_youtube_id(trim) {
+                                found_yt_id = Some(trim.to_string());
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // C. From deleted file's filename
+            if del_path.exists() {
+                if let Some(name) = del_path.file_name().and_then(|n| n.to_str()) {
+                    if let Some(caps) = id_b.captures(name).or_else(|| id_p.captures(name)).or_else(|| id_t.captures(name)) {
+                        if let Some(m) = caps.get(1) {
+                            let cand = m.as_str();
+                            if crate::downloader::is_valid_standalone_youtube_id(cand) {
+                                found_yt_id = Some(cand.to_string());
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. If found YouTube ID, embed it into kept file's audio tags
+    if let Some(ref ytid) = found_yt_id {
+        let yt_url = format!("https://www.youtube.com/watch?v={}", ytid);
+        if let Ok(mut tagged_file) = Probe::open(kept_path).and_then(|p| p.read()) {
+            let tag_type = tagged_file.primary_tag_type();
+            let tag = if tagged_file.primary_tag().is_some() {
+                tagged_file.primary_tag_mut().unwrap()
+            } else if tagged_file.first_tag().is_some() {
+                tagged_file.first_tag_mut().unwrap()
+            } else {
+                tagged_file.insert_tag(Tag::new(tag_type));
+                tagged_file.primary_tag_mut().unwrap()
+            };
+
+            let comment_val = if let Some(existing) = tag.comment() {
+                let trim = existing.trim();
+                if trim.is_empty() {
+                    yt_url.clone()
+                } else if trim.contains(ytid) {
+                    trim.to_string()
+                } else {
+                    format!("{} | {}", trim, yt_url)
+                }
+            } else {
+                yt_url.clone()
+            };
+            tag.set_comment(comment_val);
+
+            if tagged_file.save_to_path(kept_path, lofty::config::WriteOptions::default()).is_ok() {
+                // Update SQLite track_fingerprints table
+                let kept_str = kept_path.to_string_lossy().to_string();
+                if let Some(ref mut conn) = conn_opt {
+                    let _ = conn.execute(
+                        "UPDATE track_fingerprints SET youtube_id = ?1 WHERE file_path = ?2",
+                        rusqlite::params![ytid, kept_str],
+                    );
+                }
+                // Update in-memory metadata cache
+                if let Some((mtime, size)) = crate::utils::get_file_mtime_and_size(kept_path) {
+                    let meta = crate::playlist::probe_track_metadata(kept_path, mtime, size);
+                    crate::playlist::save_cached_metadata_batch(&[meta]);
+                }
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 #[tauri::command]
 pub async fn delete_duplicate_files(
-    filePaths: Vec<String>,
+    filePaths: Option<Vec<String>>,
+    cleanupGroups: Option<Vec<DuplicateCleanupGroup>>,
 ) -> Result<DeleteDuplicatesResult, String> {
     tokio::task::spawn_blocking(move || {
         let mut deleted_count = 0;
         let mut failed_count = 0;
         let mut freed_bytes = 0u64;
         let mut errors = Vec::new();
+        let mut tags_transferred_count = 0;
 
         let mut conn_opt = open_cache_db();
 
-        for path_str in &filePaths {
+        // 1. If cleanup groups are provided, perform tag transfer to kept files before deletion!
+        if let Some(ref groups) = cleanupGroups {
+            for group in groups {
+                if let Some(ref kept_str) = group.kept_file_path {
+                    let kept_path = Path::new(kept_str);
+                    if transfer_youtube_id_to_kept_file(
+                        kept_path,
+                        &group.files_to_delete,
+                        group.youtube_id.as_deref(),
+                        &mut conn_opt,
+                    ) {
+                        tags_transferred_count += 1;
+                    }
+                }
+            }
+        }
+
+        // 2. Gather all unique paths to delete
+        let mut all_to_delete = Vec::new();
+        let mut seen = HashSet::new();
+
+        if let Some(ref groups) = cleanupGroups {
+            for group in groups {
+                for p in &group.files_to_delete {
+                    if seen.insert(p.clone()) {
+                        all_to_delete.push(p.clone());
+                    }
+                }
+            }
+        }
+
+        if let Some(paths) = filePaths {
+            for p in paths {
+                if seen.insert(p.clone()) {
+                    all_to_delete.push(p);
+                }
+            }
+        }
+
+        for path_str in &all_to_delete {
             let path = Path::new(path_str);
             if path.exists() {
                 if let Ok(meta) = path.metadata() {
@@ -2216,6 +2878,7 @@ pub async fn delete_duplicate_files(
             failed_count,
             freed_bytes,
             errors,
+            tags_transferred_count,
         })
     })
     .await
@@ -2237,7 +2900,7 @@ pub fn build_export_superior_replacement_map(
         all_candidates.extend(cands);
     }
 
-    let (_, replacement_map, _) = analyze_candidates(&all_candidates, source_dir, false, 60, true, None, None);
+    let (_, replacement_map, _) = analyze_candidates(&all_candidates, source_dir, false, 60, true, None, None, None);
     replacement_map
 }
 
@@ -2275,7 +2938,7 @@ mod tests {
             .collect();
 
         // Test with acoustic fingerprinting enabled (the mode that previously failed)
-        let (_, _, report_with) = analyze_candidates(&candidates, souls_dir, true, 60, false, None, None);
+        let (_, _, report_with) = analyze_candidates(&candidates, souls_dir, true, 60, false, None, None, None);
 
         // Crucial requirement: only ONE song is duplicated ("Ami Are Bhabbona"),
         // and all other 39 songs must remain unique!
@@ -2301,7 +2964,7 @@ mod tests {
         assert_eq!(report_with.redundant_files_count, 1);
 
         // Also test with acoustic fingerprinting disabled
-        let (_, _, report_without) = analyze_candidates(&candidates, souls_dir, false, 60, false, None, None);
+        let (_, _, report_without) = analyze_candidates(&candidates, souls_dir, false, 60, false, None, None, None);
         assert_eq!(
             report_without.duplicate_groups.len(),
             1,
@@ -2352,6 +3015,19 @@ mod tests {
         assert!(conf >= 90);
         assert_eq!(offset, 0.0);
         assert!(verified_secs >= 55.0, "Expected at least 55s verified, got {}", verified_secs);
+    }
+
+    #[test]
+    fn test_transfer_youtube_id_to_kept_file_logic() {
+        let temp_dir = std::env::temp_dir().join(format!("dedup_test_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let kept = temp_dir.join("nonexistent_kept.mp3");
+        let dup = temp_dir.join("dup_song [dQw4w9WgXcQ].mp3");
+
+        // When kept file doesn't exist, returns false gracefully
+        assert!(!transfer_youtube_id_to_kept_file(&kept, &[dup.to_string_lossy().to_string()], None, &mut None));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
 
