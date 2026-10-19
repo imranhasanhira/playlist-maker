@@ -23,6 +23,7 @@ import { AddEntryModal } from "../components/downloads/AddEntryModal";
 import { GlobalSettingsPanel } from "../components/downloads/GlobalSettingsPanel";
 import { ConfirmModal } from "../components/common/ConfirmModal";
 import { FileRepairModal } from "../components/FileRepairModal";
+import { useResizablePanel } from "../hooks/useResizablePanel";
 
 type DownloadsViewProps = {
   config: MainConfig | null;
@@ -113,42 +114,12 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({ config }) => {
 
 
   // Resizable panel width state (Persisted in localStorage)
-  const [leftWidth, setLeftWidth] = useState<number>(() => {
-    try {
-      const saved = localStorage.getItem("dl_left_panel_width");
-      return saved ? parseInt(saved, 10) : 420;
-    } catch (e) {
-      return 420;
-    }
+  const { width: leftWidth, handleMouseDown } = useResizablePanel({
+    storageKey: "dl_left_panel_width",
+    defaultWidth: 420,
+    minWidth: 240,
+    maxWidth: 800,
   });
-
-  useEffect(() => {
-    try {
-      localStorage.setItem("dl_left_panel_width", leftWidth.toString());
-    } catch (e) {}
-  }, [leftWidth]);
-
-  const handleMouseDown = (e: React.MouseEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startWidth = leftWidth;
-
-    const handleMouseMove = (moveEvent: MouseEvent) => {
-      const deltaX = moveEvent.clientX - startX;
-      const newWidth = startWidth + deltaX;
-      if (newWidth > 240 && newWidth < 800) {
-        setLeftWidth(newWidth);
-      }
-    };
-
-    const handleMouseUp = () => {
-      window.removeEventListener("mousemove", handleMouseMove);
-      window.removeEventListener("mouseup", handleMouseUp);
-    };
-
-    window.addEventListener("mousemove", handleMouseMove);
-    window.addEventListener("mouseup", handleMouseUp);
-  };
 
   // Label Filtering State
   const [selectedLabels, setSelectedLabels] = useState<string[]>([]);

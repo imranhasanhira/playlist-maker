@@ -11,10 +11,14 @@ import {
   ExportDiffReport,
   AudioTrack,
 } from "../types";
-import { formatSize, formatSpeed, formatEta } from "../utils/formatters";
+import { formatSize } from "../utils/formatters";
 import { useDebounce } from "../hooks/useDebounce";
 import { ConfirmModal } from "../components/common/ConfirmModal";
 import { OrphanRecoveryModal } from "../components/OrphanRecoveryModal";
+import { ExportDiffModal } from "../components/export/ExportDiffModal";
+import { ExportLogsModal } from "../components/export/ExportLogsModal";
+import { ExportPlaylistDiffTable } from "../components/export/ExportPlaylistDiffTable";
+import { ExportDuplicateOrphansTable } from "../components/export/ExportDuplicateOrphansTable";
 
 export type { ExportStatus, ExportTrackItem, ExportOrphanItem, ExportDuplicateOrphanItem, ExportPlaylistItem, ExportPlaylistDiffItem, ExportDiffReport };
 
@@ -1947,373 +1951,34 @@ export const ExportView: React.FC<ExportViewProps> = ({
             )}
 
             {activeTab === "playlists" && (
-              sortedItems.playlistDiffs.length > 0 ? (
-                <>
-                  <table style={{ tableLayout: "fixed", width: "100%" }}>
-                    <thead>
-                      <tr>
-                        <th style={{ width: "36px", textAlign: "center" }}>
-                          <input
-                            type="checkbox"
-                            checked={
-                              sortedItems.playlistDiffs.length > 0 &&
-                              sortedItems.playlistDiffs.every((item) => selectedItemPaths.has(item.filename))
-                            }
-                            onChange={() => handleToggleSelectAll(sortedItems.playlistDiffs)}
-                            style={{ cursor: "pointer" }}
-                          />
-                        </th>
-                        <th
-                          style={{ width: "110px", cursor: "pointer", userSelect: "none" }}
-                          onClick={() => handleToggleSort("status")}
-                          title="Click to sort by Status"
-                        >
-                          <div style={{ display: "inline-flex", alignItems: "center" }}>
-                            <span>Status</span>
-                            {renderSortIndicator("status")}
-                          </div>
-                        </th>
-                        <th
-                          style={{ width: "30%", cursor: "pointer", userSelect: "none" }}
-                          onClick={() => handleToggleSort("source")}
-                          title="Click to sort by Playlist Name"
-                        >
-                          <div style={{ display: "inline-flex", alignItems: "center" }}>
-                            <span>Playlist Filename</span>
-                            {renderSortIndicator("source")}
-                          </div>
-                        </th>
-                        <th style={{ width: "105px", textAlign: "center" }}>
-                          <span>Source Tracks</span>
-                        </th>
-                        <th style={{ width: "105px", textAlign: "center" }}>
-                          <span>Dest Tracks</span>
-                        </th>
-                        <th style={{ width: "24%" }}>
-                          <span>Diff Summary</span>
-                        </th>
-                        <th
-                          style={{ width: "80px", textAlign: "right", cursor: "pointer", userSelect: "none" }}
-                          onClick={() => handleToggleSort("size")}
-                          title="Click to sort by File Size"
-                        >
-                          <div style={{ display: "inline-flex", alignItems: "center", justifyContent: "flex-end" }}>
-                            <span>Size</span>
-                            {renderSortIndicator("size")}
-                          </div>
-                        </th>
-                        <th style={{ width: "95px", textAlign: "center" }}>
-                          <span>Action</span>
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {sortedItems.playlistDiffs.slice(0, visibleLimit).map((item, idx) => {
-                        const isSelected = selectedItemPaths.has(item.filename);
-                        return (
-                          <tr
-                            key={idx}
-                            className={isSelected ? "selected" : undefined}
-                            data-selected={isSelected}
-                            title={item.source_path || item.dest_path}
-                            onClick={(e) => handleToggleSelectItem(item.filename, idx, e.shiftKey, sortedItems.playlistDiffs)}
-                            style={{ cursor: "pointer", userSelect: "none" }}
-                          >
-                            <td style={{ textAlign: "center" }} onClick={(e) => e.stopPropagation()}>
-                              <input
-                                type="checkbox"
-                                checked={isSelected}
-                                onChange={(e) => handleToggleSelectItem(item.filename, idx, (e.nativeEvent as MouseEvent).shiftKey, sortedItems.playlistDiffs)}
-                                style={{ cursor: "pointer" }}
-                              />
-                            </td>
-                            <td>
-                              {item.status === "New" && (
-                                <span className="badge" style={{ backgroundColor: "rgba(34, 197, 94, 0.15)", color: "var(--success)", border: "1px solid var(--success)", padding: "2px 6px", borderRadius: "4px", fontSize: "0.72rem", fontWeight: 600 }}>
-                                  🟢 NEW
-                                </span>
-                              )}
-                              {item.status === "Modified" && (
-                                <span className="badge" style={{ backgroundColor: "rgba(245, 158, 11, 0.15)", color: "var(--warning)", border: "1px solid var(--warning)", padding: "2px 6px", borderRadius: "4px", fontSize: "0.72rem", fontWeight: 600 }}>
-                                  🟠 MODIFIED
-                                </span>
-                              )}
-                              {item.status === "UpToDate" && (
-                                <span className="badge" style={{ backgroundColor: "var(--bg-tertiary)", color: "var(--text-muted)", border: "1px solid var(--border-color)", padding: "2px 6px", borderRadius: "4px", fontSize: "0.72rem" }}>
-                                  ⚪ IN SYNC
-                                </span>
-                              )}
-                              {item.status === "Orphan" && (
-                                <span className="badge" style={{ backgroundColor: "rgba(239, 68, 68, 0.15)", color: "var(--danger)", border: "1px solid var(--danger)", padding: "2px 6px", borderRadius: "4px", fontSize: "0.72rem", fontWeight: 600 }}>
-                                  🔴 ORPHAN
-                                </span>
-                              )}
-                            </td>
-                            <td style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                              <div style={{ fontWeight: 600, fontSize: "0.85rem", color: item.status === "Orphan" ? "var(--danger)" : "var(--text-primary)" }}>
-                                {item.filename}
-                              </div>
-                              <div className="text-secondary" style={{ fontSize: "0.72rem", fontFamily: "var(--font-mono)", opacity: 0.8 }}>
-                                {item.name}
-                              </div>
-                            </td>
-                            <td style={{ textAlign: "center", fontFamily: "var(--font-mono)", fontSize: "0.82rem" }}>
-                              {item.status === "Orphan" ? (
-                                <span style={{ opacity: 0.4 }}>—</span>
-                              ) : (
-                                <span style={{ color: "var(--accent-purple)", fontWeight: 600 }}>{item.track_count_source}</span>
-                              )}
-                            </td>
-                            <td style={{ textAlign: "center", fontFamily: "var(--font-mono)", fontSize: "0.82rem" }}>
-                              {item.status === "New" ? (
-                                <span style={{ opacity: 0.4 }}>—</span>
-                              ) : (
-                                <span style={{ color: item.status === "Orphan" ? "var(--danger)" : "var(--text-secondary)", fontWeight: 600 }}>{item.track_count_dest}</span>
-                              )}
-                            </td>
-                            <td style={{ fontSize: "0.8rem", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                              <span style={{
-                                color: item.status === "New"
-                                  ? "var(--success)"
-                                  : item.status === "Modified"
-                                  ? "var(--warning)"
-                                  : item.status === "Orphan"
-                                  ? "var(--danger)"
-                                  : "var(--text-secondary)"
-                              }}>
-                                {item.diff_summary}
-                              </span>
-                            </td>
-                            <td style={{ fontFamily: "var(--font-mono)", textAlign: "right", fontSize: "0.78rem" }}>
-                              {formatSize(item.size_bytes)}
-                            </td>
-                            <td style={{ textAlign: "center" }} onClick={(e) => e.stopPropagation()}>
-                              {item.status === "New" && (
-                                <button
-                                  className="btn btn-primary"
-                                  disabled={isApplyingAction}
-                                  onClick={() => handleApplyPlaylists("single", item)}
-                                  style={{ padding: "2px 8px", fontSize: "0.72rem", display: "inline-flex", alignItems: "center", gap: "3px", backgroundColor: "var(--success)", borderColor: "var(--success)", color: "#000", fontWeight: 600 }}
-                                  title="Copy this playlist to USB"
-                                >
-                                  ⚡ Copy
-                                </button>
-                              )}
-                              {item.status === "Modified" && (
-                                <button
-                                  className="btn btn-primary"
-                                  disabled={isApplyingAction}
-                                  onClick={() => handleApplyPlaylists("single", item)}
-                                  style={{ padding: "2px 8px", fontSize: "0.72rem", display: "inline-flex", alignItems: "center", gap: "3px", backgroundColor: "var(--warning)", borderColor: "var(--warning)", color: "#000", fontWeight: 600 }}
-                                  title="Overwrite this playlist on USB with latest order and tracks"
-                                >
-                                  ⚡ Overwrite
-                                </button>
-                              )}
-                              {item.status === "Orphan" && (
-                                <button
-                                  className="btn btn-secondary"
-                                  disabled={isApplyingAction}
-                                  onClick={() => handleDeleteOrphanPlaylists(false, item)}
-                                  style={{ padding: "2px 8px", fontSize: "0.72rem", color: "var(--danger)", borderColor: "var(--danger)", fontWeight: 600 }}
-                                  title="Delete this orphan playlist from USB destination"
-                                >
-                                  🗑 Delete
-                                </button>
-                              )}
-                              {item.status === "UpToDate" && (
-                                <span className="text-secondary" style={{ fontSize: "0.75rem" }}>
-                                  ✓ In Sync
-                                </span>
-                              )}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                  {sortedItems.playlistDiffs.length > visibleLimit && (
-                    <div className="text-secondary" style={{ textAlign: "center", padding: "8px", fontSize: "0.75rem", fontFamily: "var(--font-mono)" }}>
-                      Showing {visibleLimit} of {sortedItems.playlistDiffs.length} playlists (Scroll down to load more)
-                    </div>
-                  )}
-                </>
-              ) : (
-                <div className="no-data">
-                  {searchQuery ? "No matching playlists found." : "No playlists found in config target directory."}
-                </div>
-              )
+              <ExportPlaylistDiffTable
+                items={sortedItems.playlistDiffs}
+                visibleLimit={visibleLimit}
+                selectedItemPaths={selectedItemPaths}
+                onToggleSelectAll={handleToggleSelectAll}
+                onToggleSelectItem={handleToggleSelectItem}
+                onToggleSort={handleToggleSort}
+                renderSortIndicator={renderSortIndicator}
+                onApplyPlaylists={handleApplyPlaylists}
+                onDeleteOrphanPlaylists={handleDeleteOrphanPlaylists}
+                isApplyingAction={isApplyingAction}
+                searchQuery={searchQuery}
+              />
             )}
 
             {activeTab === "duplicate_orphans" && (
-              sortedItems.duplicateOrphans.length > 0 ? (
-                <>
-                  <table style={{ tableLayout: "fixed", width: "100%" }}>
-                    <thead>
-                      <tr>
-                        <th style={{ width: "36px", textAlign: "center" }}>
-                          <input
-                            type="checkbox"
-                            checked={
-                              sortedItems.duplicateOrphans.length > 0 &&
-                              sortedItems.duplicateOrphans.every((item) => selectedItemPaths.has(item.relative_path))
-                            }
-                            onChange={() => handleToggleSelectAll(sortedItems.duplicateOrphans)}
-                            style={{ cursor: "pointer" }}
-                          />
-                        </th>
-                        <th
-                          style={{ width: "120px", cursor: "pointer", userSelect: "none" }}
-                          onClick={() => handleToggleSort("status")}
-                          title="Click to sort by Match Type"
-                        >
-                          <div style={{ display: "inline-flex", alignItems: "center" }}>
-                            <span>Match Tier</span>
-                            {renderSortIndicator("status")}
-                          </div>
-                        </th>
-                        <th
-                          style={{ width: "38%", cursor: "pointer", userSelect: "none" }}
-                          onClick={() => handleToggleSort("source")}
-                          title="Click to sort by Destination Duplicate Path"
-                        >
-                          <div style={{ display: "inline-flex", alignItems: "center" }}>
-                            <span>Duplicate File on USB (Orphan)</span>
-                            {renderSortIndicator("source")}
-                          </div>
-                        </th>
-                        <th
-                          style={{ width: "38%", cursor: "pointer", userSelect: "none" }}
-                          onClick={() => handleToggleSort("dest")}
-                          title="Click to sort by Matched Active Track"
-                        >
-                          <div style={{ display: "inline-flex", alignItems: "center" }}>
-                            <span>Matches Active Track (Kept)</span>
-                            {renderSortIndicator("dest")}
-                          </div>
-                        </th>
-                        <th
-                          style={{ width: "85px", textAlign: "right", cursor: "pointer", userSelect: "none" }}
-                          onClick={() => handleToggleSort("size")}
-                          title="Click to sort by File Size"
-                        >
-                          <div style={{ display: "inline-flex", alignItems: "center", justifyContent: "flex-end" }}>
-                            <span>Size</span>
-                            {renderSortIndicator("size")}
-                          </div>
-                        </th>
-                        <th style={{ width: "75px", textAlign: "center" }}>
-                          <span>Action</span>
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {sortedItems.duplicateOrphans.slice(0, visibleLimit).map((item, idx) => {
-                        const isSelected = selectedItemPaths.has(item.relative_path);
-                        const tierColor = item.match_tier === "exact_hash"
-                          ? "var(--success)"
-                          : item.match_tier === "youtube_id"
-                          ? "var(--accent-purple)"
-                          : item.match_tier === "acoustic"
-                          ? "var(--accent-blue)"
-                          : "var(--warning)";
-                        const tierBg = item.match_tier === "exact_hash"
-                          ? "rgba(34, 197, 94, 0.15)"
-                          : item.match_tier === "youtube_id"
-                          ? "rgba(168, 85, 247, 0.15)"
-                          : item.match_tier === "acoustic"
-                          ? "rgba(59, 130, 246, 0.15)"
-                          : "rgba(234, 179, 8, 0.15)";
-                        const tierLabel = item.match_tier === "exact_hash"
-                          ? "EXACT HASH"
-                          : item.match_tier === "youtube_id"
-                          ? "YOUTUBE ID"
-                          : item.match_tier === "acoustic"
-                          ? "ACOUSTIC"
-                          : "METADATA";
-
-                        return (
-                          <tr
-                            key={idx}
-                            className={isSelected ? "selected" : undefined}
-                            data-selected={isSelected}
-                            title={`Orphan: ${item.file_path}\nDuplicates: ${item.matched_file_path}\nReason: ${item.match_reason}`}
-                            onClick={(e) => handleToggleSelectItem(item.relative_path, idx, e.shiftKey, sortedItems.duplicateOrphans)}
-                            style={{ cursor: "pointer", userSelect: "none" }}
-                          >
-                            <td style={{ textAlign: "center" }} onClick={(e) => e.stopPropagation()}>
-                              <input
-                                type="checkbox"
-                                checked={isSelected}
-                                onChange={(e) => handleToggleSelectItem(item.relative_path, idx, (e.nativeEvent as MouseEvent).shiftKey, sortedItems.duplicateOrphans)}
-                                style={{ cursor: "pointer" }}
-                              />
-                            </td>
-                            <td>
-                              <span
-                                className="badge"
-                                style={{
-                                  backgroundColor: tierBg,
-                                  color: tierColor,
-                                  border: `1px solid ${tierColor}`,
-                                  padding: "2px 6px",
-                                  borderRadius: "4px",
-                                  fontSize: "0.70rem",
-                                  fontWeight: 600,
-                                }}
-                                title={item.match_reason}
-                              >
-                                {tierLabel}
-                              </span>
-                            </td>
-                            <td style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={item.file_path}>
-                              <div style={{ color: "var(--danger)", textDecoration: "line-through", opacity: 0.85, fontSize: "0.82rem" }}>
-                                {item.relative_path}
-                              </div>
-                            </td>
-                            <td style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={item.matched_file_path}>
-                              <div style={{ color: "var(--text-primary)", fontWeight: 500, fontSize: "0.82rem" }}>
-                                {item.matched_dest_relative_path}
-                              </div>
-                              <div className="text-secondary" style={{ fontSize: "0.72rem", opacity: 0.8 }}>
-                                ↳ {item.match_reason}
-                              </div>
-                            </td>
-                            <td style={{ fontFamily: "var(--font-mono)", textAlign: "right", fontSize: "0.78rem" }}>
-                              {formatSize(item.size_bytes)}
-                            </td>
-                            <td style={{ textAlign: "center" }} onClick={(e) => e.stopPropagation()}>
-                              <button
-                                className="btn btn-secondary"
-                                disabled={isApplyingAction}
-                                onClick={() => handleDeleteDuplicateOrphans(false, item)}
-                                style={{
-                                  padding: "2px 6px",
-                                  fontSize: "0.70rem",
-                                  color: "var(--danger)",
-                                  borderColor: "var(--danger)",
-                                }}
-                                title={`Permanently delete redundant duplicate copy "${item.relative_path}" from USB`}
-                              >
-                                🗑 Delete
-                              </button>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                  {sortedItems.duplicateOrphans.length > visibleLimit && (
-                    <div className="text-secondary" style={{ textAlign: "center", padding: "8px", fontSize: "0.75rem", fontFamily: "var(--font-mono)" }}>
-                      Showing {visibleLimit} of {sortedItems.duplicateOrphans.length} duplicate orphan files (Scroll down to load more)
-                    </div>
-                  )}
-                </>
-              ) : (
-                <div className="no-data">
-                  {searchQuery ? "No matching duplicate orphan files found." : "✅ No duplicate orphan files found! All orphan files on destination are unique."}
-                </div>
-              )
+              <ExportDuplicateOrphansTable
+                items={sortedItems.duplicateOrphans}
+                visibleLimit={visibleLimit}
+                selectedItemPaths={selectedItemPaths}
+                onToggleSelectAll={handleToggleSelectAll}
+                onToggleSelectItem={handleToggleSelectItem}
+                onToggleSort={handleToggleSort}
+                renderSortIndicator={renderSortIndicator}
+                onDeleteDuplicateOrphans={handleDeleteDuplicateOrphans}
+                isApplyingAction={isApplyingAction}
+                searchQuery={searchQuery}
+              />
             )}
 
             {activeTab === "orphans" && (
@@ -2528,260 +2193,29 @@ export const ExportView: React.FC<ExportViewProps> = ({
       )}
 
       {/* Execution Logs Modal */}
-      {showLogsModal && (() => {
-        const progressPercent = exportProgress && exportProgress.total_bytes > 0
-          ? Math.min(100, Math.round((exportProgress.copied_bytes / exportProgress.total_bytes) * 100))
-          : 0;
-
-        const elapsedSec = exportProgress ? Math.max(0.1, (Date.now() - exportProgress.startTime) / 1000) : 0;
-        const currentSpeed = exportProgress ? exportProgress.copied_bytes / elapsedSec : 0;
-        const remainingBytes = exportProgress ? Math.max(0, exportProgress.total_bytes - exportProgress.copied_bytes) : 0;
-        const etaSec = currentSpeed > 0 ? remainingBytes / currentSpeed : 0;
-
-        return (
-          <div style={{
-            position: "fixed",
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            backgroundColor: "rgba(0, 0, 0, 0.75)",
-            backdropFilter: "blur(4px)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 1000
-          }}>
-            <div className="card" style={{ width: "720px", maxHeight: "85%", display: "flex", flexDirection: "column", margin: 0, padding: "20px" }}>
-              <div className="card-title" style={{ borderBottom: "1px solid var(--border-color)", paddingBottom: "10px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                  <span style={{ fontWeight: 600, fontSize: "1rem" }}>Export Progress & Logs</span>
-                  {!isExportAutoScroll && exportLogs.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={handleExportScrollToLatest}
-                      style={{
-                        backgroundColor: "rgba(138, 92, 246, 0.15)",
-                        color: "var(--accent-purple-hover)",
-                        border: "1px solid var(--accent-purple)",
-                        borderRadius: "14px",
-                        padding: "2px 10px",
-                        fontSize: "0.74rem",
-                        fontWeight: 600,
-                        cursor: "pointer",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "4px",
-                        transition: "all 0.2s ease",
-                      }}
-                      title="Click to jump to latest logs and resume auto-scroll"
-                    >
-                      <span>⬇ Jump to latest</span>
-                    </button>
-                  )}
-                </div>
-                <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-                  {isExporting && (
-                    <button
-                      className="btn btn-danger"
-                      onClick={handleCancelExport}
-                      style={{ padding: "4px 12px", fontSize: "0.8rem" }}
-                    >
-                      🛑 Stop Export
-                    </button>
-                  )}
-                  <button
-                    className="btn btn-secondary"
-                    onClick={() => setShowLogsModal(false)}
-                    style={{ padding: "4px 12px", fontSize: "0.8rem" }}
-                  >
-                    Close
-                  </button>
-                </div>
-              </div>
-
-              {/* Sticky Progress Header */}
-              {exportProgress && (
-                <div style={{
-                  backgroundColor: "var(--bg-tertiary)",
-                  border: "1px solid var(--border-color)",
-                  padding: "12px 14px",
-                  borderRadius: "8px",
-                  marginTop: "12px",
-                  marginBottom: "4px"
-                }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.85rem", fontWeight: 600, marginBottom: "8px" }}>
-                    <span style={{ color: "var(--text-primary)" }}>
-                      {exportProgress.current_file_index} out of {exportProgress.total_files} files ({progressPercent}%)
-                    </span>
-                    <span style={{ color: "var(--accent-purple)", fontFamily: "var(--font-mono)" }}>
-                      {formatSize(exportProgress.copied_bytes)} / {formatSize(exportProgress.total_bytes)} ({formatSpeed(currentSpeed)})
-                    </span>
-                  </div>
-
-                  {/* Progress Bar Track with Inline Stop/Cross Button */}
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px" }}>
-                    <div style={{ flex: 1, height: "8px", backgroundColor: "var(--bg-surface)", border: "1px solid var(--border-color)", borderRadius: "4px", overflow: "hidden" }}>
-                      <div style={{ width: `${progressPercent}%`, height: "100%", backgroundColor: isExporting ? "var(--accent-purple)" : "var(--success)", transition: "width 0.3s ease" }} />
-                    </div>
-                    {isExporting && (
-                      <button
-                        onClick={handleCancelExport}
-                        style={{
-                          background: "rgba(239, 68, 68, 0.15)",
-                          border: "1px solid var(--danger)",
-                          color: "var(--danger)",
-                          borderRadius: "4px",
-                          cursor: "pointer",
-                          padding: "2px 6px",
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          fontSize: "0.75rem",
-                          fontWeight: 600,
-                          gap: "4px",
-                        }}
-                        title="Stop Export Task"
-                      >
-                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-                          <line x1="18" y1="6" x2="6" y2="18"></line>
-                          <line x1="6" y1="6" x2="18" y2="18"></line>
-                        </svg>
-                        <span>Stop</span>
-                      </button>
-                    )}
-                  </div>
-
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.78rem", color: "var(--text-muted)" }}>
-                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "60%" }} title={exportProgress.current_file}>
-                      📄 {exportProgress.current_file}
-                    </span>
-                    <span style={{ fontWeight: 600, color: isExporting ? "var(--accent-purple-hover)" : "var(--success)" }}>
-                      {isExporting ? `⏱ ETA: ${formatEta(etaSec)}` : exportLogs.some(l => l.includes("stopped")) ? "🛑 Stopped" : "✅ Export Complete"}
-                    </span>
-                  </div>
-                </div>
-              )}
-
-              <div
-                ref={logContainerRef}
-                onScroll={handleExportLogsScroll}
-                className="console-log"
-                style={{ flex: 1, minHeight: "260px", maxHeight: "400px", overflowY: "auto", marginTop: "12px" }}
-              >
-                {exportLogs.join("\n")}
-              </div>
-            </div>
-          </div>
-        );
-      })()}
+      <ExportLogsModal
+        isOpen={showLogsModal}
+        onClose={() => setShowLogsModal(false)}
+        exportProgress={exportProgress}
+        isExporting={isExporting}
+        isExportAutoScroll={isExportAutoScroll}
+        exportLogs={exportLogs}
+        onCancelExport={handleCancelExport}
+        onScrollToLatest={handleExportScrollToLatest}
+        onLogsScroll={handleExportLogsScroll}
+        logContainerRef={logContainerRef}
+      />
 
       {/* Git-Diff Style Inspection Modal */}
-      {inspectDiffItem && (
-        <div className="modal-backdrop" onClick={() => setInspectDiffItem(null)} style={{ zIndex: 1100 }}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: "750px", width: "90%", maxHeight: "85vh", display: "flex", flexDirection: "column" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid var(--border-color)", paddingBottom: "12px", marginBottom: "16px" }}>
-              <div>
-                <h3 style={{ margin: 0, fontSize: "1.1rem", display: "flex", alignItems: "center", gap: "8px" }}>
-                  <span style={{ color: "var(--warning)" }}>🟠 Updated Track Diff</span>
-                </h3>
-                <div style={{ fontSize: "0.82rem", color: "var(--text-secondary)", marginTop: "4px", fontFamily: "var(--font-mono)" }}>
-                  {inspectDiffItem.relative_path}
-                </div>
-              </div>
-              <button className="btn btn-secondary" onClick={() => setInspectDiffItem(null)} style={{ padding: "4px 8px" }}>
-                ✕
-              </button>
-            </div>
-
-            <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: "14px" }}>
-              {/* Badges overview */}
-              <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
-                <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>Changes detected:</span>
-                {inspectDiffItem.diff_details?.has_tag_changes && (
-                  <span className="badge" style={{ backgroundColor: "rgba(245, 158, 11, 0.15)", color: "var(--warning)", border: "1px solid var(--warning)", padding: "2px 8px", borderRadius: "4px", fontSize: "0.75rem", fontWeight: 600 }}>
-                    🏷️ Metadata Tags
-                  </span>
-                )}
-                {inspectDiffItem.diff_details?.has_artwork_changes && (
-                  <span className="badge" style={{ backgroundColor: "rgba(168, 85, 247, 0.15)", color: "var(--accent-purple)", border: "1px solid var(--accent-purple)", padding: "2px 8px", borderRadius: "4px", fontSize: "0.75rem", fontWeight: 600 }}>
-                    🖼️ Cover Art
-                  </span>
-                )}
-                {inspectDiffItem.diff_details?.has_audio_changes ? (
-                  <span className="badge" style={{ backgroundColor: "rgba(239, 68, 68, 0.15)", color: "var(--danger)", border: "1px solid var(--danger)", padding: "2px 8px", borderRadius: "4px", fontSize: "0.75rem", fontWeight: 600 }}>
-                    🔊 Audio Stream Re-encoded
-                  </span>
-                ) : (
-                  <span className="badge" style={{ backgroundColor: "rgba(34, 197, 94, 0.15)", color: "var(--success)", border: "1px solid var(--success)", padding: "2px 8px", borderRadius: "4px", fontSize: "0.75rem", fontWeight: 600 }}>
-                    🎶 Audio Stream Unchanged
-                  </span>
-                )}
-              </div>
-
-              {/* Git-Diff Style Comparison Table */}
-              <div style={{ border: "1px solid var(--border-color)", borderRadius: "6px", overflow: "hidden", backgroundColor: "var(--bg-secondary)" }}>
-                <div style={{ display: "grid", gridTemplateColumns: "130px 1fr 1fr", padding: "8px 12px", borderBottom: "1px solid var(--border-color)", fontWeight: 600, fontSize: "0.78rem", color: "var(--text-secondary)", textTransform: "uppercase" }}>
-                  <span>Field</span>
-                  <span style={{ color: "var(--danger)" }}>- Destination USB (Old)</span>
-                  <span style={{ color: "var(--success)" }}>+ Source Library (New)</span>
-                </div>
-
-                <div style={{ display: "flex", flexDirection: "column" }}>
-                  {inspectDiffItem.diff_details?.diffs && inspectDiffItem.diff_details.diffs.length > 0 ? (
-                    inspectDiffItem.diff_details.diffs.map((diff, idx) => (
-                      <div
-                        key={idx}
-                        style={{
-                          display: "grid",
-                          gridTemplateColumns: "130px 1fr 1fr",
-                          padding: "8px 12px",
-                          borderBottom: idx < inspectDiffItem.diff_details!.diffs.length - 1 ? "1px solid var(--border-color)" : "none",
-                          fontSize: "0.82rem",
-                          fontFamily: "var(--font-mono)",
-                          backgroundColor: idx % 2 === 0 ? "transparent" : "rgba(255, 255, 255, 0.02)",
-                        }}
-                      >
-                        <span style={{ fontWeight: 600, color: "var(--text-primary)", fontFamily: "inherit" }}>
-                          {diff.field}
-                        </span>
-                        <span style={{ color: "var(--danger)", wordBreak: "break-word", paddingRight: "8px" }}>
-                          {diff.old_value ? `- ${diff.old_value}` : <span style={{ opacity: 0.4 }}>&lt;None&gt;</span>}
-                        </span>
-                        <span style={{ color: "var(--success)", wordBreak: "break-word" }}>
-                          {diff.new_value ? `+ ${diff.new_value}` : <span style={{ opacity: 0.4 }}>&lt;Removed&gt;</span>}
-                        </span>
-                      </div>
-                    ))
-                  ) : (
-                    <div style={{ padding: "16px", textAlign: "center", color: "var(--text-muted)", fontSize: "0.82rem" }}>
-                      No granular field differences detected (timestamp or file size mismatch).
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid var(--border-color)", paddingTop: "12px", marginTop: "16px" }}>
-              <button
-                className="btn btn-primary"
-                disabled={isApplyingAction}
-                onClick={() => {
-                  const item = inspectDiffItem;
-                  setInspectDiffItem(null);
-                  handleApplyCopies("updated", false, item);
-                }}
-                style={{ padding: "6px 14px", backgroundColor: "var(--warning)", borderColor: "var(--warning)", color: "#000", fontWeight: 600, display: "inline-flex", alignItems: "center", gap: "6px" }}
-              >
-                ⚡ Apply This Update to USB
-              </button>
-              <button className="btn btn-secondary" onClick={() => setInspectDiffItem(null)} style={{ padding: "6px 16px" }}>
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <ExportDiffModal
+        inspectDiffItem={inspectDiffItem}
+        onClose={() => setInspectDiffItem(null)}
+        isApplyingAction={isApplyingAction}
+        onApplyUpdate={(item) => {
+          setInspectDiffItem(null);
+          handleApplyCopies("updated", false, item);
+        }}
+      />
 
       {/* Confirmation Modal */}
       {confirmModal && (

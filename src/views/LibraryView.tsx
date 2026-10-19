@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { MainConfig, AudioTrack, TrackPreview } from "../types";
 import { ResolvedTracksPanel } from "../components/ResolvedTracksPanel";
 import { ConfirmModal } from "../components/common/ConfirmModal";
+import { useResizablePanel } from "../hooks/useResizablePanel";
 
 type LibraryViewProps = {
   config: MainConfig | null;
@@ -65,7 +66,12 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
   }, [expandedPaths]);
 
   // Resizable panel width state
-  const [leftWidth, setLeftWidth] = useState<number>(280);
+  const { width: leftWidth, handleMouseDown } = useResizablePanel({
+    storageKey: "library_left_panel_width",
+    defaultWidth: 280,
+    minWidth: 180,
+    maxWidth: 600,
+  });
 
   // Selected items (supports Cmd / Ctrl multi-selection)
   const [selectedNodes, setSelectedNodes] = useState<Map<string, DirTreeNode>>(new Map());
@@ -87,7 +93,12 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
   const [showBatchConfirmModal, setShowBatchConfirmModal] = useState<boolean>(false);
 
   // Resolved tracks for directory preview panel
-  const [middleWidth, setMiddleWidth] = useState<number>(380);
+  const { width: middleWidth, handleMouseDown: handleMiddleMouseDown } = useResizablePanel({
+    storageKey: "library_middle_panel_width",
+    defaultWidth: 380,
+    minWidth: 200,
+    maxWidth: 800,
+  });
   const [dirPreviews, setDirPreviews] = useState<TrackPreview[]>([]);
   const [isLoadingDirPreviews, setIsLoadingDirPreviews] = useState<boolean>(false);
   const [dirPreviewsError, setDirPreviewsError] = useState<string>("");
@@ -413,51 +424,6 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
         cover_mime: null,
       });
     }
-  };
-
-  // Drag resizer handler
-  const handleMouseDown = (e: React.MouseEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startWidth = leftWidth;
-
-    const handleMouseMove = (moveEvent: MouseEvent) => {
-      const deltaX = moveEvent.clientX - startX;
-      const newWidth = startWidth + deltaX;
-      if (newWidth > 180 && newWidth < 600) {
-        setLeftWidth(newWidth);
-      }
-    };
-
-    const handleMouseUp = () => {
-      window.removeEventListener("mousemove", handleMouseMove);
-      window.removeEventListener("mouseup", handleMouseUp);
-    };
-
-    window.addEventListener("mousemove", handleMouseMove);
-    window.addEventListener("mouseup", handleMouseUp);
-  };
-
-  const handleMiddleMouseDown = (e: React.MouseEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startWidth = middleWidth;
-
-    const handleMouseMove = (moveEvent: MouseEvent) => {
-      const deltaX = moveEvent.clientX - startX;
-      const newWidth = startWidth + deltaX;
-      if (newWidth > 200 && newWidth < 800) {
-        setMiddleWidth(newWidth);
-      }
-    };
-
-    const handleMouseUp = () => {
-      window.removeEventListener("mousemove", handleMouseMove);
-      window.removeEventListener("mouseup", handleMouseUp);
-    };
-
-    window.addEventListener("mousemove", handleMouseMove);
-    window.addEventListener("mouseup", handleMouseUp);
   };
 
   const renderTree = (node: DirTreeNode, depth = 0): React.ReactNode => {
