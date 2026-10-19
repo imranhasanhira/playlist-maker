@@ -700,6 +700,8 @@ pub fn run() {
             export::clean_export_hidden_files,
             export::apply_export_renames,
             export::apply_export_copies,
+            export::scan_recoverable_hindi_orphans,
+            export::restore_orphan_tracks_to_source,
             watcher::start_fs_watcher,
             watcher::stop_fs_watcher,
             downloader::start_download_job,

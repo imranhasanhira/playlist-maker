@@ -572,6 +572,7 @@ function App() {
               setDiffReport={setExportDiffReport}
               isStale={isExportDiffStale}
               onDismissStale={() => setIsExportDiffStale(false)}
+              onPlayTrack={handlePlayTrack}
             />
           )}
         </div>

@@ -8,10 +8,12 @@ import {
   ExportDuplicateOrphanItem,
   ExportPlaylistItem,
   ExportDiffReport,
+  AudioTrack,
 } from "../types";
 import { formatSize, formatSpeed, formatEta } from "../utils/formatters";
 import { useDebounce } from "../hooks/useDebounce";
 import { ConfirmModal } from "../components/common/ConfirmModal";
+import { OrphanRecoveryModal } from "../components/OrphanRecoveryModal";
 
 export type { ExportStatus, ExportTrackItem, ExportOrphanItem, ExportDuplicateOrphanItem, ExportPlaylistItem, ExportDiffReport };
 
@@ -25,6 +27,7 @@ type ExportViewProps = {
   setDiffReport: (report: ExportDiffReport | null) => void;
   isStale: boolean;
   onDismissStale: () => void;
+  onPlayTrack?: (track: AudioTrack, queue: AudioTrack[], playlistName: string) => void;
 };
 
 export const ExportView: React.FC<ExportViewProps> = ({
@@ -37,6 +40,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
   setDiffReport,
   isStale,
   onDismissStale,
+  onPlayTrack,
 }) => {
   const [exportDir, setExportDir] = useState<string>(() => {
     try {
@@ -298,6 +302,8 @@ export const ExportView: React.FC<ExportViewProps> = ({
     message: string;
     type: "success" | "error" | "info";
   } | null>(null);
+
+  const [isRecoveryModalOpen, setIsRecoveryModalOpen] = useState<boolean>(false);
 
   useEffect(() => {
     if (!notification) return;
@@ -849,95 +855,6 @@ export const ExportView: React.FC<ExportViewProps> = ({
         </div>
       </div>
 
-      {/* Summary Cards */}
-      {diffReport && (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: "10px" }}>
-          <div className="card" style={{ padding: "12px 14px", margin: 0 }}>
-            <div className="text-secondary" style={{ fontSize: "0.75rem", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>
-              🟢 New Tracks
-            </div>
-            <div style={{ fontSize: "1.2rem", fontWeight: 700, marginTop: "4px", color: "var(--text-primary)" }}>
-              {diffReport.new_files.length} files
-            </div>
-            <div className="text-secondary" style={{ fontSize: "0.78rem", fontFamily: "var(--font-mono)", marginTop: "2px" }}>
-              {formatSize(diffReport.total_bytes_to_copy)}
-            </div>
-          </div>
-
-          <div className="card" style={{ padding: "12px 14px", margin: 0 }}>
-            <div className="text-secondary" style={{ fontSize: "0.75rem", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>
-              🟠 Updated Tracks
-            </div>
-            <div style={{ fontSize: "1.2rem", fontWeight: 700, marginTop: "4px", color: (diffReport.updated_files?.length || 0) > 0 ? "var(--warning)" : "var(--text-primary)" }}>
-              {diffReport.updated_files?.length || 0} files
-            </div>
-            <div className="text-secondary" style={{ fontSize: "0.78rem", fontFamily: "var(--font-mono)", marginTop: "2px" }}>
-              {formatSize(diffReport.total_bytes_updated || 0)}
-            </div>
-          </div>
-
-          <div className="card" style={{ padding: "12px 14px", margin: 0 }}>
-            <div className="text-secondary" style={{ fontSize: "0.75rem", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>
-              🔄 Renamed (Instant)
-            </div>
-            <div style={{ fontSize: "1.2rem", fontWeight: 700, marginTop: "4px", color: (diffReport.renamed_files?.length || 0) > 0 ? "var(--accent-blue)" : "var(--text-primary)" }}>
-              {diffReport.renamed_files?.length || 0} files
-            </div>
-            <div className="text-secondary" style={{ fontSize: "0.78rem", fontFamily: "var(--font-mono)", marginTop: "2px" }}>
-              {formatSize(diffReport.total_bytes_renamed || 0)} (0s USB copy)
-            </div>
-          </div>
-
-          <div className="card" style={{ padding: "12px 14px", margin: 0 }}>
-            <div className="text-secondary" style={{ fontSize: "0.75rem", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>
-              ⚪ Up to Date (Skipped)
-            </div>
-            <div style={{ fontSize: "1.2rem", fontWeight: 700, marginTop: "4px", color: "var(--text-primary)" }}>
-              {diffReport.up_to_date_files.length} files
-            </div>
-            <div className="text-secondary" style={{ fontSize: "0.78rem", fontFamily: "var(--font-mono)", marginTop: "2px" }}>
-              {formatSize(diffReport.total_bytes_up_to_date)}
-            </div>
-          </div>
-
-          <div className="card" style={{ padding: "12px 14px", margin: 0 }}>
-            <div className="text-secondary" style={{ fontSize: "0.75rem", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>
-              👥 Duplicate Orphans
-            </div>
-            <div style={{ fontSize: "1.2rem", fontWeight: 700, marginTop: "4px", color: (diffReport.duplicate_orphans?.length || 0) > 0 ? "var(--warning)" : "var(--text-primary)" }}>
-              {diffReport.duplicate_orphans?.length || 0} files
-            </div>
-            <div className="text-secondary" style={{ fontSize: "0.78rem", fontFamily: "var(--font-mono)", marginTop: "2px" }}>
-              {formatSize(diffReport.total_bytes_duplicate_orphans || 0)}
-            </div>
-          </div>
-
-          <div className="card" style={{ padding: "12px 14px", margin: 0 }}>
-            <div className="text-secondary" style={{ fontSize: "0.75rem", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>
-              🔴 Destination Orphans
-            </div>
-            <div style={{ fontSize: "1.2rem", fontWeight: 700, marginTop: "4px", color: diffReport.orphan_files.length > 0 ? "var(--danger)" : "var(--text-primary)" }}>
-              {diffReport.orphan_files.length} files
-            </div>
-            <div className="text-secondary" style={{ fontSize: "0.78rem", fontFamily: "var(--font-mono)", marginTop: "2px" }}>
-              {formatSize(diffReport.total_bytes_orphans)}
-            </div>
-          </div>
-
-          <div className="card" style={{ padding: "12px 14px", margin: 0 }}>
-            <div className="text-secondary" style={{ fontSize: "0.75rem", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>
-              🎶 Playlists to Export
-            </div>
-            <div style={{ fontSize: "1.2rem", fontWeight: 700, marginTop: "4px", color: "var(--accent-purple)" }}>
-              {diffReport.playlists.length} M3U8
-            </div>
-            <div className="text-secondary" style={{ fontSize: "0.78rem", fontFamily: "var(--font-mono)", marginTop: "2px" }}>
-              Relative M3U links
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Main Diff Dashboard */}
       {diffReport ? (
         <div className="card" style={{ flex: 1, display: "flex", flexDirection: "column", margin: 0, overflow: "hidden", padding: "14px 16px" }}>
@@ -949,7 +866,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
                 onClick={() => setActiveTab("new")}
                 style={{ padding: "4px 12px", fontSize: "0.8rem" }}
               >
-                🟢 New ({filteredItems.newFiles.length})
+                🟢 New ({filteredItems.newFiles.length} • {formatSize(diffReport.total_bytes_to_copy)})
               </button>
               <button
                 className={`btn ${activeTab === "updated" ? "btn-primary" : "btn-secondary"}`}
@@ -961,7 +878,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
                   color: filteredItems.updatedFiles.length > 0 && activeTab !== "updated" ? "var(--warning)" : undefined,
                 }}
               >
-                🟠 Updated ({filteredItems.updatedFiles.length})
+                🟠 Updated ({filteredItems.updatedFiles.length} • {formatSize(diffReport.total_bytes_updated || 0)})
               </button>
               <button
                 className={`btn ${activeTab === "renamed" ? "btn-primary" : "btn-secondary"}`}
@@ -973,14 +890,14 @@ export const ExportView: React.FC<ExportViewProps> = ({
                   color: filteredItems.renamedFiles.length > 0 && activeTab !== "renamed" ? "var(--accent-blue)" : undefined,
                 }}
               >
-                🔄 Renamed ({filteredItems.renamedFiles.length})
+                🔄 Renamed ({filteredItems.renamedFiles.length} • {formatSize(diffReport.total_bytes_renamed || 0)})
               </button>
               <button
                 className={`btn ${activeTab === "uptodate" ? "btn-primary" : "btn-secondary"}`}
                 onClick={() => setActiveTab("uptodate")}
                 style={{ padding: "4px 12px", fontSize: "0.8rem" }}
               >
-                ⚪ Up-to-Date ({filteredItems.upToDateFiles.length})
+                ⚪ Up-to-Date ({filteredItems.upToDateFiles.length} • {formatSize(diffReport.total_bytes_up_to_date)})
               </button>
               <button
                 className={`btn ${activeTab === "duplicate_orphans" ? "btn-primary" : "btn-secondary"}`}
@@ -992,14 +909,19 @@ export const ExportView: React.FC<ExportViewProps> = ({
                   color: filteredItems.duplicateOrphans.length > 0 && activeTab !== "duplicate_orphans" ? "var(--warning)" : undefined,
                 }}
               >
-                👥 Duplicate Orphans ({filteredItems.duplicateOrphans.length})
+                👥 Duplicate Orphans ({filteredItems.duplicateOrphans.length} • {formatSize(diffReport.total_bytes_duplicate_orphans || 0)})
               </button>
               <button
                 className={`btn ${activeTab === "orphans" ? "btn-primary" : "btn-secondary"}`}
                 onClick={() => setActiveTab("orphans")}
-                style={{ padding: "4px 12px", fontSize: "0.8rem" }}
+                style={{
+                  padding: "4px 12px",
+                  fontSize: "0.8rem",
+                  borderColor: filteredItems.orphanFiles.length > 0 ? "var(--danger)" : undefined,
+                  color: filteredItems.orphanFiles.length > 0 && activeTab !== "orphans" ? "var(--danger)" : undefined,
+                }}
               >
-                🔴 Orphan Files ({filteredItems.orphanFiles.length})
+                🔴 Orphan Files ({filteredItems.orphanFiles.length} • {formatSize(diffReport.total_bytes_orphans)})
               </button>
               <button
                 className={`btn ${activeTab === "warnings" ? "btn-primary" : "btn-secondary"}`}
@@ -1012,6 +934,50 @@ export const ExportView: React.FC<ExportViewProps> = ({
                 }}
               >
                 ⚠️ Warnings ({filteredItems.warningItems.length})
+              </button>
+
+              <span
+                style={{
+                  fontSize: "0.78rem",
+                  color: "var(--accent-purple)",
+                  padding: "3px 8px",
+                  backgroundColor: "rgba(168, 85, 247, 0.08)",
+                  borderRadius: "6px",
+                  border: "1px solid rgba(168, 85, 247, 0.2)",
+                  fontWeight: 600,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "4px",
+                }}
+                title={`${diffReport.playlists.length} M3U8 relative playlists to export`}
+              >
+                🎶 {diffReport.playlists.length} M3U8 Playlists
+              </span>
+
+              {/* Restore Hindi Year Orphans Button */}
+              <button
+                className="btn btn-secondary"
+                onClick={() => setIsRecoveryModalOpen(true)}
+                style={{
+                  padding: "4px 12px",
+                  fontSize: "0.8rem",
+                  borderColor: "var(--accent-purple)",
+                  color: "var(--accent-purple)",
+                  fontWeight: 600,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "6px",
+                  marginLeft: "4px",
+                  backgroundColor: "rgba(168, 85, 247, 0.08)",
+                }}
+                title="Scan and restore deleted Hindi year tracks from pendrive back to source library"
+              >
+                <span>📦 Restore Hindi Year Orphans</span>
+                {((diffReport.duplicate_orphans?.length || 0) + diffReport.orphan_files.length) > 0 && (
+                  <span style={{ fontSize: "0.72rem", backgroundColor: "rgba(168, 85, 247, 0.25)", padding: "1px 6px", borderRadius: "10px" }}>
+                    {(diffReport.duplicate_orphans?.length || 0) + diffReport.orphan_files.length}
+                  </span>
+                )}
               </button>
 
               {activeTab === "warnings" && diffReport?.warnings?.some((w) => w.warning_type === "apple_double") && (
@@ -2373,6 +2339,19 @@ export const ExportView: React.FC<ExportViewProps> = ({
           }}
         />
       )}
+
+      {/* Orphan Recovery Modal */}
+      <OrphanRecoveryModal
+        isOpen={isRecoveryModalOpen}
+        onClose={() => setIsRecoveryModalOpen(false)}
+        configPath={configPath}
+        destination={exportDir}
+        relativeToConfig={relativeToConfig}
+        onPlayTrack={onPlayTrack}
+        onRecoveryComplete={() => {
+          handleAnalyzeDiff();
+        }}
+      />
 
       {/* Toast Notification */}
       {notification && (

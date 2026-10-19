@@ -158,6 +158,48 @@ export interface ExportDiffReport {
   total_bytes_duplicate_orphans?: number;
 }
 
+export interface RecoverableOrphanChoice {
+  file_path: string;
+  relative_path: string;
+  filename: string;
+  format: string;
+  size_bytes: number;
+  duration_secs: number;
+  is_m4a: boolean;
+  quality_rank: number;
+  match_reason: string;
+}
+
+export interface RecoverableOrphanGroup {
+  id: string;
+  target_relative_path: string;
+  target_source_path: string;
+  year: string;
+  song_name: string;
+  choices: RecoverableOrphanChoice[];
+  selected_choice_index: number;
+}
+
+export interface RecoverableOrphansReport {
+  groups: RecoverableOrphanGroup[];
+  total_missing_songs: number;
+  total_candidate_files: number;
+  total_bytes: number;
+  source_base_dir: string;
+}
+
+export interface OrphanRestoreItem {
+  source_pendrive_path: string;
+  target_source_path: string;
+}
+
+export interface OrphanRestoreResult {
+  restored_count: number;
+  failed_count: number;
+  restored_bytes: number;
+  errors: string[];
+}
+
 export interface ExportProgressPayload {
   task_id: string;
   current_file_index: number;
