@@ -118,6 +118,19 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   const [isReordering, setIsReordering] = useState<boolean>(false);
   const [previewsCache, setPreviewsCache] = useState<Record<string, TrackPreview[]>>({});
   const [appendTrackCount, setAppendTrackCount] = useState<boolean>(true);
+  const [playlistExtension, setPlaylistExtension] = useState<"m3u" | "m3u8">(() => {
+    try {
+      return (localStorage.getItem("playlist_extension") as "m3u" | "m3u8") || "m3u8";
+    } catch {
+      return "m3u8";
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("playlist_extension", playlistExtension);
+    } catch {}
+  }, [playlistExtension]);
 
   // Sorting state for playlist tiles (Config Order vs Name display sort)
   type PlSortBy = "config" | "name";
@@ -426,6 +439,9 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   }, [configPath, config?.playlists?.length]);
 
   useEffect(() => {
+    if (isReordering) {
+      return;
+    }
     setIsConfirmingDelete(false);
     setSelectedBucketKey("all");
     if (activePlaylist && selectedPlaylistIndex !== null) {
@@ -440,7 +456,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     } else {
       setPreviews([]);
     }
-  }, [selectedPlaylistIndex, rulesFingerprint]);
+  }, [selectedPlaylistIndex, rulesFingerprint, isReordering]);
 
   const formatPathTail = (pathStr: string) => {
     if (!pathStr) return "";
@@ -822,11 +838,12 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     try {
       const logs = await invoke<string[]>("generate_all_playlists", {
         configPath,
-        sourceDirOverride: null,
-        targetDirOverride: null,
+        sourceDirOverride: config?.sourceDir || null,
+        targetDirOverride: config?.targetDir || null,
         relativeToConfig,
         formats,
         appendTrackCount,
+        extension: playlistExtension,
       });
       if (logs && logs.length > 0) {
         setGenerationLogs(logs);
@@ -854,7 +871,74 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
           <h1 style={{ fontSize: "1.4rem", margin: 0 }}>Playlist Builder</h1>
           <p className="subtitle" style={{ margin: 0, fontSize: "0.82rem" }}>Visually build, customize, and preview your playlist directories.</p>
         </div>
-        <div style={{ display: "flex", gap: "8px" }}>
+        <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+          {/* M3U vs M3U8 Visible Toggle */}
+          <div
+            style={{
+              display: "inline-flex",
+              borderRadius: "6px",
+              border: "1px solid var(--border-color)",
+              overflow: "hidden",
+              height: "36px",
+              backgroundColor: "var(--bg-secondary)",
+            }}
+            title="Toggle playlist format (.m3u vs UTF-8 .m3u8)"
+          >
+            <button
+              className={`btn ${playlistExtension === "m3u" ? "btn-primary" : "btn-secondary"}`}
+              onClick={() => setPlaylistExtension("m3u")}
+              style={{
+                borderRadius: 0,
+                padding: "0 10px",
+                fontSize: "0.8rem",
+                border: "none",
+                fontWeight: playlistExtension === "m3u" ? 600 : 400,
+                backgroundColor: playlistExtension === "m3u" ? undefined : "transparent",
+              }}
+              title="Generate .m3u playlist files"
+            >
+              .m3u
+            </button>
+            <button
+              className={`btn ${playlistExtension === "m3u8" ? "btn-primary" : "btn-secondary"}`}
+              onClick={() => setPlaylistExtension("m3u8")}
+              style={{
+                borderRadius: 0,
+                padding: "0 10px",
+                fontSize: "0.8rem",
+                border: "none",
+                fontWeight: playlistExtension === "m3u8" ? 600 : 400,
+                backgroundColor: playlistExtension === "m3u8" ? undefined : "transparent",
+              }}
+              title="Generate .m3u8 (UTF-8) playlist files"
+            >
+              .m3u8
+            </button>
+          </div>
+
+          {/* Suffix Track Count Icon Toggle */}
+          <button
+            className={`btn ${appendTrackCount ? "btn-primary" : "btn-secondary"}`}
+            onClick={() => setAppendTrackCount(!appendTrackCount)}
+            style={{
+              width: "36px",
+              height: "36px",
+              padding: 0,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              borderRadius: "6px",
+            }}
+            title={
+              appendTrackCount
+                ? "Suffix track count enabled (e.g. 'Rock (45).m3u'). Click to disable suffix."
+                : "Suffix track count disabled. Click to append (track_count) suffix to filenames."
+            }
+          >
+            <span style={{ fontSize: "0.82rem", fontWeight: 700, letterSpacing: "-0.5px" }}>(#)</span>
+          </button>
+
+          {/* Duplicate Analysis Button */}
           <button
             className="btn btn-secondary"
             onClick={() =>
@@ -888,6 +972,8 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
               <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
             </svg>
           </button>
+
+          {/* Reorder Button (One word: Reorder / Done) */}
           <button
             className={`btn ${isReordering ? "btn-primary" : "btn-secondary"}`}
             onClick={() => {
@@ -900,36 +986,17 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
             style={{ padding: "8px 14px", fontSize: "0.85rem" }}
             title="Toggle item reorder mode"
           >
-            {isReordering ? "Done Reordering" : "⇅ Reorder Mode"}
+            {isReordering ? "Done" : "Reorder"}
           </button>
-          <label
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: "6px",
-              fontSize: "0.82rem",
-              color: "var(--text-secondary)",
-              cursor: "pointer",
-              userSelect: "none",
-              padding: "0 6px",
-            }}
-            title="Append track count in (xx) to the playlist filename, e.g. Rock Classics - 2012 - p01 (450).m3u"
-          >
-            <input
-              type="checkbox"
-              checked={appendTrackCount}
-              onChange={(e) => setAppendTrackCount(e.target.checked)}
-              style={{ accentColor: "var(--accent-purple)", cursor: "pointer" }}
-            />
-            <span>Include count (xx)</span>
-          </label>
+
+          {/* Generate Button (One word: Generate / Compiling...) */}
           <button
             className="btn btn-primary"
             onClick={handleGeneratePlaylists}
             disabled={isGenerating}
             style={{ padding: "8px 16px", fontSize: "0.85rem" }}
           >
-            {isGenerating ? "Compiling..." : "⚡ Generate Playlists (.m3u)"}
+            {isGenerating ? "Compiling..." : "Generate"}
           </button>
         </div>
       </div>
