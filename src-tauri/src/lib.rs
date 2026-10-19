@@ -200,6 +200,7 @@ async fn generate_all_playlists(
     relativeToConfig: bool,
     formats: String,
     appendTrackCount: Option<bool>,
+    extension: Option<String>,
 ) -> Result<Vec<String>, String> {
     tokio::task::spawn_blocking(move || {
         let config = playlist::read_config_file(Path::new(&configPath))?;
@@ -235,11 +236,13 @@ async fn generate_all_playlists(
         };
 
         let should_append_count = appendTrackCount.unwrap_or(true);
+        let ext = extension.as_deref().unwrap_or("m3u8").trim_start_matches('.').to_lowercase();
 
         emit_log(format!(
-            "$ generate-playlists --config \"{}\" --formats \"{}\"{}{}",
+            "$ generate-playlists --config \"{}\" --formats \"{}\" --ext \"{}\"{}{}",
             configPath,
             formats,
+            ext,
             if relativeToConfig { " --relative-to-config" } else { "" },
             if should_append_count { " --append-track-count" } else { "" }
         ), &mut logs);
@@ -270,13 +273,13 @@ async fn generate_all_playlists(
                         sub.name
                     };
                     let sanitized = file_name.replace('/', "_").replace('\\', "_");
-                    let playlist_file_path = resolved_target_dir.join(format!("{}.m3u", sanitized));
+                    let playlist_file_path = resolved_target_dir.join(format!("{}.{}", sanitized, ext));
                     match playlist::write_playlist_file(&playlist_file_path, &sub.files) {
                         Ok(_) => {
                             total_generated += 1;
-                            emit_log(format!("  ✅ Created: {}.m3u ({} tracks)", sanitized, count), &mut logs);
+                            emit_log(format!("  ✅ Created: {}.{} ({} tracks)", sanitized, ext, count), &mut logs);
                         }
-                        Err(e) => emit_log(format!("  ❌ ERROR: Failed to write {}.m3u: {}", sanitized, e), &mut logs),
+                        Err(e) => emit_log(format!("  ❌ ERROR: Failed to write {}.{}: {}", sanitized, ext, e), &mut logs),
                     }
                 } else {
                     emit_log(format!("  ⚠️ Skipped \"{}\" (no matching tracks)", sub.name), &mut logs);
@@ -700,6 +703,7 @@ pub fn run() {
             export::clean_export_hidden_files,
             export::apply_export_renames,
             export::apply_export_copies,
+            export::apply_export_playlists,
             export::scan_recoverable_hindi_orphans,
             export::restore_orphan_tracks_to_source,
             watcher::start_fs_watcher,

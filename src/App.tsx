@@ -482,6 +482,18 @@ function App() {
             📁 Library
           </li>
           <li
+            className={`top-nav-item ${currentView === "downloads" ? "active" : ""}`}
+            onClick={() => setCurrentView("downloads")}
+          >
+            📥 Downloads
+          </li>
+          <li
+            className={`top-nav-item ${currentView === "tools" ? "active" : ""}`}
+            onClick={() => setCurrentView("tools")}
+          >
+            🛠 Tools
+          </li>
+          <li
             className={`top-nav-item ${config ? "" : "disabled"} ${currentView === "playlists" ? "active" : ""}`}
             style={config ? {} : { opacity: 0.4, cursor: "not-allowed" }}
             onClick={() => config && setCurrentView("playlists")}
@@ -497,24 +509,6 @@ function App() {
           >
             📦 Export
           </li>
-          <li
-            className={`top-nav-item ${currentView === "downloads" ? "active" : ""}`}
-            onClick={() => setCurrentView("downloads")}
-          >
-            📥 Downloads
-          </li>
-          <li
-            className={`top-nav-item ${currentView === "tools" ? "active" : ""}`}
-            onClick={() => setCurrentView("tools")}
-          >
-            🛠 Tools
-          </li>
-          <li
-            className={`top-nav-item ${currentView === "settings" ? "active" : ""}`}
-            onClick={() => setCurrentView("settings")}
-          >
-            ⚙️ Settings
-          </li>
         </ul>
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "8px", paddingRight: "20px" }}>
           <button
@@ -524,6 +518,14 @@ function App() {
             title={`Switch to ${theme === 'dark' ? 'Light' : 'Dark'} Mode`}
           >
             <span>{theme === 'dark' ? '☀️ Light' : '🌙 Dark'}</span>
+          </button>
+          <button
+            className={`btn ${currentView === "settings" ? "btn-primary" : "btn-secondary"}`}
+            onClick={() => setCurrentView("settings")}
+            style={{ padding: "6px 12px", fontSize: "0.8rem", display: "flex", alignItems: "center", gap: "6px" }}
+            title="Workspace Settings"
+          >
+            <span>⚙️ Settings</span>
           </button>
         </div>
       </header>

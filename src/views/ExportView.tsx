@@ -7,6 +7,7 @@ import {
   ExportOrphanItem,
   ExportDuplicateOrphanItem,
   ExportPlaylistItem,
+  ExportPlaylistDiffItem,
   ExportDiffReport,
   AudioTrack,
 } from "../types";
@@ -15,7 +16,7 @@ import { useDebounce } from "../hooks/useDebounce";
 import { ConfirmModal } from "../components/common/ConfirmModal";
 import { OrphanRecoveryModal } from "../components/OrphanRecoveryModal";
 
-export type { ExportStatus, ExportTrackItem, ExportOrphanItem, ExportDuplicateOrphanItem, ExportPlaylistItem, ExportDiffReport };
+export type { ExportStatus, ExportTrackItem, ExportOrphanItem, ExportDuplicateOrphanItem, ExportPlaylistItem, ExportPlaylistDiffItem, ExportDiffReport };
 
 type ExportViewProps = {
   configPath: string;
@@ -56,7 +57,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [exportLogs, setExportLogs] = useState<string[]>([]);
   const [showLogsModal, setShowLogsModal] = useState<boolean>(false);
-  const [activeTab, setActiveTab] = useState<"new" | "updated" | "renamed" | "uptodate" | "orphans" | "duplicate_orphans" | "warnings">("new");
+  const [activeTab, setActiveTab] = useState<"new" | "updated" | "renamed" | "uptodate" | "playlists" | "orphans" | "duplicate_orphans" | "warnings">("new");
   const [inspectDiffItem, setInspectDiffItem] = useState<ExportTrackItem | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>("");
   const debouncedSearchQuery = useDebounce(searchQuery, 250);
@@ -75,12 +76,13 @@ export const ExportView: React.FC<ExportViewProps> = ({
   };
 
   const filteredItems = useMemo(() => {
-    if (!diffReport) return { newFiles: [], updatedFiles: [], renamedFiles: [], upToDateFiles: [], orphanFiles: [], duplicateOrphans: [], warningItems: [] };
+    if (!diffReport) return { newFiles: [], updatedFiles: [], renamedFiles: [], upToDateFiles: [], playlistDiffs: [], orphanFiles: [], duplicateOrphans: [], warningItems: [] };
     const q = debouncedSearchQuery.trim().toLowerCase();
     const warnings = diffReport.warnings || [];
     const renamed = diffReport.renamed_files || [];
     const updated = diffReport.updated_files || [];
     const duplicateOrphans = diffReport.duplicate_orphans || [];
+    const playlistDiffs = diffReport.playlist_diffs || [];
     
     if (!q) {
       return {
@@ -88,6 +90,7 @@ export const ExportView: React.FC<ExportViewProps> = ({
         updatedFiles: updated,
         renamedFiles: renamed,
         upToDateFiles: diffReport.up_to_date_files,
+        playlistDiffs,
         orphanFiles: diffReport.orphan_files,
         duplicateOrphans,
         warningItems: warnings,
@@ -106,6 +109,9 @@ export const ExportView: React.FC<ExportViewProps> = ({
       ),
       upToDateFiles: diffReport.up_to_date_files.filter(
         (item) => item.relative_path.toLowerCase().includes(q) || item.dest_relative_path.toLowerCase().includes(q)
+      ),
+      playlistDiffs: playlistDiffs.filter(
+        (item) => item.name.toLowerCase().includes(q) || item.filename.toLowerCase().includes(q) || (item.diff_summary || "").toLowerCase().includes(q)
       ),
       orphanFiles: diffReport.orphan_files.filter(
         (item) => item.relative_path.toLowerCase().includes(q)
@@ -184,6 +190,20 @@ export const ExportView: React.FC<ExportViewProps> = ({
       updatedFiles: sortList(filteredItems.updatedFiles),
       renamedFiles: sortList(filteredItems.renamedFiles),
       upToDateFiles: sortList(filteredItems.upToDateFiles),
+      playlistDiffs: (filteredItems.playlistDiffs || []).slice().sort((a, b) => {
+        if (!sortField) return a.filename.localeCompare(b.filename);
+        if (sortField === "status") {
+          const comp = a.status.localeCompare(b.status);
+          return sortOrder === "asc" ? comp : -comp;
+        } else if (sortField === "source" || sortField === "dest") {
+          const comp = a.filename.localeCompare(b.filename);
+          return sortOrder === "asc" ? comp : -comp;
+        } else if (sortField === "size") {
+          const comp = (a.size_bytes || 0) - (b.size_bytes || 0);
+          return sortOrder === "asc" ? comp : -comp;
+        }
+        return 0;
+      }),
       orphanFiles: sortList(filteredItems.orphanFiles),
       duplicateOrphans: sortList(filteredItems.duplicateOrphans),
       warningItems: filteredItems.warningItems,
@@ -199,22 +219,23 @@ export const ExportView: React.FC<ExportViewProps> = ({
     setLastSelectedIndex(null);
   }, [activeTab]);
 
-  const handleToggleSelectAll = (visibleItems: Array<{ relative_path: string }>) => {
-    const allSelected = visibleItems.length > 0 && visibleItems.every((item) => selectedItemPaths.has(item.relative_path));
+  const handleToggleSelectAll = (visibleItems: Array<{ relative_path?: string; filename?: string }>) => {
+    const keys = visibleItems.map((item) => item.relative_path || item.filename || "").filter(Boolean);
+    const allSelected = keys.length > 0 && keys.every((k) => selectedItemPaths.has(k));
     const next = new Set(selectedItemPaths);
     if (allSelected) {
-      visibleItems.forEach((item) => next.delete(item.relative_path));
+      keys.forEach((k) => next.delete(k));
     } else {
-      visibleItems.forEach((item) => next.add(item.relative_path));
+      keys.forEach((k) => next.add(k));
     }
     setSelectedItemPaths(next);
   };
 
   const handleToggleSelectItem = (
-    relPath: string,
+    key: string,
     currentIndex: number,
     isShiftKey: boolean,
-    visibleItems: Array<{ relative_path: string }>
+    visibleItems: Array<{ relative_path?: string; filename?: string }>
   ) => {
     const next = new Set(selectedItemPaths);
 
@@ -222,15 +243,16 @@ export const ExportView: React.FC<ExportViewProps> = ({
       const start = Math.min(lastSelectedIndex, currentIndex);
       const end = Math.max(lastSelectedIndex, currentIndex);
       for (let i = start; i <= end; i++) {
-        if (visibleItems[i]) {
-          next.add(visibleItems[i].relative_path);
+        const itemKey = visibleItems[i]?.relative_path || visibleItems[i]?.filename;
+        if (itemKey) {
+          next.add(itemKey);
         }
       }
     } else {
-      if (next.has(relPath)) {
-        next.delete(relPath);
+      if (next.has(key)) {
+        next.delete(key);
       } else {
-        next.add(relPath);
+        next.add(key);
       }
     }
 
@@ -247,6 +269,9 @@ export const ExportView: React.FC<ExportViewProps> = ({
     diffReport.up_to_date_files.forEach((f) => map.set(f.relative_path, f.file_path));
     diffReport.orphan_files.forEach((f) => map.set(f.relative_path, f.file_path));
     (diffReport.duplicate_orphans || []).forEach((f) => map.set(f.relative_path, f.file_path));
+    (diffReport.playlist_diffs || []).forEach((p) => {
+      map.set(p.filename, p.dest_path || p.source_path);
+    });
     
     const absPaths: string[] = [];
     selectedItemPaths.forEach((rel) => {
@@ -504,6 +529,171 @@ export const ExportView: React.FC<ExportViewProps> = ({
     });
   };
 
+  const handleApplyPlaylists = (
+    mode: "all" | "new" | "modified" | "selected" | "single",
+    singleItem?: ExportPlaylistDiffItem
+  ) => {
+    const targetDir = exportDir || diffReport?.destination;
+    if (!targetDir || !configPath) {
+      setNotification({ message: "No export destination or config specified.", type: "error" });
+      return;
+    }
+
+    let toProcess: ExportPlaylistDiffItem[] = [];
+    if (mode === "single" && singleItem) {
+      toProcess = [singleItem];
+    } else if (mode === "selected") {
+      toProcess = sortedItems.playlistDiffs.filter(p => selectedItemPaths.has(p.filename) && p.status !== "Orphan");
+    } else if (mode === "new") {
+      toProcess = sortedItems.playlistDiffs.filter(p => p.status === "New");
+    } else if (mode === "modified") {
+      toProcess = sortedItems.playlistDiffs.filter(p => p.status === "Modified");
+    } else {
+      toProcess = sortedItems.playlistDiffs.filter(p => p.status === "New" || p.status === "Modified");
+    }
+
+    if (toProcess.length === 0) {
+      setNotification({
+        message: mode === "selected" ? "No new or modified playlists selected to copy." : "No playlists need copying or updating.",
+        type: "info",
+      });
+      return;
+    }
+
+    const title = mode === "new"
+      ? "⚡ Copy New Playlists"
+      : mode === "modified"
+      ? "⚡ Overwrite Modified Playlists"
+      : mode === "single"
+      ? `⚡ Sync Playlist: ${singleItem?.name}`
+      : "⚡ Sync Playlists to Destination";
+
+    const desc = `Copy/overwrite ${toProcess.length} playlist(s) from target directory to export destination "${targetDir}/playlists"? Track paths will be translated to relative export paths.`;
+
+    setConfirmModal({
+      title,
+      message: desc,
+      confirmText: `Sync ${toProcess.length} Playlist(s)`,
+      confirmVariant: "primary",
+      executingText: `Syncing ${toProcess.length} playlist(s)...`,
+      onConfirm: async () => {
+        setIsApplyingAction(true);
+        try {
+          const count = await invoke<number>("apply_export_playlists", {
+            destination: targetDir,
+            configPath,
+            relativeToConfig,
+            items: toProcess,
+          });
+          setNotification({ message: `Successfully synced ${count} playlist(s) to destination!`, type: "success" });
+          setSelectedItemPaths(new Set());
+          setConfirmModal(null);
+          await handleAnalyzeDiff();
+        } catch (e) {
+          setNotification({ message: "Error syncing playlists: " + e, type: "error" });
+          setConfirmModal(null);
+        } finally {
+          setIsApplyingAction(false);
+        }
+      },
+    });
+  };
+
+  const handleDeleteOrphanPlaylists = (selectedOnly?: boolean, singleItem?: ExportPlaylistDiffItem) => {
+    const targetDir = exportDir || diffReport?.destination;
+    if (!targetDir) {
+      setNotification({ message: "No export destination directory specified.", type: "error" });
+      return;
+    }
+    const toProcess = singleItem
+      ? [singleItem]
+      : selectedOnly
+        ? sortedItems.playlistDiffs.filter(p => selectedItemPaths.has(p.filename) && p.status === "Orphan")
+        : sortedItems.playlistDiffs.filter(p => p.status === "Orphan");
+
+    if (toProcess.length === 0) {
+      setNotification({
+        message: selectedOnly ? "No orphan playlists selected to delete." : "No orphan playlists to delete.",
+        type: "info",
+      });
+      return;
+    }
+
+    setConfirmModal({
+      title: "🗑 Confirm Orphan Playlist Deletion",
+      message: `Permanently delete ${toProcess.length} orphan playlist file(s) from "${targetDir}/playlists"? This action cannot be undone.`,
+      confirmText: `Delete ${toProcess.length} Playlist(s)`,
+      confirmVariant: "danger",
+      executingText: "Deleting orphan playlists...",
+      onConfirm: async () => {
+        setIsApplyingAction(true);
+        try {
+          const filePaths = toProcess.map(p => p.dest_path);
+          const count = await invoke<number>("delete_export_files", { filePaths });
+          setNotification({ message: `Successfully deleted ${count} orphan playlist(s)!`, type: "success" });
+          setSelectedItemPaths(new Set());
+          setConfirmModal(null);
+          await handleAnalyzeDiff();
+        } catch (e) {
+          setNotification({ message: "Error deleting orphan playlists: " + e, type: "error" });
+          setConfirmModal(null);
+        } finally {
+          setIsApplyingAction(false);
+        }
+      },
+    });
+  };
+
+  const handleSyncAllPlaylists = () => {
+    const toSync = sortedItems.playlistDiffs.filter(p => p.status === "New" || p.status === "Modified");
+    const orphans = sortedItems.playlistDiffs.filter(p => p.status === "Orphan");
+    if (toSync.length === 0 && orphans.length === 0) {
+      setNotification({ message: "All playlists are already up-to-date and in sync!", type: "info" });
+      return;
+    }
+
+    setConfirmModal({
+      title: "⚡ Complete Playlist Sync",
+      message: `Sync destination playlists with config target playlists:\n\n• ${toSync.length} playlist(s) to copy or overwrite\n• ${orphans.length} orphan playlist(s) to delete\n\nProceed?`,
+      confirmText: "Sync Everything",
+      confirmVariant: "primary",
+      executingText: "Syncing playlists...",
+      onConfirm: async () => {
+        setIsApplyingAction(true);
+        try {
+          const targetDir = exportDir || diffReport?.destination;
+          let synced = 0;
+          if (toSync.length > 0) {
+            synced = await invoke<number>("apply_export_playlists", {
+              destination: targetDir,
+              configPath,
+              relativeToConfig,
+              items: toSync,
+            });
+          }
+          let deleted = 0;
+          if (orphans.length > 0) {
+            deleted = await invoke<number>("delete_export_files", {
+              filePaths: orphans.map(p => p.dest_path),
+            });
+          }
+          setNotification({
+            message: `Playlists synced! Copied/updated ${synced} playlist(s)${deleted > 0 ? `, deleted ${deleted} orphan(s)` : ""}.`,
+            type: "success",
+          });
+          setSelectedItemPaths(new Set());
+          setConfirmModal(null);
+          await handleAnalyzeDiff();
+        } catch (e) {
+          setNotification({ message: "Error in playlist sync: " + e, type: "error" });
+          setConfirmModal(null);
+        } finally {
+          setIsApplyingAction(false);
+        }
+      },
+    });
+  };
+
   const [isCleaningHidden, setIsCleaningHidden] = useState<boolean>(false);
 
   const handleCleanHiddenFiles = (destPath: string) => {
@@ -705,11 +895,53 @@ export const ExportView: React.FC<ExportViewProps> = ({
 
   return (
     <div className="view-container" style={{ display: "flex", flexDirection: "column", height: "100%", gap: "16px" }}>
-      <div>
-        <h1>Export Playlists & Media</h1>
-        <p className="subtitle" style={{ margin: 0 }}>
-          Smart sync playlists and audio tracks to an external drive or destination folder.
-        </p>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "16px" }}>
+        <div>
+          <h1 style={{ margin: 0 }}>Export Playlists & Media</h1>
+          <p className="subtitle" style={{ margin: "4px 0 0 0" }}>
+            Smart sync playlists and audio tracks to an external drive or destination folder.
+          </p>
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: "20px", flexWrap: "wrap" }}>
+          <label
+            style={{ display: "flex", alignItems: "center", gap: "7px", cursor: "pointer", fontSize: "0.85rem", color: "var(--text-secondary)" }}
+            title="Deduplicate songs across playlists (Rule 1 priority + format quality), export only the superior file, and update all playlists referencing that song to point to the superior file"
+          >
+            <input
+              type="checkbox"
+              checked={skipDuplicates}
+              onChange={(e) => {
+                const next = e.target.checked;
+                setSkipDuplicates(next);
+                if (diffReport && exportDir) {
+                  handleAnalyzeDiff(next);
+                }
+              }}
+              style={{ width: "16px", height: "16px", accentColor: "var(--accent-purple)" }}
+            />
+            <span>Skip duplicates</span>
+          </label>
+
+          <label
+            style={{ display: "flex", alignItems: "center", gap: "7px", cursor: "pointer", fontSize: "0.85rem", color: "var(--text-secondary)" }}
+            title="Remove files in the destination folder that are no longer referenced by any exported playlist"
+          >
+            <input
+              type="checkbox"
+              checked={deleteOrphans}
+              onChange={(e) => setDeleteOrphans(e.target.checked)}
+              style={{ width: "16px", height: "16px", accentColor: "var(--accent-purple)" }}
+            />
+            <span>Delete orphans</span>
+          </label>
+
+          {diffReport && (
+            <span className="text-secondary" style={{ fontSize: "0.8rem", fontFamily: "var(--font-mono)", padding: "4px 10px", backgroundColor: "var(--bg-secondary)", borderRadius: "6px", border: "1px solid var(--border-color)" }}>
+              📁 playlists/ ({diffReport.playlist_diffs ? diffReport.playlist_diffs.length : diffReport.playlists.length} M3U8) | 📁 music/ ({diffReport.new_files.length + diffReport.up_to_date_files.length} tracks)
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Stale Config Warning Banner */}
@@ -759,98 +991,54 @@ export const ExportView: React.FC<ExportViewProps> = ({
 
       {/* Control Header Card */}
       <div className="card" style={{ padding: "14px 16px", margin: 0 }}>
-        <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-          <div style={{ display: "flex", gap: "12px", alignItems: "center" }}>
-            <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "4px" }}>
-              <label className="form-label" style={{ fontSize: "0.85rem" }}>
-                Target Export Destination Folder
-              </label>
-              <div style={{ display: "flex", gap: "8px" }}>
-                <input
-                  type="text"
-                  value={exportDir}
-                  onChange={(e) => {
-                    setExportDir(e.target.value);
-                    setDiffReport(null);
-                  }}
-                  placeholder="Select export target folder (e.g. /Volumes/USB-DRIVE)"
-                  style={{ flex: 1, fontSize: "0.88rem" }}
-                />
-                <button className="btn btn-secondary" onClick={handlePickDestination} style={{ padding: "6px 14px", fontSize: "0.85rem" }}>
-                  📁 Browse
-                </button>
-              </div>
-            </div>
-
-            <div style={{ display: "flex", gap: "8px", alignItems: "flex-end", alignSelf: "flex-end" }}>
-              <button
-                className="btn btn-secondary"
-                onClick={handleAnalyzeDiff}
-                disabled={isAnalyzing || !exportDir}
-                style={{ padding: "8px 16px", fontSize: "0.85rem", display: "flex", alignItems: "center", gap: "6px" }}
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <circle cx="11" cy="11" r="8"></circle>
-                  <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-                </svg>
-                {isAnalyzing ? "Analyzing..." : "Analyze Diff"}
-              </button>
-
-              <button
-                className="btn btn-primary"
-                onClick={handleStartExport}
-                disabled={isExporting || isAnalyzing || !exportDir || !diffReport}
-                style={{ padding: "8px 18px", fontSize: "0.85rem", display: "flex", alignItems: "center", gap: "6px", backgroundColor: "var(--accent-purple)" }}
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="22" y1="2" x2="11" y2="13"></line>
-                  <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-                </svg>
-                {isExporting ? "Exporting..." : "Start Export"}
+        <div style={{ display: "flex", gap: "12px", alignItems: "center" }}>
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "4px" }}>
+            <label className="form-label" style={{ fontSize: "0.85rem" }}>
+              Target Export Destination Folder
+            </label>
+            <div style={{ display: "flex", gap: "8px" }}>
+              <input
+                type="text"
+                value={exportDir}
+                onChange={(e) => {
+                  setExportDir(e.target.value);
+                  setDiffReport(null);
+                }}
+                placeholder="Select export target folder (e.g. /Volumes/USB-DRIVE)"
+                style={{ flex: 1, fontSize: "0.88rem" }}
+              />
+              <button className="btn btn-secondary" onClick={handlePickDestination} style={{ padding: "6px 14px", fontSize: "0.85rem" }}>
+                📁 Browse
               </button>
             </div>
           </div>
 
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid var(--border-color)", paddingTop: "10px" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: "20px" }}>
-              <label
-                style={{ display: "flex", alignItems: "center", gap: "7px", cursor: "pointer", fontSize: "0.85rem", color: "var(--text-secondary)" }}
-                title="Deduplicate songs across playlists (Rule 1 priority + format quality), export only the superior file, and update all playlists referencing that song to point to the superior file"
-              >
-                <input
-                  type="checkbox"
-                  checked={skipDuplicates}
-                  onChange={(e) => {
-                    const next = e.target.checked;
-                    setSkipDuplicates(next);
-                    if (diffReport && exportDir) {
-                      handleAnalyzeDiff(next);
-                    }
-                  }}
-                  style={{ width: "16px", height: "16px", accentColor: "var(--accent-purple)" }}
-                />
-                <span>Skip duplicates</span>
-              </label>
+          <div style={{ display: "flex", gap: "8px", alignItems: "flex-end", alignSelf: "flex-end" }}>
+            <button
+              className="btn btn-secondary"
+              onClick={handleAnalyzeDiff}
+              disabled={isAnalyzing || !exportDir}
+              style={{ padding: "8px 16px", fontSize: "0.85rem", display: "flex", alignItems: "center", gap: "6px" }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="11" cy="11" r="8"></circle>
+                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+              </svg>
+              {isAnalyzing ? "Analyzing..." : "Analyze Diff"}
+            </button>
 
-              <label
-                style={{ display: "flex", alignItems: "center", gap: "7px", cursor: "pointer", fontSize: "0.85rem", color: "var(--text-secondary)" }}
-                title="Remove files in the destination folder that are no longer referenced by any exported playlist"
-              >
-                <input
-                  type="checkbox"
-                  checked={deleteOrphans}
-                  onChange={(e) => setDeleteOrphans(e.target.checked)}
-                  style={{ width: "16px", height: "16px", accentColor: "var(--accent-purple)" }}
-                />
-                <span>Delete orphans</span>
-              </label>
-            </div>
-
-            {diffReport && (
-              <span className="text-secondary" style={{ fontSize: "0.8rem", fontFamily: "var(--font-mono)" }}>
-                📁 playlists/ ({diffReport.playlists.length} M3U) | 📁 music/ ({diffReport.new_files.length + diffReport.up_to_date_files.length} tracks)
-              </span>
-            )}
+            <button
+              className="btn btn-primary"
+              onClick={handleStartExport}
+              disabled={isExporting || isAnalyzing || !exportDir || !diffReport}
+              style={{ padding: "8px 18px", fontSize: "0.85rem", display: "flex", alignItems: "center", gap: "6px", backgroundColor: "var(--accent-purple)" }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="22" y1="2" x2="11" y2="13"></line>
+                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+              </svg>
+              {isExporting ? "Exporting..." : "Start Export"}
+            </button>
           </div>
         </div>
       </div>
@@ -936,23 +1124,19 @@ export const ExportView: React.FC<ExportViewProps> = ({
                 ⚠️ Warnings ({filteredItems.warningItems.length})
               </button>
 
-              <span
+              <button
+                className={`btn ${activeTab === "playlists" ? "btn-primary" : "btn-secondary"}`}
+                onClick={() => setActiveTab("playlists")}
                 style={{
-                  fontSize: "0.78rem",
-                  color: "var(--accent-purple)",
-                  padding: "3px 8px",
-                  backgroundColor: "rgba(168, 85, 247, 0.08)",
-                  borderRadius: "6px",
-                  border: "1px solid rgba(168, 85, 247, 0.2)",
-                  fontWeight: 600,
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: "4px",
+                  padding: "4px 12px",
+                  fontSize: "0.8rem",
+                  borderColor: (filteredItems.playlistDiffs?.filter(p => p.status !== "UpToDate").length || 0) > 0 ? "var(--accent-purple)" : undefined,
+                  color: (filteredItems.playlistDiffs?.filter(p => p.status !== "UpToDate").length || 0) > 0 && activeTab !== "playlists" ? "var(--accent-purple)" : undefined,
+                  fontWeight: (filteredItems.playlistDiffs?.filter(p => p.status !== "UpToDate").length || 0) > 0 ? 600 : undefined,
                 }}
-                title={`${diffReport.playlists.length} M3U8 relative playlists to export`}
               >
-                🎶 {diffReport.playlists.length} M3U8 Playlists
-              </span>
+                🎶 Playlists ({filteredItems.playlistDiffs?.length || 0})
+              </button>
 
               {/* Restore Hindi Year Orphans Button */}
               <button
@@ -1002,6 +1186,54 @@ export const ExportView: React.FC<ExportViewProps> = ({
               {/* Contextual Apply / Action Buttons */}
               {selectedItemPaths.size === 0 && (
                 <>
+                  {activeTab === "playlists" && (
+                    <>
+                      {(sortedItems.playlistDiffs.some(p => p.status === "New" || p.status === "Modified") || sortedItems.playlistDiffs.some(p => p.status === "Orphan")) && (
+                        <button
+                          className="btn btn-secondary"
+                          disabled={isApplyingAction}
+                          onClick={handleSyncAllPlaylists}
+                          style={{ padding: "3px 10px", fontSize: "0.75rem", borderColor: "var(--accent-purple)", color: "var(--accent-purple)", fontWeight: 600, marginLeft: "4px", display: "inline-flex", alignItems: "center", gap: "4px", backgroundColor: "rgba(168, 85, 247, 0.08)" }}
+                          title="Sync all playlists (copy new, overwrite modified, delete orphans)"
+                        >
+                          <span>⚡ Sync All Playlists</span>
+                        </button>
+                      )}
+                      {sortedItems.playlistDiffs.some(p => p.status === "New") && (
+                        <button
+                          className="btn btn-secondary"
+                          disabled={isApplyingAction}
+                          onClick={() => handleApplyPlaylists("new")}
+                          style={{ padding: "3px 10px", fontSize: "0.75rem", borderColor: "var(--success)", color: "var(--success)", fontWeight: 600, marginLeft: "4px", display: "inline-flex", alignItems: "center", gap: "4px" }}
+                          title="Copy all new playlists to destination"
+                        >
+                          <span>⚡ Copy All New ({sortedItems.playlistDiffs.filter(p => p.status === "New").length})</span>
+                        </button>
+                      )}
+                      {sortedItems.playlistDiffs.some(p => p.status === "Modified") && (
+                        <button
+                          className="btn btn-secondary"
+                          disabled={isApplyingAction}
+                          onClick={() => handleApplyPlaylists("modified")}
+                          style={{ padding: "3px 10px", fontSize: "0.75rem", borderColor: "var(--warning)", color: "var(--warning)", fontWeight: 600, marginLeft: "4px", display: "inline-flex", alignItems: "center", gap: "4px" }}
+                          title="Overwrite all modified playlists on destination"
+                        >
+                          <span>⚡ Overwrite All Modified ({sortedItems.playlistDiffs.filter(p => p.status === "Modified").length})</span>
+                        </button>
+                      )}
+                      {sortedItems.playlistDiffs.some(p => p.status === "Orphan") && (
+                        <button
+                          className="btn btn-secondary"
+                          disabled={isApplyingAction}
+                          onClick={() => handleDeleteOrphanPlaylists(false)}
+                          style={{ padding: "3px 10px", fontSize: "0.75rem", borderColor: "var(--danger)", color: "var(--danger)", fontWeight: 600, marginLeft: "4px", display: "inline-flex", alignItems: "center", gap: "4px" }}
+                          title="Delete all orphan playlists from destination"
+                        >
+                          <span>🗑 Delete All Orphans ({sortedItems.playlistDiffs.filter(p => p.status === "Orphan").length})</span>
+                        </button>
+                      )}
+                    </>
+                  )}
                   {activeTab === "new" && filteredItems.newFiles.length > 0 && (
                     <button
                       className="btn btn-secondary"
@@ -1066,6 +1298,34 @@ export const ExportView: React.FC<ExportViewProps> = ({
                   <span style={{ fontWeight: 600, color: "var(--accent-purple)", fontSize: "0.78rem" }}>
                     {selectedItemPaths.size} selected
                   </span>
+
+                  {/* Playlists Selected Actions */}
+                  {activeTab === "playlists" && (
+                    <>
+                      {sortedItems.playlistDiffs.some(p => selectedItemPaths.has(p.filename) && p.status !== "Orphan") && (
+                        <button
+                          className="btn btn-primary"
+                          disabled={isApplyingAction}
+                          onClick={() => handleApplyPlaylists("selected")}
+                          style={{ padding: "3px 10px", fontSize: "0.75rem", backgroundColor: "var(--accent-purple)", borderColor: "var(--accent-purple)", color: "#fff", fontWeight: 600, display: "flex", alignItems: "center", gap: "4px" }}
+                          title={`Copy or overwrite selected playlist(s) to destination USB`}
+                        >
+                          <span>⚡ Apply / Sync ({sortedItems.playlistDiffs.filter(p => selectedItemPaths.has(p.filename) && p.status !== "Orphan").length})</span>
+                        </button>
+                      )}
+                      {sortedItems.playlistDiffs.some(p => selectedItemPaths.has(p.filename) && p.status === "Orphan") && (
+                        <button
+                          className="btn btn-danger"
+                          disabled={isApplyingAction}
+                          onClick={() => handleDeleteOrphanPlaylists(true)}
+                          style={{ padding: "3px 10px", fontSize: "0.75rem", fontWeight: 600, display: "flex", alignItems: "center", gap: "4px" }}
+                          title={`Delete selected orphan playlist(s) from destination USB`}
+                        >
+                          <span>🗑 Delete Selected ({sortedItems.playlistDiffs.filter(p => selectedItemPaths.has(p.filename) && p.status === "Orphan").length})</span>
+                        </button>
+                      )}
+                    </>
+                  )}
 
                   {/* Primary Tab Apply Button for Selection */}
                   {activeTab === "new" && (
@@ -1682,6 +1942,205 @@ export const ExportView: React.FC<ExportViewProps> = ({
               ) : (
                 <div className="no-data">
                   {searchQuery ? "No matching files found." : "No up-to-date files found. Run export to populate destination."}
+                </div>
+              )
+            )}
+
+            {activeTab === "playlists" && (
+              sortedItems.playlistDiffs.length > 0 ? (
+                <>
+                  <table style={{ tableLayout: "fixed", width: "100%" }}>
+                    <thead>
+                      <tr>
+                        <th style={{ width: "36px", textAlign: "center" }}>
+                          <input
+                            type="checkbox"
+                            checked={
+                              sortedItems.playlistDiffs.length > 0 &&
+                              sortedItems.playlistDiffs.every((item) => selectedItemPaths.has(item.filename))
+                            }
+                            onChange={() => handleToggleSelectAll(sortedItems.playlistDiffs)}
+                            style={{ cursor: "pointer" }}
+                          />
+                        </th>
+                        <th
+                          style={{ width: "110px", cursor: "pointer", userSelect: "none" }}
+                          onClick={() => handleToggleSort("status")}
+                          title="Click to sort by Status"
+                        >
+                          <div style={{ display: "inline-flex", alignItems: "center" }}>
+                            <span>Status</span>
+                            {renderSortIndicator("status")}
+                          </div>
+                        </th>
+                        <th
+                          style={{ width: "30%", cursor: "pointer", userSelect: "none" }}
+                          onClick={() => handleToggleSort("source")}
+                          title="Click to sort by Playlist Name"
+                        >
+                          <div style={{ display: "inline-flex", alignItems: "center" }}>
+                            <span>Playlist Filename</span>
+                            {renderSortIndicator("source")}
+                          </div>
+                        </th>
+                        <th style={{ width: "105px", textAlign: "center" }}>
+                          <span>Source Tracks</span>
+                        </th>
+                        <th style={{ width: "105px", textAlign: "center" }}>
+                          <span>Dest Tracks</span>
+                        </th>
+                        <th style={{ width: "24%" }}>
+                          <span>Diff Summary</span>
+                        </th>
+                        <th
+                          style={{ width: "80px", textAlign: "right", cursor: "pointer", userSelect: "none" }}
+                          onClick={() => handleToggleSort("size")}
+                          title="Click to sort by File Size"
+                        >
+                          <div style={{ display: "inline-flex", alignItems: "center", justifyContent: "flex-end" }}>
+                            <span>Size</span>
+                            {renderSortIndicator("size")}
+                          </div>
+                        </th>
+                        <th style={{ width: "95px", textAlign: "center" }}>
+                          <span>Action</span>
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sortedItems.playlistDiffs.slice(0, visibleLimit).map((item, idx) => {
+                        const isSelected = selectedItemPaths.has(item.filename);
+                        return (
+                          <tr
+                            key={idx}
+                            className={isSelected ? "selected" : undefined}
+                            data-selected={isSelected}
+                            title={item.source_path || item.dest_path}
+                            onClick={(e) => handleToggleSelectItem(item.filename, idx, e.shiftKey, sortedItems.playlistDiffs)}
+                            style={{ cursor: "pointer", userSelect: "none" }}
+                          >
+                            <td style={{ textAlign: "center" }} onClick={(e) => e.stopPropagation()}>
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={(e) => handleToggleSelectItem(item.filename, idx, (e.nativeEvent as MouseEvent).shiftKey, sortedItems.playlistDiffs)}
+                                style={{ cursor: "pointer" }}
+                              />
+                            </td>
+                            <td>
+                              {item.status === "New" && (
+                                <span className="badge" style={{ backgroundColor: "rgba(34, 197, 94, 0.15)", color: "var(--success)", border: "1px solid var(--success)", padding: "2px 6px", borderRadius: "4px", fontSize: "0.72rem", fontWeight: 600 }}>
+                                  🟢 NEW
+                                </span>
+                              )}
+                              {item.status === "Modified" && (
+                                <span className="badge" style={{ backgroundColor: "rgba(245, 158, 11, 0.15)", color: "var(--warning)", border: "1px solid var(--warning)", padding: "2px 6px", borderRadius: "4px", fontSize: "0.72rem", fontWeight: 600 }}>
+                                  🟠 MODIFIED
+                                </span>
+                              )}
+                              {item.status === "UpToDate" && (
+                                <span className="badge" style={{ backgroundColor: "var(--bg-tertiary)", color: "var(--text-muted)", border: "1px solid var(--border-color)", padding: "2px 6px", borderRadius: "4px", fontSize: "0.72rem" }}>
+                                  ⚪ IN SYNC
+                                </span>
+                              )}
+                              {item.status === "Orphan" && (
+                                <span className="badge" style={{ backgroundColor: "rgba(239, 68, 68, 0.15)", color: "var(--danger)", border: "1px solid var(--danger)", padding: "2px 6px", borderRadius: "4px", fontSize: "0.72rem", fontWeight: 600 }}>
+                                  🔴 ORPHAN
+                                </span>
+                              )}
+                            </td>
+                            <td style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              <div style={{ fontWeight: 600, fontSize: "0.85rem", color: item.status === "Orphan" ? "var(--danger)" : "var(--text-primary)" }}>
+                                {item.filename}
+                              </div>
+                              <div className="text-secondary" style={{ fontSize: "0.72rem", fontFamily: "var(--font-mono)", opacity: 0.8 }}>
+                                {item.name}
+                              </div>
+                            </td>
+                            <td style={{ textAlign: "center", fontFamily: "var(--font-mono)", fontSize: "0.82rem" }}>
+                              {item.status === "Orphan" ? (
+                                <span style={{ opacity: 0.4 }}>—</span>
+                              ) : (
+                                <span style={{ color: "var(--accent-purple)", fontWeight: 600 }}>{item.track_count_source}</span>
+                              )}
+                            </td>
+                            <td style={{ textAlign: "center", fontFamily: "var(--font-mono)", fontSize: "0.82rem" }}>
+                              {item.status === "New" ? (
+                                <span style={{ opacity: 0.4 }}>—</span>
+                              ) : (
+                                <span style={{ color: item.status === "Orphan" ? "var(--danger)" : "var(--text-secondary)", fontWeight: 600 }}>{item.track_count_dest}</span>
+                              )}
+                            </td>
+                            <td style={{ fontSize: "0.8rem", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              <span style={{
+                                color: item.status === "New"
+                                  ? "var(--success)"
+                                  : item.status === "Modified"
+                                  ? "var(--warning)"
+                                  : item.status === "Orphan"
+                                  ? "var(--danger)"
+                                  : "var(--text-secondary)"
+                              }}>
+                                {item.diff_summary}
+                              </span>
+                            </td>
+                            <td style={{ fontFamily: "var(--font-mono)", textAlign: "right", fontSize: "0.78rem" }}>
+                              {formatSize(item.size_bytes)}
+                            </td>
+                            <td style={{ textAlign: "center" }} onClick={(e) => e.stopPropagation()}>
+                              {item.status === "New" && (
+                                <button
+                                  className="btn btn-primary"
+                                  disabled={isApplyingAction}
+                                  onClick={() => handleApplyPlaylists("single", item)}
+                                  style={{ padding: "2px 8px", fontSize: "0.72rem", display: "inline-flex", alignItems: "center", gap: "3px", backgroundColor: "var(--success)", borderColor: "var(--success)", color: "#000", fontWeight: 600 }}
+                                  title="Copy this playlist to USB"
+                                >
+                                  ⚡ Copy
+                                </button>
+                              )}
+                              {item.status === "Modified" && (
+                                <button
+                                  className="btn btn-primary"
+                                  disabled={isApplyingAction}
+                                  onClick={() => handleApplyPlaylists("single", item)}
+                                  style={{ padding: "2px 8px", fontSize: "0.72rem", display: "inline-flex", alignItems: "center", gap: "3px", backgroundColor: "var(--warning)", borderColor: "var(--warning)", color: "#000", fontWeight: 600 }}
+                                  title="Overwrite this playlist on USB with latest order and tracks"
+                                >
+                                  ⚡ Overwrite
+                                </button>
+                              )}
+                              {item.status === "Orphan" && (
+                                <button
+                                  className="btn btn-secondary"
+                                  disabled={isApplyingAction}
+                                  onClick={() => handleDeleteOrphanPlaylists(false, item)}
+                                  style={{ padding: "2px 8px", fontSize: "0.72rem", color: "var(--danger)", borderColor: "var(--danger)", fontWeight: 600 }}
+                                  title="Delete this orphan playlist from USB destination"
+                                >
+                                  🗑 Delete
+                                </button>
+                              )}
+                              {item.status === "UpToDate" && (
+                                <span className="text-secondary" style={{ fontSize: "0.75rem" }}>
+                                  ✓ In Sync
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                  {sortedItems.playlistDiffs.length > visibleLimit && (
+                    <div className="text-secondary" style={{ textAlign: "center", padding: "8px", fontSize: "0.75rem", fontFamily: "var(--font-mono)" }}>
+                      Showing {visibleLimit} of {sortedItems.playlistDiffs.length} playlists (Scroll down to load more)
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="no-data">
+                  {searchQuery ? "No matching playlists found." : "No playlists found in config target directory."}
                 </div>
               )
             )}

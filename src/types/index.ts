@@ -74,7 +74,7 @@ export interface MainConfig {
   playlists: PlaylistConfig[];
 }
 
-export type ExportStatus = "New" | "Modified" | "UpToDate" | "Renamed";
+export type ExportStatus = "New" | "Modified" | "UpToDate" | "Renamed" | "Orphan";
 
 export interface TrackDiffField {
   field: string;
@@ -123,6 +123,18 @@ export interface ExportPlaylistItem {
   track_count: number;
 }
 
+export interface ExportPlaylistDiffItem {
+  name: string;
+  filename: string;
+  source_path: string;
+  dest_path: string;
+  track_count_source: number;
+  track_count_dest: number;
+  status: ExportStatus;
+  diff_summary?: string | null;
+  size_bytes: number;
+}
+
 export interface ExportWarningItem {
   scope: "directory" | "track_group" | "system";
   target_path: string;
@@ -149,6 +161,7 @@ export interface ExportDiffReport {
   orphan_files: ExportOrphanItem[];
   duplicate_orphans?: ExportDuplicateOrphanItem[];
   playlists: ExportPlaylistItem[];
+  playlist_diffs?: ExportPlaylistDiffItem[];
   warnings?: ExportWarningItem[];
   total_bytes_to_copy: number;
   total_bytes_updated: number;
