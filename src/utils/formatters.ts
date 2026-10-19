@@ -20,14 +20,33 @@ export const formatSpeed = (bytesPerSec: number): string => {
   return parseFloat((bytesPerSec / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
 };
 
-export const formatEta = (seconds: number): string => {
-  if (seconds <= 0 || !isFinite(seconds)) return "0s";
-  if (seconds < 60) return `${Math.round(seconds)}s`;
+export const formatEta = (
+  seconds: number | null | undefined,
+  options?: { verbose?: boolean }
+): string => {
+  if (seconds === null || seconds === undefined || isNaN(seconds) || seconds < 0) {
+    return options?.verbose ? "Estimating ETA..." : "0s";
+  }
+  if (seconds === 0) return options?.verbose ? "Complete" : "0s";
+  if (options?.verbose && seconds < 1) return "Almost done (< 1s)";
+  if (options?.verbose && seconds < 5) return "< 5s remaining";
+  if (seconds < 60) {
+    const s = Math.round(seconds);
+    return options?.verbose ? `~${s}s remaining` : `${s}s`;
+  }
   const m = Math.floor(seconds / 60);
   const s = Math.round(seconds % 60);
-  if (m < 60) return `${m}m ${s}s`;
+  if (m < 60) {
+    if (options?.verbose) {
+      return s > 0 ? `~${m}m ${s}s remaining` : `~${m}m remaining`;
+    }
+    return `${m}m ${s}s`;
+  }
   const h = Math.floor(m / 60);
   const remM = m % 60;
+  if (options?.verbose) {
+    return remM > 0 ? `~${h}h ${remM}m remaining` : `~${h}h remaining`;
+  }
   return `${h}h ${remM}m`;
 };
 

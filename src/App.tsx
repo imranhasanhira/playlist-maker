@@ -9,6 +9,7 @@ import { ExportView } from "./views/ExportView";
 import { DownloadsView } from "./views/DownloadsView";
 import { MainConfig, ExportDiffReport, BgTask } from "./types";
 import { ProgressBar } from "./components/common/ProgressBar";
+import { WorkspaceConfigWizard } from "./components/common/WorkspaceConfigWizard";
 import "./App.css";
 
 export type { MainConfig };
@@ -214,11 +215,6 @@ function App() {
 
   // Modal / Onboarding Wizard State (when config is null)
   const [wizardMode, setWizardMode] = useState<"load" | "create" | null>(null);
-  const [newConfigPath, setNewConfigPath] = useState<string>("");
-  const [newRelativeToConfig, setNewRelativeToConfig] = useState<boolean>(true);
-  const [newSourceDir, setNewSourceDir] = useState<string>("");
-  const [newTargetDir, setNewTargetDir] = useState<string>("");
-  const [isCreating, setIsCreating] = useState<boolean>(false);
 
   const addBackgroundTask = (id: string, name: string, taskPromise: Promise<any>) => {
     cancelledTaskIdsRef.current.delete(id);
@@ -387,80 +383,6 @@ function App() {
       }
     } catch (e) {
       alert("Error selecting config: " + e);
-    }
-  };
-
-  const selectNewConfigSavePath = async () => {
-    try {
-      const selected = await invoke<string | null>("save_file_dialog", {
-        title: "Create New Configuration YAML",
-        filterName: "YAML Configurations",
-        filterExt: "yaml,yml",
-      });
-      if (selected) {
-        setNewConfigPath(selected);
-      }
-    } catch (e) {
-      alert("Error selecting save path: " + e);
-    }
-  };
-
-  const selectNewSourceDir = async () => {
-    try {
-      const selected = await invoke<string | null>("select_directory", {
-        title: "Select Music Source Folder",
-      });
-      if (selected) {
-        setNewSourceDir(selected);
-      }
-    } catch (e) {
-      alert("Error selecting folder: " + e);
-    }
-  };
-
-  const selectNewTargetDir = async () => {
-    try {
-      const selected = await invoke<string | null>("select_directory", {
-        title: "Select Playlists Output Folder",
-      });
-      if (selected) {
-        setNewTargetDir(selected);
-      }
-    } catch (e) {
-      alert("Error selecting folder: " + e);
-    }
-  };
-
-  const handleCreateNewConfigSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newConfigPath || !newSourceDir || !newTargetDir) {
-      alert("Please configure save path and both directory paths.");
-      return;
-    }
-
-    setIsCreating(true);
-    try {
-      const newConfig: MainConfig = {
-        sourceDir: newSourceDir,
-        targetDir: newTargetDir,
-        relativeToConfig: newRelativeToConfig,
-        playlists: [],
-      };
-
-      await invoke("save_workspace", {
-        configPath: newConfigPath,
-        config: newConfig,
-      });
-
-      setConfigPath(newConfigPath);
-      setConfig(newConfig);
-      localStorage.setItem("lastConfigPath", newConfigPath);
-      alert("New workspace created successfully!");
-      setCurrentView("playlists");
-    } catch (e) {
-      alert("Error creating configuration: " + e);
-    } finally {
-      setIsCreating(false);
     }
   };
 
@@ -786,86 +708,19 @@ function App() {
                 </div>
               </div>
             ) : (
-              <div className="card" style={{ maxWidth: "560px", width: "90%", padding: "32px" }}>
-                <div className="card-title" style={{ borderBottom: "1px solid var(--border-color)", paddingBottom: "12px", marginBottom: "20px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span>Create Workspace Config</span>
-                  <button className="btn btn-secondary" onClick={() => setWizardMode(null)} style={{ padding: "4px 12px", fontSize: "0.8rem" }}>
-                    Back
-                  </button>
-                </div>
-
-                <form onSubmit={handleCreateNewConfigSubmit} style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-                  <div className="form-group">
-                    <label className="form-label">Save Config File As</label>
-                    <div className="form-row">
-                      <input
-                        type="text"
-                        readOnly
-                        value={newConfigPath}
-                        placeholder="Select folder and set config name..."
-                        required
-                      />
-                      <button className="btn btn-secondary" type="button" onClick={selectNewConfigSavePath}>
-                        Browse...
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="form-group" style={{ display: "flex", alignItems: "center", gap: "10px", backgroundColor: "var(--bg-tertiary)", padding: "12px", borderRadius: "8px", border: "1px solid var(--border-color)" }}>
-                    <input
-                      type="checkbox"
-                      id="onboarding-relative-toggle"
-                      checked={newRelativeToConfig}
-                      onChange={(e) => setNewRelativeToConfig(e.target.checked)}
-                      style={{ width: "auto", cursor: "pointer" }}
-                    />
-                    <label htmlFor="onboarding-relative-toggle" style={{ fontWeight: 600, cursor: "pointer", fontSize: "0.9rem", color: "var(--text-primary)" }}>
-                      Use relative paths for directories (relativeToConfig)
-                    </label>
-                  </div>
-
-                  <div className="form-group">
-                    <label className="form-label">Music Source Folder (sourceDir)</label>
-                    <div className="form-row">
-                      <input
-                        type="text"
-                        readOnly
-                        value={newSourceDir}
-                        placeholder="Choose where your tracks reside..."
-                        required
-                      />
-                      <button className="btn btn-secondary" type="button" onClick={selectNewSourceDir}>
-                        Browse...
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="form-group">
-                    <label className="form-label">Playlists Output Folder (targetDir)</label>
-                    <div className="form-row">
-                      <input
-                        type="text"
-                        readOnly
-                        value={newTargetDir}
-                        placeholder="Choose where playlists will be saved..."
-                        required
-                      />
-                      <button className="btn btn-secondary" type="button" onClick={selectNewTargetDir}>
-                        Browse...
-                      </button>
-                    </div>
-                  </div>
-
-                  <button
-                    className="btn btn-primary"
-                    type="submit"
-                    disabled={isCreating}
-                    style={{ padding: "12px", fontSize: "1rem", marginTop: "12px" }}
-                  >
-                    {isCreating ? "Initializing Workspace..." : "🚀 Create Config & Start"}
-                  </button>
-                </form>
-              </div>
+              <WorkspaceConfigWizard
+                isCardWrapper
+                submitButtonText="🚀 Create Config & Start"
+                onSuccess={(savedPath, newConfig) => {
+                  setConfigPath(savedPath);
+                  setConfig(newConfig);
+                  localStorage.setItem("lastConfigPath", savedPath);
+                  alert("New workspace created successfully!");
+                  setCurrentView("playlists");
+                  setWizardMode(null);
+                }}
+                onCancel={() => setWizardMode(null)}
+              />
             )}
           </div>
         )}

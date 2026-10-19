@@ -10,6 +10,7 @@ use lofty::prelude::*;
 use lofty::probe::Probe;
 
 use crate::playlist::{self, TrackPreview};
+use crate::utils::is_os_system_junk;
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum ExportStatus {
@@ -631,13 +632,6 @@ pub async fn analyze_export_diff(
         }
     }
 
-fn is_os_system_junk(filename: &str) -> bool {
-    filename.starts_with('.')
-        || filename.starts_with("._")
-        || filename.eq_ignore_ascii_case("thumbs.db")
-        || filename.eq_ignore_ascii_case("desktop.ini")
-}
-
     // Scan destination for orphans and candidate renamed files
     let mut candidate_dest_orphans: Vec<(std::path::PathBuf, String, u64)> = Vec::new();
     let mut orphan_files: Vec<ExportOrphanItem> = Vec::new();
@@ -647,7 +641,7 @@ fn is_os_system_junk(filename: &str) -> bool {
         for entry in WalkDir::new(&dest_music_dir).into_iter().filter_map(|e| e.ok()) {
             if entry.file_type().is_file() {
                 if let Some(file_name) = entry.path().file_name().and_then(|n| n.to_str()) {
-                    if is_os_system_junk(file_name) {
+                    if crate::utils::is_os_system_junk(file_name) {
                         continue;
                     }
                 }

@@ -8,6 +8,7 @@ use tauri::{AppHandle, Emitter};
 pub struct WatcherState {
     pub watcher: Mutex<Option<RecommendedWatcher>>,
     pub active_path: Mutex<Option<String>>,
+    pub debouncer_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl Default for WatcherState {
@@ -15,6 +16,7 @@ impl Default for WatcherState {
         Self {
             watcher: Mutex::new(None),
             active_path: Mutex::new(None),
+            debouncer_handle: Mutex::new(None),
         }
     }
 }
@@ -36,10 +38,14 @@ pub async fn start_fs_watcher(
         return Err(format!("Path does not exist: {}", path));
     }
 
-    // Stop existing watcher
+    // Stop existing watcher and previous debouncer task
     {
         let mut watcher_guard = state.watcher.lock().map_err(|e| e.to_string())?;
         *watcher_guard = None;
+        let mut handle_guard = state.debouncer_handle.lock().map_err(|e| e.to_string())?;
+        if let Some(handle) = handle_guard.take() {
+            handle.abort();
+        }
         let mut path_guard = state.active_path.lock().map_err(|e| e.to_string())?;
         *path_guard = Some(path.clone());
     }
@@ -57,7 +63,7 @@ pub async fn start_fs_watcher(
     let debouncer_app = app_handle.clone();
     let debouncer_path = path_clone.clone();
 
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -122,6 +128,8 @@ pub async fn start_fs_watcher(
     {
         let mut watcher_guard = state.watcher.lock().map_err(|e| e.to_string())?;
         *watcher_guard = Some(watcher);
+        let mut handle_guard = state.debouncer_handle.lock().map_err(|e| e.to_string())?;
+        *handle_guard = Some(handle);
     }
 
     println!("[FS Watcher] Started watching '{}' with 3s debounce.", path);
@@ -134,6 +142,10 @@ pub async fn stop_fs_watcher(
 ) -> Result<(), String> {
     let mut watcher_guard = state.watcher.lock().map_err(|e| e.to_string())?;
     *watcher_guard = None;
+    let mut handle_guard = state.debouncer_handle.lock().map_err(|e| e.to_string())?;
+    if let Some(handle) = handle_guard.take() {
+        handle.abort();
+    }
     let mut path_guard = state.active_path.lock().map_err(|e| e.to_string())?;
     *path_guard = None;
     println!("[FS Watcher] Watcher stopped.");

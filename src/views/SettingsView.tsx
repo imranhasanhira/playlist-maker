@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { MainConfig, SystemBinariesStatus } from "../types";
+import { WorkspaceConfigWizard } from "../components/common/WorkspaceConfigWizard";
 
 type SettingsViewProps = {
   configPath: string;
@@ -30,13 +31,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       .then(setBinaries)
       .catch((e) => console.error("Error checking system binaries:", e));
   }, []);
-
-  // New config creation states
-  const [newConfigPath, setNewConfigPath] = useState<string>("");
-  const [newRelativeToConfig, setNewRelativeToConfig] = useState<boolean>(true);
-  const [newSourceDir, setNewSourceDir] = useState<string>("");
-  const [newTargetDir, setNewTargetDir] = useState<string>("");
-  const [isCreating, setIsCreating] = useState<boolean>(false);
 
   const selectSourceDir = async () => {
     try {
@@ -120,79 +114,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
   };
 
-  const selectNewConfigSavePath = async () => {
-    try {
-      const selected = await invoke<string | null>("save_file_dialog", {
-        title: "Create New Configuration YAML",
-        filterName: "YAML Configurations",
-        filterExt: "yaml,yml",
-      });
-      if (selected) {
-        setNewConfigPath(selected);
-      }
-    } catch (e) {
-      alert("Error selecting save path: " + e);
-    }
-  };
-
-  const selectNewSourceDir = async () => {
-    try {
-      const selected = await invoke<string | null>("select_directory", {
-        title: "Select Music Source Folder",
-      });
-      if (selected) {
-        setNewSourceDir(selected);
-      }
-    } catch (e) {
-      alert("Error selecting folder: " + e);
-    }
-  };
-
-  const selectNewTargetDir = async () => {
-    try {
-      const selected = await invoke<string | null>("select_directory", {
-        title: "Select Playlists Output Folder",
-      });
-      if (selected) {
-        setNewTargetDir(selected);
-      }
-    } catch (e) {
-      alert("Error selecting folder: " + e);
-    }
-  };
-
-  const handleCreateNewConfigSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newConfigPath || !newSourceDir || !newTargetDir) {
-      alert("Please configure save path and both directory paths.");
-      return;
-    }
-
-    setIsCreating(true);
-    try {
-      const newConfig: MainConfig = {
-        sourceDir: newSourceDir,
-        targetDir: newTargetDir,
-        relativeToConfig: newRelativeToConfig,
-        playlists: [],
-      };
-
-      await invoke("save_workspace", {
-        configPath: newConfigPath,
-        config: newConfig,
-      });
-
-      setConfigPath(newConfigPath);
-      setConfig(newConfig);
-      alert("New workspace created successfully!");
-      setWizardMode("edit");
-    } catch (e) {
-      alert("Error creating configuration: " + e);
-    } finally {
-      setIsCreating(false);
-    }
-  };
-
   return (
     <div className="view-container">
       <h1>Settings</h1>
@@ -236,81 +157,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </div>
           </div>
         ) : (
-          <form onSubmit={handleCreateNewConfigSubmit} style={{ display: "flex", flexDirection: "column", gap: "16px", marginTop: "8px" }}>
-            <div className="form-group">
-              <label className="form-label">Save Config File As</label>
-              <div className="form-row">
-                <input
-                  type="text"
-                  readOnly
-                  value={newConfigPath}
-                  placeholder="Select folder and set config name..."
-                  required
-                />
-                <button className="btn btn-secondary" type="button" onClick={selectNewConfigSavePath}>
-                  Choose Location...
-                </button>
-              </div>
-            </div>
-
-            <div className="form-group" style={{ display: "flex", alignItems: "center", gap: "10px", backgroundColor: "var(--bg-tertiary)", padding: "12px", borderRadius: "8px", border: "1px solid var(--border-color)" }}>
-              <input
-                type="checkbox"
-                id="settings-relative-toggle"
-                checked={newRelativeToConfig}
-                onChange={(e) => setNewRelativeToConfig(e.target.checked)}
-                style={{ width: "auto", cursor: "pointer" }}
-              />
-              <label htmlFor="settings-relative-toggle" style={{ fontWeight: 600, cursor: "pointer", fontSize: "0.9rem", color: "var(--text-primary)" }}>
-                Use relative paths for directories (relativeToConfig)
-              </label>
-            </div>
-
-            <div className="form-group">
-              <label className="form-label">Music Source Folder (sourceDir)</label>
-              <div className="form-row">
-                <input
-                  type="text"
-                  readOnly
-                  value={newSourceDir}
-                  placeholder="Choose where your tracks reside..."
-                  required
-                />
-                <button className="btn btn-secondary" type="button" onClick={selectNewSourceDir}>
-                  Browse...
-                </button>
-              </div>
-            </div>
-
-            <div className="form-group">
-              <label className="form-label">Playlists Output Folder (targetDir)</label>
-              <div className="form-row">
-                <input
-                  type="text"
-                  readOnly
-                  value={newTargetDir}
-                  placeholder="Choose where playlists will be saved..."
-                  required
-                />
-                <button className="btn btn-secondary" type="button" onClick={selectNewTargetDir}>
-                  Browse...
-                </button>
-              </div>
-            </div>
-
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: "12px" }}>
-              <button className="btn btn-secondary" type="button" onClick={() => setWizardMode("edit")}>
-                Cancel
-              </button>
-              <button
-                className="btn btn-primary"
-                type="submit"
-                disabled={isCreating}
-              >
-                {isCreating ? "Creating..." : "🚀 Create Configuration"}
-              </button>
-            </div>
-          </form>
+          <WorkspaceConfigWizard
+            onSuccess={(savedPath, newConfig) => {
+              setConfigPath(savedPath);
+              setConfig(newConfig);
+              alert("New workspace created successfully!");
+              setWizardMode("edit");
+            }}
+            onCancel={() => setWizardMode("edit")}
+          />
         )}
       </div>
 

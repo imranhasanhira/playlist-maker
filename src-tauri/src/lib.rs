@@ -11,6 +11,7 @@ mod downloader;
 mod font_issues;
 mod download_store;
 mod dedup;
+pub mod file_repair;
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -359,12 +360,6 @@ async fn scan_all_unified(app: tauri::AppHandle, taskId: String, folder: String,
 }
 
 #[tauri::command]
-async fn cancel_sanitizer_scan(taskId: Option<String>) -> Result<(), String> {
-    sanitizer::cancel_task(taskId.as_deref());
-    Ok(())
-}
-
-#[tauri::command]
 async fn cancel_any_task(taskId: String) -> Result<(), String> {
     sanitizer::cancel_task(Some(&taskId));
     if taskId == "flac_transcode" || taskId.starts_with("transcode") {
@@ -693,7 +688,6 @@ pub fn run() {
             scan_metadata_sanitizer,
             execute_metadata_sanitizer,
             scan_all_unified,
-            cancel_sanitizer_scan,
             cancel_any_task,
             export::analyze_export_diff,
             export::execute_export,
@@ -711,7 +705,6 @@ pub fn run() {
             downloader::start_download_job,
             downloader::cancel_download_job,
             downloader::reset_archive_file,
-            downloader::reset_playlist_archive_ids,
             downloader::dl_fetch_playlist_metadata,
             downloader::dl_count_songs_on_disk,
             downloader::dl_rename_entry_folder,
@@ -721,9 +714,6 @@ pub fn run() {
             downloader::scan_mp3s_for_m4a_upgrade,
             downloader::execute_mp3_to_m4a_upgrade,
             downloader::cancel_mp3_to_m4a_upgrade,
-            downloader::scan_files_for_repair,
-            downloader::execute_file_repair,
-            downloader::cancel_file_repair,
             download_store::dl_store_get_all_entries,
             download_store::dl_store_save_entry,
             download_store::dl_store_delete_entry,
