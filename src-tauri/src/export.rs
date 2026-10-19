@@ -101,6 +101,53 @@ pub struct ExportDiffReport {
     pub total_bytes_duplicate_orphans: u64,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RecoverableOrphanChoice {
+    pub file_path: String,
+    pub relative_path: String,
+    pub filename: String,
+    pub format: String,
+    pub size_bytes: u64,
+    pub duration_secs: u32,
+    pub is_m4a: bool,
+    pub quality_rank: u8,
+    pub match_reason: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RecoverableOrphanGroup {
+    pub id: String,
+    pub target_relative_path: String,
+    pub target_source_path: String,
+    pub year: String,
+    pub song_name: String,
+    pub choices: Vec<RecoverableOrphanChoice>,
+    pub selected_choice_index: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RecoverableOrphansReport {
+    pub groups: Vec<RecoverableOrphanGroup>,
+    pub total_missing_songs: usize,
+    pub total_candidate_files: usize,
+    pub total_bytes: u64,
+    pub source_base_dir: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct OrphanRestoreItem {
+    pub source_pendrive_path: String,
+    pub target_source_path: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct OrphanRestoreResult {
+    pub restored_count: usize,
+    pub failed_count: usize,
+    pub restored_bytes: u64,
+    pub errors: Vec<String>,
+}
+
 use crate::utils::{canonical_path_str, get_file_mtime_and_size};
 
 fn sanitize_playlist_filename(name: &str) -> String {
@@ -904,6 +951,285 @@ pub async fn apply_export_copies(
     .map_err(|e| format!("Thread execution error: {}", e))?
 }
 
+#[tauri::command]
+pub async fn scan_recoverable_hindi_orphans(
+    config_path: String,
+    destination: String,
+    relative_to_config: bool,
+) -> Result<RecoverableOrphansReport, String> {
+    tokio::task::spawn_blocking(move || {
+        let config_file_path = Path::new(&config_path);
+        if !config_file_path.exists() {
+            return Err(format!("Configuration file not found: {}", config_path));
+        }
+
+        let config = playlist::read_config_file(config_file_path)?;
+        let resolved_source_dir = playlist::find_right_dir(
+            None,
+            config.source_dir.clone(),
+            relative_to_config,
+            config_file_path,
+        );
+
+        let dest_path = Path::new(&destination);
+        let dest_music_dir = dest_path.join("music");
+        if !dest_music_dir.exists() {
+            return Ok(RecoverableOrphansReport {
+                groups: Vec::new(),
+                total_missing_songs: 0,
+                total_candidate_files: 0,
+                total_bytes: 0,
+                source_base_dir: resolved_source_dir.to_string_lossy().to_string(),
+            });
+        }
+
+        let hindi_year_re = regex::Regex::new(r"(?i)(?:^|[/\\])(?:music[/\\])?(.*?[/\\])?Hindi[/\\]years?[/\\](\d{4})[/\\]([^/\\]+)$").unwrap();
+
+        struct CandidateFile {
+            full_path: std::path::PathBuf,
+            rel_path: String,
+            prefix: String,
+            year: String,
+            filename: String,
+            stem: String,
+            ext: String,
+            size: u64,
+        }
+
+        let mut candidate_files: Vec<CandidateFile> = Vec::new();
+
+        for entry in WalkDir::new(&dest_music_dir).into_iter().filter_map(|e| e.ok()) {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+
+            let full_p = entry.path().to_path_buf();
+            let rel_p = match full_p.strip_prefix(dest_path) {
+                Ok(r) => r.to_string_lossy().replace('\\', "/"),
+                Err(_) => continue,
+            };
+
+            if let Some(caps) = hindi_year_re.captures(&rel_p) {
+                let prefix = caps.get(1).map(|m| m.as_str().replace('\\', "/")).unwrap_or_default();
+                let year = caps.get(2).map(|m| m.as_str().to_string()).unwrap_or_default();
+                let filename = caps.get(3).map(|m| m.as_str().to_string()).unwrap_or_default();
+
+                let p = Path::new(&filename);
+                let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+
+                if !year.is_empty() && !stem.is_empty() && size > 1024 {
+                    candidate_files.push(CandidateFile {
+                        full_path: full_p,
+                        rel_path: rel_p,
+                        prefix,
+                        year,
+                        filename,
+                        stem,
+                        ext,
+                        size,
+                    });
+                }
+            }
+        }
+
+        let mut source_stems_by_year: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut groups_map: HashMap<String, RecoverableOrphanGroup> = HashMap::new();
+
+        for cand in candidate_files {
+            let mut target_source_folder = resolved_source_dir.join(format!("{}Hindi/year/{}", cand.prefix, cand.year));
+            if !target_source_folder.exists() {
+                let alt_folder = resolved_source_dir.join(format!("Hindi/year/{}", cand.year));
+                if alt_folder.exists() {
+                    target_source_folder = alt_folder;
+                } else {
+                    let alt_folder_capital = resolved_source_dir.join(format!("Hindi/Year/{}", cand.year));
+                    if alt_folder_capital.exists() {
+                        target_source_folder = alt_folder_capital;
+                    }
+                }
+            }
+
+            let year_key = format!("{}_{}", cand.prefix, cand.year);
+            let existing_stems = source_stems_by_year.entry(year_key.clone()).or_insert_with(|| {
+                let mut set = HashSet::new();
+                if target_source_folder.exists() {
+                    if let Ok(entries) = fs::read_dir(&target_source_folder) {
+                        for e in entries.flatten() {
+                            if let Ok(ft) = e.file_type() {
+                                if ft.is_file() {
+                                    if let Some(s) = e.path().file_stem().and_then(|s| s.to_str()) {
+                                        set.insert(s.to_lowercase());
+                                        let norm = crate::dedup::normalize_song_text(s);
+                                        if !norm.is_empty() {
+                                            set.insert(norm);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                set
+            });
+
+            let cand_stem_lower = cand.stem.to_lowercase();
+            let cand_stem_norm = crate::dedup::normalize_song_text(&cand.stem);
+
+            if existing_stems.contains(&cand_stem_lower) || (!cand_stem_norm.is_empty() && existing_stems.contains(&cand_stem_norm)) {
+                continue;
+            }
+
+            let norm_key = if !cand_stem_norm.is_empty() {
+                cand_stem_norm.clone()
+            } else {
+                cand_stem_lower.clone()
+            };
+            let group_id = format!("{}_{}_{}", cand.prefix, cand.year, norm_key);
+
+            let (mtime, _) = get_file_mtime_and_size(&cand.full_path).unwrap_or((0, cand.size));
+            let fp = crate::dedup::get_or_compute_fingerprint(&cand.full_path, mtime, cand.size, false);
+
+            let is_m4a = cand.ext == "m4a" || cand.ext == "aac";
+            let quality_rank = match cand.ext.as_str() {
+                "m4a" | "aac" => 1,
+                "flac" | "alac" | "wav" => 2,
+                "mp3" => 3,
+                _ => 4,
+            };
+
+            let choice = RecoverableOrphanChoice {
+                file_path: cand.full_path.to_string_lossy().to_string(),
+                relative_path: cand.rel_path,
+                filename: cand.filename.clone(),
+                format: cand.ext.to_uppercase(),
+                size_bytes: cand.size,
+                duration_secs: fp.duration_secs,
+                is_m4a,
+                quality_rank,
+                match_reason: if is_m4a { "M4A Format (Preferred)".to_string() } else { format!("{} Format", cand.ext.to_uppercase()) },
+            };
+
+            let group = groups_map.entry(group_id.clone()).or_insert_with(|| {
+                let target_ext = if is_m4a { "m4a" } else { &cand.ext };
+                let target_filename = format!("{}.{}", cand.stem, target_ext);
+                let target_source_path = target_source_folder.join(&target_filename).to_string_lossy().to_string();
+                let target_rel = format!("{}Hindi/year/{}/{}", cand.prefix, cand.year, target_filename);
+
+                RecoverableOrphanGroup {
+                    id: group_id,
+                    target_relative_path: target_rel,
+                    target_source_path,
+                    year: cand.year.clone(),
+                    song_name: cand.stem.clone(),
+                    choices: Vec::new(),
+                    selected_choice_index: 0,
+                }
+            });
+
+            group.choices.push(choice);
+        }
+
+        let mut final_groups: Vec<RecoverableOrphanGroup> = Vec::new();
+        let mut total_candidate_files = 0;
+        let mut total_bytes = 0;
+
+        for (_, mut group) in groups_map {
+            group.choices.sort_by(|a, b| {
+                a.quality_rank.cmp(&b.quality_rank)
+                    .then_with(|| b.size_bytes.cmp(&a.size_bytes))
+            });
+
+            if let Some(best) = group.choices.first() {
+                if best.is_m4a {
+                    let p = Path::new(&group.target_source_path);
+                    group.target_source_path = p.with_extension("m4a").to_string_lossy().to_string();
+
+                    let rel_p = Path::new(&group.target_relative_path);
+                    group.target_relative_path = rel_p.with_extension("m4a").to_string_lossy().to_string();
+                }
+            }
+
+            group.selected_choice_index = 0;
+            total_candidate_files += group.choices.len();
+            total_bytes += group.choices.first().map(|c| c.size_bytes).unwrap_or(0);
+            final_groups.push(group);
+        }
+
+        final_groups.sort_by(|a, b| {
+            a.year.cmp(&b.year)
+                .then_with(|| a.song_name.to_lowercase().cmp(&b.song_name.to_lowercase()))
+        });
+
+        let total_missing_songs = final_groups.len();
+
+        Ok(RecoverableOrphansReport {
+            groups: final_groups,
+            total_missing_songs,
+            total_candidate_files,
+            total_bytes,
+            source_base_dir: resolved_source_dir.to_string_lossy().to_string(),
+        })
+    })
+    .await
+    .map_err(|e| format!("Execution error scanning orphans: {}", e))?
+}
+
+#[tauri::command]
+pub async fn restore_orphan_tracks_to_source(
+    transfers: Vec<OrphanRestoreItem>,
+) -> Result<OrphanRestoreResult, String> {
+    tokio::task::spawn_blocking(move || {
+        let mut restored_count = 0;
+        let mut failed_count = 0;
+        let mut restored_bytes = 0u64;
+        let mut errors = Vec::new();
+
+        for item in transfers {
+            let src = Path::new(&item.source_pendrive_path);
+            let dst = Path::new(&item.target_source_path);
+
+            if !src.exists() || !src.is_file() {
+                failed_count += 1;
+                errors.push(format!("Pendrive source file does not exist: {}", item.source_pendrive_path));
+                continue;
+            }
+
+            if let Some(parent) = dst.parent() {
+                if !parent.exists() {
+                    if let Err(e) = fs::create_dir_all(parent) {
+                        failed_count += 1;
+                        errors.push(format!("Failed to create destination folder {}: {}", parent.display(), e));
+                        continue;
+                    }
+                }
+            }
+
+            let file_size = src.metadata().map(|m| m.len()).unwrap_or(0);
+            match fs::copy(src, dst) {
+                Ok(_) => {
+                    restored_count += 1;
+                    restored_bytes += file_size;
+                }
+                Err(e) => {
+                    failed_count += 1;
+                    errors.push(format!("Failed to copy {} to {}: {}", src.display(), dst.display(), e));
+                }
+            }
+        }
+
+        Ok(OrphanRestoreResult {
+            restored_count,
+            failed_count,
+            restored_bytes,
+            errors,
+        })
+    })
+    .await
+    .map_err(|e| format!("Thread execution error restoring tracks: {}", e))?
+}
+
 pub static EXPORT_CANCELLED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Serialize)]
@@ -1257,6 +1583,71 @@ mod tests {
 
         let match_edge = crate::dedup::check_pair_duplicate(&rec_lib, &rec_orphan, 60);
         assert!(match_edge.is_some(), "Expected duplicate match between Polli Geeti variants");
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_hindi_year_orphan_recovery() {
+        let temp_dir = std::env::temp_dir().join("playlist_maker_test_hindi_recovery");
+        let _ = fs::remove_dir_all(&temp_dir);
+        let src_dir = temp_dir.join("source");
+        let dest_dir = temp_dir.join("pendrive");
+
+        let src_year_dir = src_dir.join("Hindi").join("year").join("1995");
+        let _ = fs::create_dir_all(&src_year_dir);
+
+        // Track already existing in source (should NOT be detected as recoverable)
+        let existing_src = src_year_dir.join("Existing Song.mp3");
+        fs::write(&existing_src, vec![0x11u8; 2048]).unwrap();
+
+        // Pendrive has music/Hindi/year/1995
+        let dest_music_dir = dest_dir.join("music").join("Hindi").join("year").join("1995");
+        let _ = fs::create_dir_all(&dest_music_dir);
+
+        // Same song on pendrive (already in source)
+        fs::write(dest_music_dir.join("Existing Song.mp3"), vec![0x11u8; 2048]).unwrap();
+
+        // Deleted song on pendrive (missing in source)
+        let deleted_on_pendrive = dest_music_dir.join("Deleted Classic.m4a");
+        fs::write(&deleted_on_pendrive, vec![0x22u8; 4096]).unwrap();
+
+        // Config file
+        let config_path = temp_dir.join("config.json");
+        let config_content = serde_json::json!({
+            "sourceDir": src_dir.to_str().unwrap(),
+            "targetDir": dest_dir.to_str().unwrap(),
+            "formats": ["mp3", "m4a"],
+            "playlists": []
+        });
+        fs::write(&config_path, config_content.to_string()).unwrap();
+
+        let report = scan_recoverable_hindi_orphans(
+            config_path.to_str().unwrap().to_string(),
+            dest_dir.to_str().unwrap().to_string(),
+            false,
+        ).await.unwrap();
+
+        assert_eq!(report.total_missing_songs, 1);
+        assert_eq!(report.groups.len(), 1);
+        let group = &report.groups[0];
+        assert_eq!(group.year, "1995");
+        assert_eq!(group.song_name, "Deleted Classic");
+        assert_eq!(group.choices.len(), 1);
+        assert!(group.choices[0].is_m4a);
+
+        // Now test restore
+        let item = OrphanRestoreItem {
+            source_pendrive_path: group.choices[0].file_path.clone(),
+            target_source_path: group.target_source_path.clone(),
+        };
+        let restore_res = restore_orphan_tracks_to_source(vec![item]).await.unwrap();
+        assert_eq!(restore_res.restored_count, 1);
+        assert_eq!(restore_res.failed_count, 0);
+
+        let restored_file = Path::new(&group.target_source_path);
+        assert!(restored_file.exists());
+        assert_eq!(fs::read(restored_file).unwrap(), vec![0x22u8; 4096]);
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
